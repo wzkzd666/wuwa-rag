@@ -1,0 +1,83 @@
+[project]
+name = "wuwa-rag"
+version = "0.1.0"
+description = "鸣潮(Wuthering Waves) 角色知识助手 - LangGraph + 混合检索 RAG"
+readme = "README.md"
+authors = [
+    { name = "wangzhikan", email = "3144007643@qq.com" }
+]
+requires-python = ">=3.13,<3.14"
+
+dependencies = [
+    # ================= Web / API =================
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "orjson>=3.10",
+    # ================= 存储（PG 为唯一真源） =================
+    "psycopg[binary,pool]>=3.2",            # 同步：DDL / ETL / 写入
+    "sqlalchemy>=2.0",                      # PostgresSaver / 后续 ORM
+    "neo4j>=5.28",                          # 角色属性 + 组队关系
+    "redis>=5.2",                           # 缓存 + Celery broker
+    "boto3>=1.35",                          # S3 协议访问 RustFS
+    # ================= LLM / Agent =================
+    "langchain>=0.3",
+    "langchain-community>=0.3",
+    "langchain-ollama>=0.2",                # qwen3-vl:8b：生成 + 立绘视觉
+    "langchain-openai>=0.2",                # ChatOpenAI：vLLM / Ollama /v1 / 云端（内含 openai SDK）
+    "langgraph>=0.2",
+    "langgraph-checkpoint-postgres>=2.0",   # PostgresSaver 多轮记忆
+    "jinja2>=3.1",                          # ChatPromptTemplate
+    # ================= 检索 =================
+    "chromadb>=0.6",                        # 稠密向量（原生客户端，RRF 自己控）
+    "sentence-transformers>=3.3",           # bge-m3 + bge-reranker-v2-m3（CPU）
+    "jieba>=0.42",                          # 中文分词 -> BM25
+    "rank-bm25>=0.2",                       # 应用层 BM25（稀疏路）
+    # ================= 任务队列（Step10 才用，可先注释） =================
+    "celery>=5.4",
+    # ================= 工具 =================
+    "python-dotenv>=1.0",
+    "httpx>=0.28",
+    "loguru>=0.7",
+    "tenacity>=9.0",                        # 重试 / 熔断
+    "markdownify>=0.14",                    # 采集侧 HTML -> Markdown
+    "beautifulsoup4>=4.12",
+    "langchain-text-splitters>=1.1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "ipykernel>=6.29",
+]
+
+[project.scripts]
+wuwa-chunk = "wuwa_rag.ingest.chunker:main"
+wuwa-ingest = "wuwa_rag.ingest.pipeline:main"
+wuwa-index = "wuwa_rag.retrieval.build_index:main"
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wuwa_rag"]

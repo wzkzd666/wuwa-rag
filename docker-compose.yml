@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16      # 自带 pgvector，零成本预留迁移后路
+    container_name: wuwa-pg
+    environment:
+      POSTGRES_DB: wuwa
+      POSTGRES_USER: wuwa
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wuwa -d wuwa"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5.26
+    container_name: wuwa-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_server_memory_heap_max__size: 1G      # 限内存，机器资源紧张
+      NEO4J_server_memory_pagecache_size: 512M
+    ports: ["7687:7687", "7474:7474"]
+    volumes: ["neo4jdata:/data"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: wuwa-redis
+    command: ["redis-server", "--appendonly", "yes"]   # AOF 持久化
+    ports: ["6379:6379"]
+    volumes: ["redisdata:/data"]
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: wuwa-rustfs
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
+    ports: ["9000:9000", "9001:9001"]   # 9000=S3 API, 9001=控制台
+    volumes: ["rustfsdata:/data"]
+
+volumes:
+  pgdata:
+  neo4jdata:
+  redisdata:
+  rustfsdata:
