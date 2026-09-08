@@ -9,4 +9,8 @@ wheels/
 # Virtual environments
 .venv
 
+# work file
 .env
+data
+logs
+scripts
