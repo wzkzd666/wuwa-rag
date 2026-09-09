@@ -18,11 +18,13 @@ from functools import lru_cache
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 
 from ..config import get_settings, ensure_dirs
+from ..ww_logger import get_logger
+
 
 HEADERS_TO_SPLIT_ON = [("#", "H1"), ("##", "H2"), ("###", "H3"), ("####", "H4")]
 TABLE_RE = re.compile(r"^\s*\|")
 s=get_settings()
-
+upload_logger=get_logger('upload')
 
 @dataclass
 class Chunk:
@@ -232,8 +234,8 @@ def main() -> None:
             for c in chunks:
                 f.write(json.dumps(asdict(c), ensure_ascii=False) + "\n")
             total += len(chunks)
-            print(f"{md_file.stem}: {len(chunks)} 块")
-    print(f"总计 {total} 块 -> {out}")
+            upload_logger.info(f"{md_file.stem}: 共计{len(chunks)} 块")
+    upload_logger.info(f"总计 {total} 块 -> {out}")
 
 
 if __name__ == "__main__":

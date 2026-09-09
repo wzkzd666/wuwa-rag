@@ -13,7 +13,9 @@ from pathlib import Path
 from ..db import close_pool, get_cursor
 from ..storage import s3
 from ..config import get_settings, ensure_dirs
+from ..ww_logger import get_logger
 
+upload_logger=get_logger('upload')
 
 def _load_chunks(path: Path) -> dict[str, list[dict]]:
     """按角色分组读回分块结果。"""
@@ -77,8 +79,8 @@ async def _main() -> None:
     for md_path in sorted(s.RAW_DIR.glob("*.md")):
         doc_id, n = await ingest_one(md_path, by_char.get(md_path.stem, []))
         total += n
-        print(f"{md_path.stem}: document_id={doc_id}, {n} 块")
-    print(f"总计写入 {total} 块")
+        upload_logger.info(f"{md_path.stem}: document_id={doc_id}, {n} 块")
+    upload_logger.info(f"pg总计写入 {total} 块")
     await close_pool()
 
 
