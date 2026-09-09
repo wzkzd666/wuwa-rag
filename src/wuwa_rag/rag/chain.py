@@ -11,15 +11,16 @@ from ..graph.neo4j_client import get_session
 from ..ww_logger import get_logger
 from .intent import classify, detect_slots, extract_characters, detect_element, detect_stage
 from .llm import get_chat_llm
-from .retrievers import graph_search, vector_search
+from .tools import graph_search_tool, vector_search_tool
 from .state import RagState
+from ..text import chunk_text
 
 setting = get_settings()
 log = get_logger("rag")
 
 _SYSTEM = """你是《鸣潮》角色养成助手。只依据给定资料回答，不要编造。
 资料里没有的内容，直接说"资料里没有提到"。
-
+资料里列了几条就答几条，不要自行补充「没有提到其他/更多」这类说明。
 术语对照（资料用词和用户提问可能不同，按下表对应理解）：
 - 声骸 = 角色装备，资料里也写作「套装」；COST 是声骸的费用点数组合
 - 共鸣链 = 相当于命座，序号 1~6 对应一链到六链
@@ -42,8 +43,8 @@ async def intent_node(state: RagState) -> dict:
     element = detect_element(q)
     stage = detect_stage(q)
     intent = classify(q, slots)
-    log.info("意图=%s 槽位=%s 角色=%s 属性=%s", intent, slots, chars or "未识别", element or "-")
-    return {"intent": intent, "slots": slots, "characters": chars, "element": element}
+    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s", intent, slots, chars or "未识别", element or "-", stage or "")
+    return {"intent": intent, "slots": slots, "characters": chars, "element": element, "stage": stage}
 
 
 def _route(state: RagState) -> str:
@@ -52,12 +53,12 @@ def _route(state: RagState) -> str:
 
 
 async def graph_node(state: RagState) -> dict:
-    facts = await graph_search(
-        state.get("characters", []), 
-        state.get("slots", []),
-        state.get("element",""),
-        state.get("stage","")
-    )
+    facts = await graph_search_tool.ainvoke({
+        "characters" : state.get("characters", []), 
+        "slots" : state.get("slots", []),
+        "element" : state.get("element",""),
+        "stage" : state.get("stage","")
+    })
     return {"graph_facts": facts}
 
 
@@ -68,11 +69,13 @@ def _after_graph(state: RagState) -> str:
 
 async def vector_node(state: RagState) -> dict:
     q = state["question"]
-    docs = await asyncio.to_thread(vector_search, q)
+    docs = await vector_search_tool.ainvoke({"query": q, "topk": setting.TOPK_RERANK})
 
     # 多角色：为每个角色各补一轮召回，避免只召回到其中一个
     for c in (state.get("characters") or [])[1:]:
-        docs += await asyncio.to_thread(vector_search, f"{c} {q}")
+        docs += await vector_search_tool.ainvoke({
+            "query": f"{c} {q}", "topk": setting.TOPK_RERANK/len(state.get("characters",[1]))
+        })
 
     seen: set[str] = set()
     merged: list[dict] = []
@@ -80,7 +83,7 @@ async def vector_node(state: RagState) -> dict:
         if d["chunk_id"] not in seen:
             seen.add(d["chunk_id"])
             merged.append(d)
-    return {"docs": merged[:setting.TOPK_RERANK*2]}
+    return {"docs": merged}
 
 
 async def generate_node(state: RagState) -> dict:
@@ -90,7 +93,7 @@ async def generate_node(state: RagState) -> dict:
     docs = state.get("docs") or []
     if docs:
         parts.append("## 参考文档\n" + "\n\n".join(
-            f"[{i + 1}] {d.get('breadcrumb', '')}\n{d.get('text', '')}"
+            f"[{i + 1}] {chunk_text(d)}"
             for i, d in enumerate(docs)
         ))
     context = "\n\n".join(parts) or "（没有检索到任何资料）"

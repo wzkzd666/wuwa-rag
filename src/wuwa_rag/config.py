@@ -82,6 +82,13 @@ class Settings(BaseSettings):
     # ---------- HF本地目录 ----------
     HF_HOME: str = "D:/hf_cache/huggingface"
 
+    # ---------- 重排 ----------
+    RERANK_MAX_LENGTH: int = 512     
+    RERANK_BATCH_SIZE: int = 8       # 实测 bs=8 比 bs=32 快 35%
+    RERANK_THREADS: int = 8          # 实测 8 线程最快，16 反而慢（线程抢资源）
+    RERANK_MIN_SCORE: float = 0.1    # logit，超低分=明显不相关，直接丢
+    TOPK_RERANK_IN: int = 20         # 送进 reranker 的候选数（不是全部 30 条）
+
     @property
     def PG_DSN(self) -> str:
         return (
