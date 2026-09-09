@@ -19,6 +19,7 @@
         "healthcheck",
         "hnsw",
         "httpx",
+        "huggingface",
         "ipykernel",
         "isready",
         "jdata",

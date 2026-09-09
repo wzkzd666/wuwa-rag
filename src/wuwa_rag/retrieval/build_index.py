@@ -14,9 +14,17 @@ from ..db import close_pool, get_cursor
 from .bm25 import BM25Index, add_terms, tokenize
 from .embeddings import BgeM3Embeddings
 from ..ww_logger import get_logger
+from ..text import embed_input        
+
 
 bm25_logger=get_logger('bm25')
 vec_logger=get_logger('vec')
+
+
+def _embed_input(r: dict) -> str:
+    """breadcrumb 补语义——(必须去重)"""
+    return embed_input(r["breadcrumb"], r["text"])
+
 
 async def _load_chunks() -> list[dict]:
     async with get_cursor(commit=False) as cur:
@@ -41,11 +49,6 @@ def _terms_of(rows: list[dict]) -> list[str]:
             if v:
                 s.add(v)
     return sorted(s)
-
-
-def _embed_input(r: dict) -> str:
-    """breadcrumb 拼进正文：补正文语义。"""
-    return f"{r['breadcrumb']}\n{r['text']}"
 
 
 def build_sparse(rows: list[dict]) -> None:

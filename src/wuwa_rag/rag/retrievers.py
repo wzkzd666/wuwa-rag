@@ -128,7 +128,7 @@ def vector_search(question: str, topk: int | None = None) -> list[dict]:
     )["ids"][0]
     sparse = [h.chunk_id for h in _bm25().search(question, s.TOPK_SPARSE)]
 
-    fused = _rrf([dense, sparse])[: s.TOPK_RERANK * 2]
+    fused = _rrf([dense, sparse])[: s.TOPK_RERANK_IN]
     if not fused:
         return []
 
