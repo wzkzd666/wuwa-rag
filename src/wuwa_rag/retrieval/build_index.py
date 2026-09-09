@@ -13,10 +13,10 @@ from ..config import ensure_dirs, get_settings
 from ..db import close_pool, get_cursor
 from .bm25 import BM25Index, add_terms, tokenize
 from .embeddings import BgeM3Embeddings
+from ..ww_logger import get_logger
 
-COLLECTION = "wuwa_chunks"
-BATCH = 64
-
+bm25_logger=get_logger('bm25')
+vec_logger=get_logger('vec')
 
 async def _load_chunks() -> list[dict]:
     async with get_cursor(commit=False) as cur:
@@ -56,7 +56,7 @@ def build_sparse(rows: list[dict]) -> None:
         [tokenize(_embed_input(r)) for r in rows],
         terms=terms,
     )
-    print(f"BM25  : {len(rows)} 条 / 术语 {len(terms)} 个 -> {idx.save()}")
+    bm25_logger.info(f"BM25  : {len(rows)} 条 / 术语 {len(terms)} 个 -> {idx.save()}")
 
 
 def build_dense(rows: list[dict]) -> None:
@@ -66,12 +66,12 @@ def build_dense(rows: list[dict]) -> None:
         settings=Settings(anonymized_telemetry=False),
     )
     col = client.get_or_create_collection(
-        name=COLLECTION, metadata={"hnsw:space": "cosine"}
+        name=s.CHUNK_COLLECTION, metadata={"hnsw:space": "cosine"}
     )
 
     emb = BgeM3Embeddings()
-    for i in range(0, len(rows), BATCH):
-        batch = rows[i : i + BATCH]
+    for i in range(0, len(rows), s.EMBED_BATCH_SIZE):
+        batch = rows[i : i + s.EMBED_BATCH_SIZE]
         col.upsert(
             ids=[r["chunk_id"] for r in batch],
             documents=[_embed_input(r) for r in batch],
@@ -88,14 +88,14 @@ def build_dense(rows: list[dict]) -> None:
                 for r in batch
             ],
         )
-        print(f"  dense {min(i + BATCH, len(rows))}/{len(rows)}")
-    print(f"Chroma: 共 {col.count()} 条")
+        vec_logger.info(f"  dense {min(i + s.EMBED_BATCH_SIZE, len(rows))}/{len(rows)}")
+    vec_logger.info(f"Chroma: 共 {col.count()} 条")
 
 
 async def _main() -> None:
     ensure_dirs()
     rows = await _load_chunks()
-    print(f"从 PG 读到 {len(rows)} 块")
+    vec_logger.info(f"从 PG 读到 {len(rows)} 块")
     build_sparse(rows)     # 先稀疏：秒级，先验证通不通
     build_dense(rows)      # 后稠密：慢，放最后
     await close_pool()

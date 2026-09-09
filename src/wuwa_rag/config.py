@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     # ---------- 检索模型（走 CPU，GPU 被 VLM 占满） ----------
     EMBED_MODEL: str = "BAAI/bge-m3"
     EMBED_DEVICE: str = "cpu"
-    EMBED_BATCH_SIZE: int = 16
+    EMBED_BATCH_SIZE: int = 64
     EMBED_MAX_SEQ_LENGTH: int = 512   # bge-m3 默认 8192，CPU 上必须压到 512
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
     RERANK_DEVICE: str = "cpu"
@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     MAX_CHARS: int = 500
     OVERLAP_LINES: int = 2      # 强制切分时，下一片重复上一片末尾几行
 
+    # ---------- chromadb名称 ----------
+    CHUNK_COLLECTION: str = "wuwa_chunks"
+
+    # ---------- HF本地目录 ----------
+    HF_HOME: str = "D:/hf_cache/huggingface"
 
     @property
     def PG_DSN(self) -> str:

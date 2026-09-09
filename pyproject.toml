@@ -58,6 +58,7 @@ dev = [
 wuwa-chunk = "wuwa_rag.ingest.chunker:main"
 wuwa-ingest = "wuwa_rag.ingest.pipeline:main"
 wuwa-index = "wuwa_rag.retrieval.build_index:main"
+wuwa-graph = "wuwa_rag.graph.build_graph:main"
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]

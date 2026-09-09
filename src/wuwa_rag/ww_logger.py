@@ -56,7 +56,7 @@ def _setup_logging() -> None:
     upload_logger = logging.getLogger("upload")
     upload_logger.addHandler(upload_handler)
     upload_logger.setLevel(logging.INFO)
-    upload_logger.propagate = False  # 不往 root 再传一份（避免重复写 app.log）
+    upload_logger.propagate = False  
 
     # RAG 检索相关
     rag_handler = _make_handler("rag.log")
@@ -92,6 +92,13 @@ def _setup_logging() -> None:
     vec_logger.addHandler(vec_handler)
     vec_logger.setLevel(logging.INFO)
     vec_logger.propagate = False
+
+    # BM25相关
+    bm25_handler = _make_handler("bm25.log")
+    bm25_logger = logging.getLogger("bm25")
+    bm25_logger.addHandler(bm25_handler)
+    bm25_logger.setLevel(logging.INFO)
+    bm25_logger.propagate = False
 
     # ── 第三方库降噪 ────────────────────────
     logging.getLogger("httpx").setLevel(logging.WARNING)
