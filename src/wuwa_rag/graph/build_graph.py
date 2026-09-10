@@ -71,7 +71,7 @@ MERGE (c)-[rel:HAS_BUILD {stage: r.stage}]->(e)
 SET rel.cost = r.cost, rel.pieces = r.pieces
 """
 
-# 队友：一个队友可能出现在多支队伍里，teams 去重累加
+# 队友：一个队友可能出现在多支队伍里，teams 去重累加；effect 有值才覆盖（避免空串抹掉）
 _C_TEAM = """
 UNWIND $rows AS r
 MATCH (c:Character {name: r.character})
@@ -79,7 +79,10 @@ MERGE (t:Character {name: r.name})
 MERGE (c)-[rel:SYNERGIZES_WITH]->(t)
 SET rel.teams = CASE
   WHEN r.team IN coalesce(rel.teams, []) THEN rel.teams
-  ELSE coalesce(rel.teams, []) + r.team END
+  ELSE coalesce(rel.teams, []) + r.team END,
+  rel.effect = CASE
+  WHEN r.effect <> '' THEN r.effect
+  ELSE coalesce(rel.effect, '') END
 """
 
 

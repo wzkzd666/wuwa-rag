@@ -15,3 +15,4 @@ class RagState(TypedDict, total=False):
     answer: str
     element: str
     stage: str
+    history: list[dict]

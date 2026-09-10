@@ -13,7 +13,10 @@ from .intent import classify, detect_slots, extract_characters, detect_element, 
 from .llm import get_chat_llm
 from .tools import graph_search_tool, vector_search_tool
 from .state import RagState
+from .memory import get_checkpointer
 from ..text import chunk_text
+from .characters import resolve_candidates
+from ..worker import build_pipeline, CharacterNotFound
 
 setting = get_settings()
 log = get_logger("rag")
@@ -39,11 +42,11 @@ async def _known_characters() -> list[str]:
 async def intent_node(state: RagState) -> dict:
     q = state["question"]
     slots = detect_slots(q)
-    chars = extract_characters(q, await _known_characters())
-    element = detect_element(q)
+    chars = extract_characters(q, await _known_characters()) or state.get("characters", [])
+    element = detect_element(q) or state.get("element", "")
     stage = detect_stage(q)
     intent = classify(q, slots)
-    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s", intent, slots, chars or "未识别", element or "-", stage or "")
+    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s", intent, slots, chars or "未识别", element or "-", stage or "-")
     return {"intent": intent, "slots": slots, "characters": chars, "element": element, "stage": stage}
 
 
@@ -88,6 +91,13 @@ async def vector_node(state: RagState) -> dict:
 
 async def generate_node(state: RagState) -> dict:
     parts: list[str] = []
+    # 拼接历史对话
+    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS*2:]
+    if history:
+        parts.append("## 对话历史\n"+"\n".join(
+            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content']}" for m in history
+        ))
+    
     if state.get("graph_facts"):
         parts.append("## 图谱事实\n" + state["graph_facts"])
     docs = state.get("docs") or []
@@ -105,7 +115,12 @@ async def generate_node(state: RagState) -> dict:
     except Exception as exc:                      
         log.error("LLM 调用失败: %s", exc)
         answer = "抱歉，模型服务暂时不可用，请稍后再试。"
-    return {"context": context, "answer": answer}
+    # 回写历史
+    new_history = history +[
+        {"role": "user", "content": state["question"]},
+        {"role": "assistant", "content": answer}
+    ]
+    return {"context": context, "answer": answer, "history": new_history[-setting.MAX_HISTORY_TURNS*2:]}
 
 
 def build_graph() -> StateGraph:
@@ -130,15 +145,70 @@ def build_graph() -> StateGraph:
 _compiled = None
 
 
-def get_chain():
+async def get_chain():
     global _compiled
     if _compiled is None:
-        _compiled = build_graph().compile()
+        cp = await get_checkpointer()
+        _compiled = build_graph().compile(checkpointer=cp)
     return _compiled
 
 
-async def ask(question: str) -> dict:
-    return await get_chain().ainvoke({"question": question})
+async def _crawl_and_wait(names: list[str], timeout: int = 180) -> bool:
+    """对给定角色触发全流水线并阻塞等待；任一角色抓不到(CharacterNotFound)返回 False。
+    用 asyncio.to_thread 跑阻塞的 result.get，避免卡住 FastAPI 事件循环。
+    """
+    from celery.exceptions import TimeoutError as CeleryTimeout
+    results = []
+    for n in names:
+        r = build_pipeline(n).apply_async()
+        results.append(r)
+        log.info("自动爬取: 已入队 chain_id=%s 角色=%s", r.id, n)
+    try:
+        for r in results:
+            await asyncio.to_thread(r.get, timeout=timeout)
+        return True
+    except CharacterNotFound:
+        return False
+    except CeleryTimeout:
+        log.warning("自动爬取: 等待超时(%ss)，视为抓取失败", timeout)
+        return False
+
+
+async def ensure_characters(question: str) -> tuple[list[str], bool, list[str]]:
+    """返回 (候选角色名, 是否可答, 本次实际新爬的角色名)。"""
+    candidates = await resolve_candidates(question)
+    if not candidates:
+        log.info("自动爬取: 未识别到角色，走普通问答")
+        return [], True, []
+    known = set(await _known_characters())
+    to_crawl = [c for c in candidates if c not in known]
+    if not to_crawl:
+        log.info("自动爬取: 角色已在知识库 %s，无需爬取", candidates)
+        return candidates, True, []
+    log.info("自动爬取: 库外角色 %s -> 触发流水线(爬→分块→入库→索引→图谱)", to_crawl)
+    ok = await _crawl_and_wait(to_crawl)
+    if ok:
+        log.info("自动爬取: %s 建库完成，继续回答", to_crawl)
+    else:
+        log.warning("自动爬取: %s 抓取失败/不存在，将回「不知道」", to_crawl)
+    return candidates, ok, to_crawl
+
+
+async def ask(question: str, thread_id: str = "default") -> dict:
+    candidates, ok, crawled = await ensure_characters(question)
+    if candidates and not ok:
+        log.info("自动爬取: 最终回「不知道」(角色=%s)", candidates)
+        return {
+            "answer": "不知道（知识库里没有这个角色，尝试联网抓取也没找到）。",
+            "characters": candidates, "intent": "", "slots": [], "docs": 0,
+        }
+    chain = await get_chain()
+    injected = crawled if crawled else []
+    return await chain.ainvoke(
+        {"question": question, "characters": injected},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
 
 
 async def _main() -> None:
