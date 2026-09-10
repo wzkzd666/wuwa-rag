@@ -36,7 +36,7 @@ CYPHER: dict[str, str] = {
     "武器": """MATCH (:Character {name:$n})-[r:RECOMMENDS_WEAPON]->(w)
         RETURN r.rank AS 优先级, w.name AS 武器 ORDER BY 优先级""",
     "队友": """MATCH (:Character {name:$n})-[r:SYNERGIZES_WITH]->(t)
-        RETURN t.name AS 队友, r.teams AS 队伍 ORDER BY 队友""",
+        RETURN t.name AS 队友, r.teams AS 队伍, r.effect AS 推荐理由 ORDER BY 队友""",
 }
 
 # 图谱字段是 schema 名，用户说的是游戏术语，必须显式映射
@@ -45,6 +45,7 @@ SLOT_LABEL: dict[str, str] = {
     "共鸣链":  "共鸣链（序号字段即第几链，相当于命座）",
     "突破材料": "突破材料（类别区分角色突破/技能突破）",
     "武器":    "武器推荐（优先级字段：1 为首选）",
+    "队友":    "队友推荐（推荐理由字段是队友提供的增益效果，如伤害加深百分比）",
 }
 
 

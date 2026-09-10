@@ -100,6 +100,13 @@ def _setup_logging() -> None:
     bm25_logger.setLevel(logging.INFO)
     bm25_logger.propagate = False
 
+    # BM25相关
+    celery_handler = _make_handler("celery.log")
+    celery_logger = logging.getLogger("celery")
+    celery_logger.addHandler(celery_handler)
+    celery_logger.setLevel(logging.INFO)
+    celery_logger.propagate = False
+
     # ── 第三方库降噪 ────────────────────────
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)

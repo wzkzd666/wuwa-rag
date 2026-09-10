@@ -89,6 +89,18 @@ class Settings(BaseSettings):
     RERANK_MIN_SCORE: float = 0.1    # logit，超低分=明显不相关，直接丢
     TOPK_RERANK_IN: int = 20         # 送进 reranker 的候选数（不是全部 30 条）
 
+    # ---------- API（Step 9） ----------
+    API_HOST: str = "127.0.0.1"
+    API_PORT: int = 8000
+    MAX_HISTORY_TURNS: int = 3      # 带进 prompt 的历史轮数
+
+    @property
+    def PG_DSN_LG(self) -> str:
+        """LangGraph checkpointer 专用
+        不指定就会落到 public
+        """
+        return f"{self.PG_DSN}?options=-csearch_path%3Dlg"
+
     @property
     def PG_DSN(self) -> str:
         return (

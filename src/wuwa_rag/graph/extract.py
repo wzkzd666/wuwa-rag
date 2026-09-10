@@ -31,6 +31,8 @@ _RE_BUILD_SET = re.compile(r"([\u4e00-\u9fa5]{2,8}?)\s*(\d)")
 _SKILL_NOISE = ("分支强化", "属性加成", "伤害", "等级", "Lv", "效果")
 _ECHO_NOISE = ("主流", "推荐", "武器", "词条", "分配", "声骸", "配装")
 _RE_STAGE = re.compile(r"([一二三四五六]阶突破)")
+_TEAM_SLOT_NOISE = ("奶&辅", "副输出", "主输出", "输出", "配队", "备注", "说明", "PS")
+_RE_NAME = re.compile(r"[\u4e00-\u9fa5]{2,4}")
 
 
 @dataclass
@@ -51,6 +53,12 @@ class CharacterFacts:
 
 def _clean(v: str) -> str:
     return re.sub(r"\s+", " ", v.replace("**", "").replace("[图]", "")).strip(" *|-—")
+
+
+def _fmt_cost_main(v: str) -> str:
+    """新格式"""
+    v = v.replace("\\", "/").replace("／", "/").replace("、", "/")
+    return re.sub(r"(?<!^)COST", "；COST", v)
 
 
 def _noisy(v: str, words: tuple[str, ...]) -> bool:
@@ -194,25 +202,36 @@ def _row_cells(text: str) -> list[tuple[str, ...]]:
 
 def _extract_echo_plan(chunks: list[dict], char_name: str = "") -> dict:
     """抽配装方案 + 主/副词条。
-    COST 是鸣潮声骸的核心概念（如 43311 = 五个声骸的 COST 组合，总和 12）
+    兼容两套 wiki 页面格式：
+      - 旧格式：breadcrumb 以「声骸推荐」结尾，4 列表格，
+                键 声骸配装推荐 / 声骸首位推荐 / 主词条 / 副词条
+      - 新格式：breadcrumb 以「声骸套装推荐」结尾（component=声骸套装推荐），2 列表格，
+                键 COST分配 / COST主词条 / 声骸词条，首位声骸在「主流声骸」首行
+    COST 是鸣潮声骸核心概念（如 43311 = 五个声骸的 COST 组合，总和 12）。
     """
     builds: list[dict] = []
     main_echo = main_stats = sub_stats = ""
     for d in chunks:
-        if not d.get("breadcrumb", "").endswith("声骸推荐"):
+        bc = d.get("breadcrumb", "")
+        if not (bc.endswith("声骸推荐") or bc.endswith("声骸套装推荐")
+                or d.get("component") == "声骸套装推荐"):
             continue
         for cells in _row_cells(d["text"]):
             k, rest = cells[0], list(cells[1:])
             if not rest:
+                # 新格式：首位声骸名（如「长路启航之星 | [图]」）；新格式优先于旧格式占位值
+                if (not _noisy(k, _ECHO_NOISE)
+                        and re.fullmatch(r"[\u4e00-\u9fa5]{2,6}", k)):
+                    main_echo = k
                 continue
             v = " ".join(rest)
-            if k == "声骸配装推荐":
+            if k == "声骸配装推荐":                 # 旧格式
                 for part in _RE_BUILD_SPLIT.split(v):
                     m = _RE_BUILD_HEAD.match(part.strip())
                     if not m:
                         continue
-                    stage, cost, rest = m.groups()
-                    raw = [(n, int(p)) for n, p in _RE_BUILD_SET.findall(rest)]
+                    stage, cost, rest_b = m.groups()
+                    raw = [(n, int(p)) for n, p in _RE_BUILD_SET.findall(rest_b)]
                     # 原文「彻空冥雷2彻空冥雷5」= 「2件套」+「5件套」粘在一起，
                     # 真实含义是彻空冥雷 5 件套，不是 2+5=7 件（COST 只有 5 个声骸位）
                     merged: dict[str, int] = {}
@@ -226,13 +245,21 @@ def _extract_echo_plan(chunks: list[dict], char_name: str = "") -> dict:
                             char_name, stage, cost, raw, sets, total,
                         )
                     builds.append({"stage": stage, "cost": cost, "sets": sets})
-
-            elif k == "声骸首位推荐":
-                main_echo = v
-            elif k == "主词条":
+            elif k == "声骸首位推荐":               # 旧格式
+                if not main_echo:
+                    main_echo = v
+            elif k == "主词条":                      # 旧格式
                 main_stats = "；".join(rest)
-            elif k == "副词条":
+            elif k == "副词条":                      # 旧格式
                 sub_stats = "；".join(rest).replace("副词条：", "").strip()
+            elif k == "COST分配":                    # 新格式
+                for m in re.finditer(r"(过渡|毕业)[:：](\d{5})", v):
+                    builds.append({"stage": m.group(1), "cost": m.group(2),
+                                   "sets": [(main_echo, 5)] if main_echo else []})
+            elif k == "COST主词条":                   # 新格式
+                main_stats = _fmt_cost_main(v)
+            elif k == "声骸词条":                     # 新格式
+                sub_stats = v
     return {
         "builds": builds,
         "main_echo": main_echo,
@@ -241,8 +268,52 @@ def _extract_echo_plan(chunks: list[dict], char_name: str = "") -> dict:
     }
 
 
+def _extract_team_effects(chunks: list[dict], self_name: str) -> dict[str, str]:
+    """从「配队推荐」表格抽「队友 -> 推荐理由」。
+    理由就是表格第二列的技能效果描述：「全伤害加深15%」「导电伤害加深20%」。
+    原文形态：
+        | 卡卡罗配队 | 守岸人/维里奈/白芷+吟霖/长离/散华+卡卡罗 |   <- 组合行，跳过
+        | 奶&辅      | 声骸推荐套装为隐世回光                  |   <- 噪音行，跳过
+        | 守岸人     | 双联合相…队伍中的角色全伤害加深15%       |   <- 要的
+    """
+    fx: dict[str, str] = {}
+    for d in chunks:
+        if "配队推荐" not in (d.get("breadcrumb") or ""):
+            continue
+        for cells in _row_cells(d["text"]):
+            if len(cells) < 2:
+                continue
+            who, effect = _clean(cells[0]), _clean(cells[1])
+            if not who or not effect or len(effect) < 12:
+                continue
+            if who == self_name or self_name in who or who in _TEAM_SLOT_NOISE:
+                continue
+            if not _RE_NAME.fullmatch(who):
+                continue
+            if len(effect) > len(fx.get(who, "")):      # 同人取最长描述
+                fx[who] = effect
+    return fx
+
+
 def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
+    """两个来源都要覆盖，否则会漏队友：
+      1. 编队&队伍轴推荐 —— 队友写在【标题行】里：##### 相里要+守岸人/维里奈
+      2. 角色养成推荐 › 配队推荐 —— 队友写在【表格首行第二列】：
+         | 卡卡罗配队 | 守岸人/维里奈/白芷+吟霖/长离/散华+卡卡罗 |
+    """
+    fx = _extract_team_effects(chunks, self_name)
     out, seen = [], set()
+
+    def _add(mate: str, team: str) -> None:
+        mate = _clean(mate)
+        if not mate or mate == self_name or not _RE_NAME.fullmatch(mate):
+            return
+        if (mate, team) in seen:
+            return
+        seen.add((mate, team))
+        out.append({"name": mate, "team": team, "effect": fx.get(mate, "")})
+
+    # 来源 1：编队&队伍轴推荐（标题行）
     for d in chunks:
         if d.get("component") != "编队&队伍轴推荐":
             continue
@@ -251,13 +322,21 @@ def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
             if not re.search(r"[+＋]", h):
                 continue
             for mate in re.split(r"[+＋/]", h):
-                mate = _clean(mate)
-                if not mate or mate == self_name:
-                    continue
-                if (mate, h) in seen:
-                    continue
-                seen.add((mate, h))
-                out.append({"name": mate, "team": h})
+                _add(mate, h)
+
+    # 来源 2：配队推荐（表格首行第二列的组合串）
+    for d in chunks:
+        if "配队推荐" not in (d.get("breadcrumb") or ""):
+            continue
+        for cells in _row_cells(d["text"]):
+            if len(cells) < 2:
+                continue
+            comb = _clean(cells[1])
+            if not re.search(r"[+＋]", comb):
+                continue
+            for mate in re.split(r"[+＋/]", comb):
+                _add(mate, comb)
+
     return out
 
 
