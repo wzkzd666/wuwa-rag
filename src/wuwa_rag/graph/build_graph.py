@@ -63,13 +63,14 @@ MERGE (e:EchoSet {name: r.name})
 MERGE (c)-[:RECOMMENDS_ECHO]->(e)
 """
 
-_C_BUILD = """
+_C_ECHO_BUILD = """
 UNWIND $rows AS r
 MATCH (c:Character {name: r.character})
 MERGE (e:EchoSet {name: r.name})
-MERGE (c)-[rel:HAS_BUILD {stage: r.stage}]->(e)
+MERGE (c)-[rel:RECOMMENDS_ECHO {stage: r.stage}]->(e)
 SET rel.cost = r.cost, rel.pieces = r.pieces
 """
+
 
 # 队友：一个队友可能出现在多支队伍里，teams 去重累加；effect 有值才覆盖（避免空串抹掉）
 _C_TEAM = """
@@ -115,20 +116,45 @@ async def upsert_character(f: CharacterFacts) -> None:
     await _run(_C_CHAIN, [{"character": f.name, **c} for c in f.chains])
     await _run(_C_MAT, [{"character": f.name, **m} for m in f.materials])
     await _run(_C_ECHO, [{"character": f.name, "name": e} for e in f.echoes])
-    await _run(_C_BUILD, [
-        {"character": f.name, "name": s, "stage": b["stage"],
-         "cost": b["cost"], "pieces": p}
-        for b in f.builds for s, p in b["sets"]
-    ])
+    await _run(_C_ECHO_BUILD, [{"character": f.name, **b} for b in f.echo_builds])
     await _run(_C_WEAPON, [{"character": f.name, "name": w, "rank": i + 1}
                            for i, w in enumerate(f.weapons)])
     await _run(_C_TEAM, [{"character": f.name, **t} for t in f.teammates])
 
     log.info(
-        "写入 %s | 技能%d 共鸣链%d 材料%d 声骸%d 配装%d 武器%d 队友%d | 属性%s",
+        "写入 %s | 技能%d 共鸣链%d 材料%d 声骸%d 配装方案%d 武器%d 队友%d | 属性%s",
         f.name, len(f.skills), len(f.chains), len(f.materials), len(f.echoes),
-        len(f.builds), len(f.weapons), len(f.teammates), f.attrs or "-",
+        len(f.echo_builds), len(f.weapons), len(f.teammates), f.attrs or "-",
     )
+
+
+async def _cleanup_legacy() -> None:
+    """移除已被合并进 RECOMMENDS_ECHO 的旧 HAS_BUILD 关系。"""
+    async with get_session() as s:
+        await s.execute_write(_write, "MATCH ()-[r:HAS_BUILD]->() DELETE r", None)
+    log.info("已清理旧 HAS_BUILD 关系")
+
+
+async def _cleanup_echo_dups() -> None:
+    """清理配装→声骸合并后残留的冗余 RECOMMENDS_ECHO 关系：
+       1) 旧标签 毕业配装/过渡配装（归一后已由 毕业/过渡 重建覆盖）；
+       2) 与带 cost 的配装方案重叠的纯推荐(cost 为空)。
+    """
+    async with get_session() as s:
+        await s.execute_write(
+            _write,
+            "MATCH ()-[r:RECOMMENDS_ECHO]->() "
+            "WHERE r.stage IN ['毕业配装','过渡配装'] DELETE r",
+            None,
+        )
+        await s.execute_write(
+            _write,
+            "MATCH (c:Character)-[r:RECOMMENDS_ECHO]->(e:EchoSet) "
+            "WHERE r.cost IS NULL AND size([(c)-[x:RECOMMENDS_ECHO]->(e) "
+            "WHERE x.cost IS NOT NULL | x]) > 0 DELETE r",
+            None,
+        )
+    log.info("已清理冗余 RECOMMENDS_ECHO 关系")
 
 
 async def _main() -> None:
@@ -136,7 +162,8 @@ async def _main() -> None:
     if not await ping():
         return
     await init_schema()
-
+    await _cleanup_legacy()
+    await _cleanup_echo_dups()
     chunks = load_chunks()
     names = all_characters(chunks)
     log.info("待处理角色: %s", names)

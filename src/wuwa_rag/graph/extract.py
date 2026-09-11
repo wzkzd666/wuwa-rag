@@ -27,6 +27,7 @@ _RE_ATTR = re.compile(r"^\s*[-*]\s*([^:\n]+?)\s*[:：]\s*\**([^*\n]+?)\**\s*$", 
 _RE_BUILD_SPLIT = re.compile(r"(?=(?:过渡配装|毕业配装))")
 _RE_BUILD_HEAD = re.compile(r"(过渡配装|毕业配装)\s*COST\s*(\d{5})\s*(.*)", re.S)
 _RE_BUILD_SET = re.compile(r"([\u4e00-\u9fa5]{2,8}?)\s*(\d)")
+_STAGE_NORM = {"毕业配装": "毕业", "过渡配装": "过渡"}
 
 _SKILL_NOISE = ("分支强化", "属性加成", "伤害", "等级", "Lv", "效果")
 _ECHO_NOISE = ("主流", "推荐", "武器", "词条", "分配", "声骸", "配装")
@@ -45,7 +46,7 @@ class CharacterFacts:
     weapons: list[str] = field(default_factory=list)
     echoes: list[str] = field(default_factory=list)
     teammates: list[dict] = field(default_factory=list)   # {name, team}
-    builds: list[dict] = field(default_factory=list)      # {stage, cost, sets:[(name, pieces)]}
+    echo_builds: list[dict] = field(default_factory=list)   # 声骸配装方案 {name, stage, cost, pieces}
     echo_main: str = ""            # 声骸首位推荐
     echo_main_stats: str = ""      # 主词条
     echo_sub_stats: str = ""       # 副词条
@@ -152,15 +153,19 @@ def _extract_materials(chunks: list[dict]) -> list[dict]:
 def _extract_weapons(chunks: list[dict]) -> list[str]:
     out: list[str] = []
     for d in chunks:
-        if d.get("component") != "角色养成推荐" or "武器推荐" not in d["text"]:
+        # 兼容新旧版语料：新格式在「武器推荐」，旧格式可能在「角色养成推荐」
+        if d.get("component") not in ("武器推荐", "角色搭配推荐", "角色养成推荐"):
             continue
-        m = re.search(r"\|\s*武器推荐\s*\|\s*([^|\n]+)\|", d["text"])
-        if not m:
-            continue
-        for w in re.split(r"[＞>≈≥]+", m.group(1).replace("5阶", "")):
-            w = _clean(w)
-            if w and w not in out:
-                out.append(w)
+        for m in re.finditer(r"\|\s*武器推荐\s*\|\s*([^|\n]+)\|", d["text"]):
+            cell = m.group(1).replace("5阶", "")
+            for raw in re.split(r"[＞>≈≥]+", cell):
+                # 去掉注记：从"无特别"处截断，并删括号说明与句号
+                w = re.split(r"无特别", raw)[0]
+                w = re.sub(r"[（(][^）)]*[）)]", "", w)
+                w = w.replace("。", "").strip()
+                w = _clean(w)
+                if w and w not in out:   # 角色内同名去重
+                    out.append(w)
     return out
 
 
@@ -230,7 +235,8 @@ def _extract_echo_plan(chunks: list[dict], char_name: str = "") -> dict:
                     m = _RE_BUILD_HEAD.match(part.strip())
                     if not m:
                         continue
-                    stage, cost, rest_b = m.groups()
+                    stage_raw, cost, rest_b = m.groups()
+                    stage = _STAGE_NORM.get(stage_raw, stage_raw)
                     raw = [(n, int(p)) for n, p in _RE_BUILD_SET.findall(rest_b)]
                     # 原文「彻空冥雷2彻空冥雷5」= 「2件套」+「5件套」粘在一起，
                     # 真实含义是彻空冥雷 5 件套，不是 2+5=7 件（COST 只有 5 个声骸位）
@@ -254,7 +260,8 @@ def _extract_echo_plan(chunks: list[dict], char_name: str = "") -> dict:
                 sub_stats = "；".join(rest).replace("副词条：", "").strip()
             elif k == "COST分配":                    # 新格式
                 for m in re.finditer(r"(过渡|毕业)[:：](\d{5})", v):
-                    builds.append({"stage": m.group(1), "cost": m.group(2),
+                    stage = _STAGE_NORM.get(m.group(1), m.group(1))
+                    builds.append({"stage": stage, "cost": m.group(2),
                                    "sets": [(main_echo, 5)] if main_echo else []})
             elif k == "COST主词条":                   # 新格式
                 main_stats = _fmt_cost_main(v)
@@ -344,11 +351,25 @@ def extract_character(chunks: list[dict], name: str) -> CharacterFacts:
     mine = [d for d in chunks if d.get("character") == name]
     plan = _extract_echo_plan(mine, name)
     echoes = _extract_echoes(mine)
-    # 只出现在配装串里的套装（如「不绝余音」）同样是推荐套装
-    for b in plan["builds"]:
-        for s, _ in b["sets"]:
-            if s not in echoes:
-                echoes.append(s)
+    # 配装方案并入声骸：拆成「角色→套装」的 RECOMMENDS_ECHO（带 stage/cost/pieces），
+    # 不再单独建 HAS_BUILD 关系。
+    echo_builds_raw = [
+        {"name": s, "stage": _STAGE_NORM.get(b["stage"], b["stage"]),
+         "cost": b["cost"], "pieces": p}
+        for b in plan["builds"] for (s, p) in b["sets"]
+    ]
+    # 按 (name, stage, cost) 去重：同源不同标签(毕业/毕业配装)或重复列出只留一条
+    seen, echo_builds = set(), []
+    for eb in echo_builds_raw:
+        key = (eb["name"], eb["stage"], eb["cost"])
+        if key in seen:
+            continue
+        seen.add(key)
+        echo_builds.append(eb)
+    # 纯声骸推荐若已被某配装方案覆盖，去掉以免重复建无 cost 的 RECOMMENDS_ECHO
+    build_names = {eb["name"] for eb in echo_builds}
+    echoes = [e for e in echoes if e not in build_names]
+
     return CharacterFacts(
         name=name,
         attrs=_extract_attrs(mine, name),
@@ -357,9 +378,10 @@ def extract_character(chunks: list[dict], name: str) -> CharacterFacts:
         materials=_extract_materials(mine),
         weapons=_extract_weapons(mine),
         echoes=echoes,
-        builds=plan["builds"],
+        echo_builds=echo_builds,
         echo_main=plan["main_echo"],
         echo_main_stats=plan["main_stats"],
         echo_sub_stats=plan["sub_stats"],
         teammates=_extract_teammates(mine, name),
     )
+

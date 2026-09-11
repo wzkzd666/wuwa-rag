@@ -13,6 +13,7 @@
         "conninfo",
         "csearch",
         "dotenv",
+        "dups",
         "echoset",
         "embedder",
         "executemany",

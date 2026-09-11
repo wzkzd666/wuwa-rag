@@ -3217,7 +3217,7 @@ wheels = [
 
 [[package]]
 name = "wuwa-mcp"
-version = "2.2.0"
+version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -3226,9 +3226,9 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/24/9b/86d857fb25450352b8fbd0555d0a80496d945c0ac2d4563fab476c2c6c48/wuwa_mcp-2.2.0.tar.gz", hash = "sha256:bba0cfda3b0bff162c4c1978010262c10f2ce6cc88f55a1e4a9162717f69b4f0", size = 47522, upload-time = "2026-09-10T07:10:15.968Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/10/f5/31279eca4f4aa8f8bf609c218fb66ca4aa11e70e17107249875547f20782/wuwa_mcp-2.2.1.tar.gz", hash = "sha256:87cd2013b8149f6474a9a91519673069f97d600991cd08e6be1444c48e348187", size = 48107, upload-time = "2026-09-11T11:59:07.634Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4f/40/4536964edc0dc873b43dd60a4f9b8db0ca63f22e918126219be80227764d/wuwa_mcp-2.2.0-py3-none-any.whl", hash = "sha256:13356a80739536209d1d94321b0ac75de5224fb95f4b45d42ec82ab97655ee5b", size = 63369, upload-time = "2026-09-10T07:10:14.564Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/e9/74b05ba3b28c242790f2f4800507d6a3bb692bbb317c71b53c8a99cbb831/wuwa_mcp-2.2.1-py3-none-any.whl", hash = "sha256:e7eb13ee9a291dc91fec5d11f1a4b08c9968c889846182ec0ada3a31365b14f5", size = 67501, upload-time = "2026-09-11T11:59:06.53Z" },
 ]
 
 [[package]]
@@ -3311,7 +3311,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "tenacity", specifier = ">=9.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "wuwa-mcp", specifier = ">=2.2.0" },
+    { name = "wuwa-mcp", specifier = ">=2.2.1" },
 ]
 provides-extras = ["dev"]
 

@@ -30,9 +30,15 @@ CYPHER: dict[str, str] = {
         WHERE $stage = '' OR r.stage = $stage
         RETURN r.kind AS 类别, r.stage AS 阶段, m.name AS 材料, r.qty AS 数量
         ORDER BY 类别, 阶段, 材料""",
-    "配装": """MATCH (:Character {name:$n})-[r:HAS_BUILD]->(e)
-        RETURN r.stage AS 阶段, r.cost AS COST, e.name AS 套装, r.pieces AS 件数
-        ORDER BY 阶段, 件数""",
+    "声骸": """MATCH (c:Character {name:$n})
+        OPTIONAL MATCH (c)-[r:RECOMMENDS_ECHO]->(e:EchoSet)
+        WITH c, collect(DISTINCT e.name) AS 推荐套装,
+             collect(DISTINCT {stage:r.stage, cost:r.cost, pieces:r.pieces, set:e.name}) AS 配装方案原
+        RETURN c.echo_main AS 首位声骸,
+               c.echo_main_stats AS 主词条,
+               c.echo_sub_stats AS 副词条,
+               推荐套装,
+               [x IN 配装方案原 WHERE x.cost IS NOT NULL] AS 配装方案""",
     "武器": """MATCH (:Character {name:$n})-[r:RECOMMENDS_WEAPON]->(w)
         RETURN r.rank AS 优先级, w.name AS 武器 ORDER BY 优先级""",
     "队友": """MATCH (:Character {name:$n})-[r:SYNERGIZES_WITH]->(t)
@@ -46,7 +52,27 @@ SLOT_LABEL: dict[str, str] = {
     "突破材料": "突破材料（类别区分角色突破/技能突破）",
     "武器":    "武器推荐（优先级字段：1 为首选）",
     "队友":    "队友推荐（推荐理由字段是队友提供的增益效果，如伤害加深百分比）",
+    "声骸": "声骸配装（套装字段即声骸套装名，COST 是声骸费用组合，主/副词条为推荐词条）",
 }
+
+
+def _fmt_val(v):
+    """graph_search 展示：把 list(推荐套装/配装方案) 与 dict 列表格式化为可读串。"""
+    if isinstance(v, list):
+        if not v:
+            return None
+        if isinstance(v[0], dict):
+            seen, items = set(), []
+            for x in v:
+                key = (x.get("cost"), x.get("set"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append("/".join(
+                    f"{k}={x[k]}" for k in ("stage", "cost", "set", "pieces") if x.get(k) is not None))
+            return "; ".join(items) if items else None
+        return "、".join(str(x) for x in v)
+    return v
 
 
 async def graph_search(
@@ -55,6 +81,15 @@ async def graph_search(
     """属性反查问题提前解决。支持多角色：每个角色各查一遍，各自带小标题。"""
     if not slots:
         return ""
+    # 配装语义 == 声骸：把"配装"槽位映射到"声骸"检索通道，
+    # 避免只查 HAS_BUILD 漏掉节点属性(主/副词条)与推荐套装集合。
+    _remap = []
+    for sl in slots:
+        target = "声骸" if sl == "配装" else sl
+        if target not in _remap:
+            _remap.append(target)
+    slots = _remap
+
     if not characters and "属性反查" not in slots:
         return ""
     blocks: list[str] = []
@@ -80,7 +115,8 @@ async def graph_search(
                 lines.append(f"【{SLOT_LABEL.get(slot, slot)}】")
                 for r in rows:
                     lines.append("  " + " / ".join(
-                        f"{k}={v}" for k, v in r.items() if v not in (None, "")
+                        f"{k}={_fmt_val(v)}" for k, v in r.items()
+                        if _fmt_val(v) not in (None, "", [])
                     ))
                 log.info("图谱命中 %s/%s: %d 行", char, slot, len(rows))
             if lines:

@@ -5,17 +5,20 @@
   且与 reranker(bge-reranker-v2-m3) 同一套 sentence-transformers，代码一致。
 """
 from __future__ import annotations
-
+from ..config import get_settings
+s = get_settings()
 import os
+os.environ.setdefault("HF_HOME", s.HF_HOME)
+
 from functools import lru_cache
 
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
 
-from ..config import get_settings
 
-s = get_settings()
-os.environ.setdefault("HF_HOME", s.HF_HOME)
+
+
+
 
 @lru_cache(maxsize=1)
 def _model() -> SentenceTransformer:

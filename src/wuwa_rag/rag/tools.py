@@ -25,7 +25,7 @@ class GraphSearchInput(BaseModel):
     characters: list[str] = Field(default_factory=list, description="角色名列表，如 ['卡卡罗']")
     slots: list[str] = Field(
         default_factory=list,
-        description="要查的槽位：属性/属性反查/技能/共鸣链/突破材料/配装/武器/队友",
+        description="要查的槽位：属性/属性反查/技能/共鸣链/突破材料/声骸/武器/队友",
     )
     element: str = Field("", description="属性值，仅属性反查用：导电/冷凝/热熔/气动/衍射/湮灭")
     stage: str = Field("", description="突破阶段，如 '六阶突破'，仅突破材料用")
@@ -34,7 +34,7 @@ class GraphSearchInput(BaseModel):
 @tool("graph_search", args_schema=GraphSearchInput)
 async def graph_search_tool(characters: list[str], slots: list[str],
                             element: str = "", stage: str = "") -> str:
-    """查《鸣潮》知识图谱：角色属性、技能、共鸣链、突破材料、声骸配装、武器、队友。
+    """查《鸣潮》知识图谱：角色属性、技能、共鸣链、突破材料、声骸、武器、队友。
     问「XX 是什么属性」「XX 六阶突破要什么材料」这类有确定答案的问题时用。
     查不到时返回空字符串。"""
     facts = await graph_search(characters, slots, element, stage)

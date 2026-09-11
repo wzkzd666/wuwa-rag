@@ -44,7 +44,7 @@ dependencies = [
     "markdownify>=0.14",                    # 采集侧 HTML -> Markdown
     "beautifulsoup4>=4.12",
     "langchain-text-splitters>=1.1.2",
-    "wuwa-mcp>=2.2.0",
+    "wuwa-mcp>=2.2.1",
 ]
 
 [project.optional-dependencies]
