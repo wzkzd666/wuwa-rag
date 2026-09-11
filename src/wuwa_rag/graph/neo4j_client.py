@@ -4,8 +4,10 @@
 避免同步 IO 阻塞事件循环。Neo4j 的 async driver 是纯 asyncio 实现，
 不像 psycopg 那样受 Windows Proactor/Selector 差异影响。
 """
+
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -17,12 +19,23 @@ from ..ww_logger import get_logger
 neo4j_log = get_logger("neo4j")
 
 _driver: AsyncDriver | None = None
+_driver_loop = None
 
 
 def get_driver() -> AsyncDriver:
-    """进程内单例 driver（惰性创建）。"""
-    global _driver
-    if _driver is None:
+    """进程内单例 driver（惰性创建，按当前 running loop 绑定）。
+
+    celery 每个任务都新建事件循环，旧的 driver 若绑在已关闭的 loop 上会触发
+    'Future attached to a different loop'。这里记录创建它的 loop，loop 变了就重建。
+    """
+    global _driver, _driver_loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _driver is None or _driver_loop is not loop:
+        if _driver is not None:
+            neo4j_log.warning("Neo4j driver 绑定的 loop 已变更，丢弃旧 driver 重建")
         s = get_settings()
         _driver = AsyncGraphDatabase.driver(
             s.NEO4J_URI,
@@ -30,17 +43,19 @@ def get_driver() -> AsyncDriver:
             max_connection_pool_size=20,
             connection_acquisition_timeout=30.0,
         )
+        _driver_loop = loop
         neo4j_log.info("Neo4j driver 已创建 | uri=%s", s.NEO4J_URI)
     return _driver
 
 
 async def close_driver() -> None:
     """关闭 driver 重置状态"""
-    global _driver
+    global _driver, _driver_loop
     if _driver is not None:
         await _driver.close()
-        _driver = None
         neo4j_log.info("Neo4j driver 已关闭")
+    _driver = None
+    _driver_loop = None
 
 
 @asynccontextmanager

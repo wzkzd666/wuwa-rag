@@ -12,15 +12,16 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
+from ..config import get_settings
+s = get_settings()
+os.environ.setdefault("HF_HOME", s.HF_HOME)
+
 import torch
 from sentence_transformers import CrossEncoder
 
-from ..config import get_settings
 from ..ww_logger import get_logger
 from ..text import chunk_text
 
-s = get_settings()
-os.environ.setdefault("HF_HOME", s.HF_HOME)
 log = get_logger("rag")
 
 
