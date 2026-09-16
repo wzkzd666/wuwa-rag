@@ -1,7 +1,6 @@
 """Celery + Redis 异步流水线：爬角色→分块→入库(PG+S3)→建索引(BM25+Chroma)→建图谱(Neo4j)。
 
-每个任务内部用 asyncio.run(loop_factory=SelectorEventLoop) 包裹现有 async 逻辑，
-直接复用 ingest / retrieval / graph 里的函数，不重复造轮子。
+每个任务内部用 asyncio.run(loop_factory=SelectorEventLoop) 包裹现有 async 逻辑。
 """
 from __future__ import annotations
 
@@ -70,23 +69,25 @@ async def _fetch_markdown(character: str) -> str:
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=15)
-def crawl_character(self, character: str):
-    run_id = _run(_crawl_run_insert(character))
+def crawl_character(self, character: str, run_id: int | None = None):
+    # 只在首次插入；重试通过 args 回传 run_id，避免重复 INSERT 污染 crawl_runs
+    if run_id is None:
+        run_id = _run(_crawl_run_insert(character))
     try:
         md = _run(_fetch_markdown(character))
-        if md.startswith("错误"):
-            _run(_crawl_run_update(run_id, "failed", {"error": "not_found"}))
+        if md.startswith("错误"):                     
             raise CharacterNotFound(f"{character} 未找到")
         (s.RAW_DIR / f"{character}.md").write_text(md, encoding="utf-8")
-        _run(_crawl_run_update(run_id, "success", {"bytes": len(md)}))
-        return {"character": character, "run_id": run_id}
     except CharacterNotFound:
+        _run(_crawl_run_update(run_id, "failed", {"error": "not_found"}))   # 补状态
         raise
-    except Exception as exc:  # 网络/API 异常 → 重试
+    except Exception as exc:
         _run(_crawl_run_update(run_id, "failed", {"error": f"fetch: {exc}"}))
         if self.request.retries < self.max_retries:
-            raise self.retry(exc=exc)
+            raise self.retry(exc=exc, args=(character, run_id))             # run_id 带回
         raise
+    else:
+        _run(_crawl_run_update(run_id, "success", {"bytes": len(md)}))
     finally:
         _run(close_pool())
 
@@ -104,11 +105,15 @@ async def _chunk_character_async(character: str) -> None:
     )
     existing = [c for c in existing if c.get("character") != character]  # 丢掉旧版
     existing.extend(asdict(c) for c in new_chunks)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    # 原子写：先落临时文件再 replace，避免别处读到半截；多进程并行仍可能覆盖，
+    # 所以 worker 务必 --pool=solo --concurrency=1（串行），或后续改按角色分文件
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
         for c in existing:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
+    tmp.replace(path)                                      
     log.info("分块 %s: 新增 %d 块，jsonl 现 %d 块", character, len(new_chunks), len(existing))
+
 
 
 @celery_app.task

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..ww_logger import get_logger
 from .llm import get_chat_llm
@@ -55,18 +55,22 @@ _EXTRACT_PROMPT = (
 
 async def _llm_candidates(question: str) -> list[str]:
     try:
-        resp = await get_chat_llm().ainvoke(
-            [HumanMessage(content=_EXTRACT_PROMPT + "\n\n问题：" + question)]
-        )
+        resp = await get_chat_llm().ainvoke([
+            SystemMessage(content=(
+                "你是《鸣潮》wiki 的角色名抽取器。只输出一个 JSON："
+                '{"characters": ["角色名"]}，没有具体角色就 {"characters": []}。'
+                "不要编造，不要多余文字。")),
+            HumanMessage(content="问题：" + question),
+        ])
         txt = resp.content.strip()
         m = re.search(r"\{.*\}", txt, re.S)
         if not m:
             return []
-        data = json.loads(m.group(0))
-        return [str(c) for c in data.get("characters", []) if c]
+        return [str(c) for c in json.loads(m.group(0)).get("characters", []) if c]
     except Exception as exc:
         log.warning("LLM 角色抽取失败: %s", exc)
         return []
+
 
 
 def _rule_candidates(question: str) -> list[str]:
