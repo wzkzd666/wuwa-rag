@@ -21,16 +21,15 @@ from ..worker import build_pipeline, CharacterNotFound
 setting = get_settings()
 log = get_logger("rag")
 
-_SYSTEM = """你是《鸣潮》角色养成助手。只依据给定资料回答，不要编造。
-资料里没有的内容，直接说"资料里没有提到"。
-资料里列了几条就答几条，不要自行补充「没有提到其他/更多」这类说明。
-术语对照（资料用词和用户提问可能不同，按下表对应理解）：
+_SYSTEM = """（请用你——爱弥斯——的口吻，依据下面的资料作答）
+术语对照（资料用词和提问可能不同，按下表理解）：
 - 声骸 = 角色装备，资料里也写作「套装」；COST 是声骸的费用点数组合
 - 共鸣链 = 相当于命座，序号 1~6 对应一链到六链
 - 贝币 = 游戏货币
 - 突破阶段：一阶~六阶
 
-回答用中文，简洁，要点化。"""
+回答用中文，简洁，要点化；资料里列了几条就答几条，不要自行补充「没有提到其他/更多」；资料里没有的内容，用你的口吻自然表示不知道。"""
+
 
 
 async def _known_characters() -> list[str]:
@@ -72,12 +71,17 @@ def _after_graph(state: RagState) -> str:
 
 async def vector_node(state: RagState) -> dict:
     q = state["question"]
+    chars = state.get("characters") or []
+    n = max(len(chars), 1)
+
     docs = await vector_search_tool.ainvoke({"query": q, "topk": setting.TOPK_RERANK})
 
-    # 多角色：为每个角色各补一轮召回，避免只召回到其中一个
-    for c in (state.get("characters") or [])[1:]:
+    # 多角色：每个非首角色各补一轮召回，避免只召回到其中一个
+    # 用整数除 // 并设下限 2，避免 6/4=1.5 被截断成 1 导致漏召
+    per = max(2, setting.TOPK_RERANK // n)
+    for c in chars[1:]:
         docs += await vector_search_tool.ainvoke({
-            "query": f"{c} {q}", "topk": setting.TOPK_RERANK/len(state.get("characters",[1]))
+            "query": f"{c} {q}", "topk": per
         })
 
     seen: set[str] = set()
@@ -89,38 +93,42 @@ async def vector_node(state: RagState) -> dict:
     return {"docs": merged}
 
 
-async def generate_node(state: RagState) -> dict:
+def _build_context(state: RagState) -> str:
     parts: list[str] = []
-    # 拼接历史对话
-    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS*2:]
+    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
     if history:
-        parts.append("## 对话历史\n"+"\n".join(
+        parts.append("## 对话历史\n" + "\n".join(
             f"{'用户' if m['role'] == 'user' else '助手'}: {m['content']}" for m in history
         ))
-    
     if state.get("graph_facts"):
         parts.append("## 图谱事实\n" + state["graph_facts"])
     docs = state.get("docs") or []
     if docs:
         parts.append("## 参考文档\n" + "\n\n".join(
-            f"[{i + 1}] {chunk_text(d)}"
-            for i, d in enumerate(docs)
+            f"[{i + 1}] {chunk_text(d)}" for i, d in enumerate(docs)
         ))
-    context = "\n\n".join(parts) or "（没有检索到任何资料）"
+    return "\n\n".join(parts) or "（没有检索到任何资料）"
 
-    prompt = f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{state['question']}"
+
+def _build_prompt(context: str, question: str) -> str:
+    return f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}"
+
+
+async def generate_node(state: RagState) -> dict:
+    context = _build_context(state)
+    prompt = _build_prompt(context, state["question"])
     try:
         resp = await get_chat_llm().ainvoke([HumanMessage(content=prompt)])
         answer = resp.content
-    except Exception as exc:                      
+    except Exception as exc:
         log.error("LLM 调用失败: %s", exc)
         answer = "抱歉，模型服务暂时不可用，请稍后再试。"
-    # 回写历史
-    new_history = history +[
+    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
+    new_history = history + [
         {"role": "user", "content": state["question"]},
-        {"role": "assistant", "content": answer}
+        {"role": "assistant", "content": answer},
     ]
-    return {"context": context, "answer": answer, "history": new_history[-setting.MAX_HISTORY_TURNS*2:]}
+    return {"context": context, "answer": answer, "history": new_history[-setting.MAX_HISTORY_TURNS * 2:]}
 
 
 def build_graph() -> StateGraph:
@@ -209,6 +217,51 @@ async def ask(question: str, thread_id: str = "default") -> dict:
         config={"configurable": {"thread_id": thread_id}},
     )
 
+
+async def ask_stream(question: str, thread_id: str = "default"):
+    """流式问答：先检索（非流式，首屏延迟），再逐 token 吐答案。
+    yield dict：{'token': str}（增量）/ {'status': 'retrieving'}（开始检索）/
+                {'done': True, ...}（结束，带元数据）。"""
+    candidates, ok, crawled = await ensure_characters(question)
+    if candidates and not ok:
+        yield {"token": "不知道（知识库里没有这个角色，尝试联网抓取也没找到）。"}
+        yield {"done": True}
+        return
+
+    yield {"status": "retrieving"}  # 前端可显示「检索中…」
+
+    slots = detect_slots(question)
+    chars = extract_characters(question, await _known_characters()) or []
+    element = detect_element(question)
+    stage = detect_stage(question)
+    intent = classify(question, slots)
+
+    state: RagState = {
+        "question": question,
+        "characters": crawled or chars,
+        "slots": slots, "element": element, "stage": stage, "intent": intent,
+    }
+    if intent in ("fact", "hybrid"):
+        state["graph_facts"] = (await graph_node(state))["graph_facts"]
+    if intent in ("semantic", "hybrid"):
+        state["docs"] = (await vector_node(state))["docs"]
+
+    prompt = _build_prompt(_build_context(state), question)
+
+    full: list[str] = []
+    async for chunk in get_chat_llm().astream([HumanMessage(content=prompt)]):
+        if chunk.content:
+            full.append(chunk.content)
+            yield {"token": chunk.content}
+
+    yield {
+        "done": True,
+        "answer": "".join(full),
+        "intent": intent,
+        "slots": slots,
+        "characters": chars,
+        "docs": len(state.get("docs") or []),
+    }
 
 
 async def _main() -> None:

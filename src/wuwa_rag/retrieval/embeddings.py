@@ -16,10 +16,6 @@ from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
 
 
-
-
-
-
 @lru_cache(maxsize=1)
 def _model() -> SentenceTransformer:
     m = SentenceTransformer(s.EMBED_MODEL, device=s.EMBED_DEVICE, local_files_only=True)
@@ -36,7 +32,7 @@ class BgeM3Embeddings(Embeddings):
             texts,
             batch_size=s.EMBED_BATCH_SIZE,
             normalize_embeddings=True,   # 归一化后 cosine == 内积
-            show_progress_bar=True,
+            show_progress_bar=False,
         ).tolist()
 
     def embed_query(self, text: str) -> list[float]:

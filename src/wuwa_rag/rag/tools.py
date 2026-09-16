@@ -32,8 +32,7 @@ class GraphSearchInput(BaseModel):
 
 
 @tool("graph_search", args_schema=GraphSearchInput)
-async def graph_search_tool(characters: list[str], slots: list[str],
-                            element: str = "", stage: str = "") -> str:
+async def graph_search_tool(characters: list[str], slots: list[str], element: str = "", stage: str = "") -> str:
     """查《鸣潮》知识图谱：角色属性、技能、共鸣链、突破材料、声骸、武器、队友。
     问「XX 是什么属性」「XX 六阶突破要什么材料」这类有确定答案的问题时用。
     查不到时返回空字符串。"""

@@ -50,11 +50,11 @@ class Settings(BaseSettings):
     S3_BUCKET_IMAGES: str = "wuwa-images"
 
     # ---------- LLM ----------
-    LLM_MODEL: str = "qwen3:8b"
+    LLM_MODEL: str = "amis"
     VLM_MODEL: str = "qwen3-vl:8b"
     LLM_URL: str = "http://localhost:11434"       # ChatOllama 用（不带 /v1）
-    LLM_URL_V1: str = "http://localhost:11434/v1" # ChatOpenAI 用
-    LLM_API_KEY: str = "ollama"                   # Ollama 不校验，随便填
+    LLM_URL_V1: str = "http://127.0.0.1:18000/v1" # amis 用
+    LLM_API_KEY: str = "wuwa"                   # 不校验，随便填
     LLM_TEMPERATURE: float = 0.3
     MAX_TOKENS: int = 2048
 

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+import json
 
+from fastapi.responses import StreamingResponse
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from ..ww_logger import get_logger
-from ..rag.chain import ask
+from ..rag.chain import ask, ask_stream
 from ..rag.memory import close_checkpointer, get_checkpointer
 from ..worker import build_pipeline
 
@@ -61,6 +63,16 @@ async def api_ask(body: AskIn) -> AskOut:
         characters=r.get("characters") or [],
         docs=len(r.get("docs") or []),
     )
+
+@app.post("/ask/stream")
+async def api_ask_stream(body: AskIn):
+    tid = body.thread_id or uuid.uuid4().hex[:12]
+
+    async def event_gen():
+        async for evt in ask_stream(body.question, tid):
+            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 @app.post("/ingest")
