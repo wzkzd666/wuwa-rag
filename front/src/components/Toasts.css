@@ -1,0 +1,13 @@
+.toast-x {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+}
+.toast-x:hover {
+  color: var(--text-primary);
+}

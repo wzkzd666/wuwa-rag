@@ -10,7 +10,8 @@ from ..config import ensure_dirs, get_settings
 from ..graph.neo4j_client import get_session
 from ..ww_logger import get_logger
 from .intent import classify, detect_slots, extract_characters, detect_element, detect_stage
-from .llm import get_chat_llm
+from .llm import get_chat_llm, no_think_marker
+from .loopguard import LoopGuard, trim_loop
 from .tools import graph_search_tool, vector_search_tool
 from .state import RagState
 from .memory import get_checkpointer
@@ -21,14 +22,29 @@ from ..worker import build_pipeline, CharacterNotFound
 setting = get_settings()
 log = get_logger("rag")
 
-_SYSTEM = """（请用你——爱弥斯——的口吻，依据下面的资料作答）
-术语对照（资料用词和提问可能不同，按下表理解）：
+# 注意：人设由 aemeath 模型自带（Modelfile 的 SYSTEM），这里不再引导口吻——
+# 叠加人设指令会让模型把注意力放在「表演」而非「答题」上，是复读独白的诱因之一。
+# 本提示词只负责三件事：术语对照、答题约束、防重复。
+# 另：Ollama 的 system 参数会覆盖 Modelfile 内置 SYSTEM，所以这些约束必须拼在
+# HumanMessage 里，不能改成 SystemMessage 传，否则人设会丢。
+_SYSTEM = """依据下面的资料作答。术语对照（资料用词和提问可能不同，按下表理解）：
 - 声骸 = 角色装备，资料里也写作「套装」；COST 是声骸的费用点数组合
 - 共鸣链 = 相当于命座，序号 1~6 对应一链到六链
 - 贝币 = 游戏货币
 - 突破阶段：一阶~六阶
 
-回答用中文，简洁，要点化；资料里列了几条就答几条，不要自行补充「没有提到其他/更多」；资料里没有的内容，用你的口吻自然表示不知道。"""
+作答要求：
+- 用中文，简洁、要点化；资料里列了几条就答几条，不要自行补充「没有提到其他/更多」。
+- 资料里没有的内容，用一句话说不知道就停住，不要展开、不要举例、不要反复解释。
+- 严禁重复：同一句话、同一段落、同一句口头禅只能说一次。答完即止，不要为凑长度反复输出相同内容。"""
+
+
+def _new_loop_guard() -> LoopGuard:
+    """每次生成都要新建一个 guard：它内部有累积状态，跨请求复用会串味。"""
+    return LoopGuard(
+        max_repeat=setting.LLM_LOOP_MAX_REPEAT,
+        min_chars=setting.LLM_LOOP_MIN_CHARS,
+    )
 
 
 
@@ -107,11 +123,24 @@ def _build_context(state: RagState) -> str:
         parts.append("## 参考文档\n" + "\n\n".join(
             f"[{i + 1}] {chunk_text(d)}" for i, d in enumerate(docs)
         ))
-    return "\n\n".join(parts) or "（没有检索到任何资料）"
+    # 「有没有资料」必须看图谱事实/文档，不能用 join 结果是否为空来判断：
+    # 多轮对话时 history 非空，join 永远有内容，原先的 or 兜底就永远不触发，
+    # 零资料信号被吞掉 → 模型收不到约束 → 退化成自由发挥（人设独白 + 复读）。
+    if not state.get("graph_facts") and not docs:
+        # 这里不要再写「## 资料」标题：_build_prompt 已经加了，重复标题会干扰模型
+        parts.append(
+            "（本次没有检索到任何资料。请只用一句话说明你不清楚，然后立即停止；"
+            "不要解释原因，不要重复这句话，不要补充任何其他内容。）"
+        )
+    return "\n\n".join(parts)
 
 
 def _build_prompt(context: str, question: str) -> str:
-    return f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}"
+    # /no_think 放在末尾：Qwen3 的软开关，关掉思考模式（CoT 会降低角色扮演质量，
+    # 且 thinking 泄漏会加剧复读）。原 serve_amis.py 在服务端强制关，弃用后由此接手。
+    marker = no_think_marker()
+    tail = f"\n\n{marker}" if marker else ""
+    return f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}{tail}"
 
 
 async def generate_node(state: RagState) -> dict:
@@ -123,12 +152,32 @@ async def generate_node(state: RagState) -> dict:
     except Exception as exc:
         log.error("LLM 调用失败: %s", exc)
         answer = "抱歉，模型服务暂时不可用，请稍后再试。"
+        answer_ok = False
+    else:
+        answer_ok = True
+
+    # 复读兜底放在 try 之外：检测/截断自身若出错，不该被误报成「模型服务不可用」
+    truncated = False
+    if answer_ok:
+        # 采样参数只能降低复读概率，压不死；这里是最后一道闸。
+        # 非流式拿到的是完整文本，整篇喂一次即可。
+        hit = _new_loop_guard().feed(answer)
+        if hit:
+            log.warning("复读检测命中，已截断答案（触发句=%.30s… 原长=%d）", hit, len(answer))
+            answer = trim_loop(answer, hit)
+            truncated = True
+
     history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
     new_history = history + [
         {"role": "user", "content": state["question"]},
         {"role": "assistant", "content": answer},
     ]
-    return {"context": context, "answer": answer, "history": new_history[-setting.MAX_HISTORY_TURNS * 2:]}
+    return {
+        "context": context,
+        "answer": answer,
+        "truncated": truncated,
+        "history": new_history[-setting.MAX_HISTORY_TURNS * 2:],
+    }
 
 
 def build_graph() -> StateGraph:
@@ -248,19 +297,36 @@ async def ask_stream(question: str, thread_id: str = "default"):
 
     prompt = _build_prompt(_build_context(state), question)
 
+    guard = _new_loop_guard()
     full: list[str] = []
+    hit: str | None = None   # 循环外要用，先初始化避免依赖循环内赋值
+    truncated = False
     async for chunk in get_chat_llm().astream([HumanMessage(content=prompt)]):
-        if chunk.content:
-            full.append(chunk.content)
-            yield {"token": chunk.content}
+        if not chunk.content:
+            continue
+        hit = guard.feed(chunk.content)
+        if hit:
+            # 提前止损：break 会关闭生成器，Ollama 侧随之中断，不会继续写满 num_predict
+            log.warning("流式复读检测命中，中断生成（触发句=%.30s…）", hit)
+            truncated = True
+            break
+        full.append(chunk.content)
+        yield {"token": chunk.content}
+
+    answer = "".join(full)
+    if truncated:
+        # token 已经吐给前端、收不回来，所以把截断后的权威全文放进 done 事件，
+        # 由前端覆盖已渲染内容。
+        answer = trim_loop(answer, hit)
 
     yield {
         "done": True,
-        "answer": "".join(full),
+        "answer": answer,
         "intent": intent,
         "slots": slots,
         "characters": chars,
         "docs": len(state.get("docs") or []),
+        "truncated": truncated,
     }
 
 

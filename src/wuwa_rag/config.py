@@ -50,13 +50,27 @@ class Settings(BaseSettings):
     S3_BUCKET_IMAGES: str = "wuwa-images"
 
     # ---------- LLM ----------
-    LLM_MODEL: str = "amis"
+    LLM_MODEL: str = "aemeath"
     VLM_MODEL: str = "qwen3-vl:8b"
-    LLM_URL: str = "http://localhost:11434"       # ChatOllama 用（不带 /v1）
-    LLM_URL_V1: str = "http://127.0.0.1:18000/v1" # amis 用
+    LLM_URL: str = "http://localhost:11434"       # ChatOllama 
     LLM_API_KEY: str = "wuwa"                   # 不校验，随便填
     LLM_TEMPERATURE: float = 0.3
     MAX_TOKENS: int = 2048
+
+    # ---------- 采样 / 防复读（aemeath 是 8B 角色扮演模型，容易陷入整句复读）----------
+    # Ollama 默认 repeat_penalty=1.1 对弱模型不够；实测 1.3 + 窗口 512 能压住段落级循环
+    LLM_REPEAT_PENALTY: float = 1.3     # >1 惩罚重复 token，1.0=不惩罚
+    LLM_REPEAT_LAST_N: int = 512        # 惩罚回看的 token 窗口；太小压不住长段复读
+    LLM_TOP_P: float = 0.9              # 核采样；收窄候选，减少跑偏进人设独白
+    LLM_TOP_K: int = 40
+    # Qwen3 思考模式软开关。langchain_ollama 1.1.0 无 think 字段，只能靠 prompt 里的
+    # /no_think（Qwen3 官方约定）。原 serve_amis.py 强制关 thinking，弃用后由此接手：
+    # 论文结论是 CoT 反而降低角色扮演质量，且 thinking 泄漏会加剧复读。
+    LLM_NO_THINK: bool = True
+    LLM_SEED: int = -1                  # -1 = 随机；调试复现时可固定
+    # 运行时复读兜底：连续 N 个句子与前文重复即中断生成（采样参数压不住时的最后一道闸）
+    LLM_LOOP_MAX_REPEAT: int = 2        # 同一句子最多允许出现的次数
+    LLM_LOOP_MIN_CHARS: int = 12        # 短于此长度的句子不参与判重（避免「好的。」「嗯。」误杀）
 
     # ---------- 检索模型（走 CPU，GPU 被 VLM 占满） ----------
     EMBED_MODEL: str = "BAAI/bge-m3"

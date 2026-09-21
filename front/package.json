@@ -1,0 +1,31 @@
+{
+  "name": "wuwa-rag-front",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "《鸣潮》角色知识助手前端：流式问答 / 知识库收录 / 会话管理",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.15",
+    "immer": "^10.2.0",
+    "lucide-react": "^1.47.0",
+    "marked": "^18.0.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.6",
+    "zustand": "^4.5.7"
+  },
+  "devDependencies": {
+    "@types/dompurify": "^3.0.5",
+    "@types/node": "^26.6.2",
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^5.4.21"
+  }
+}
