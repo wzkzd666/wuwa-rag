@@ -46,13 +46,6 @@ def _pover_resolve(question: str) -> str | None:
     return f"漂泊者-男-{attr}" if attr else _POVER_DEFAULT
 
 
-_EXTRACT_PROMPT = (
-    "你是《鸣潮》wiki 的角色名抽取器。从用户问题里提取提到的游戏角色中文标准名。\n"
-    "只输出一个 JSON：{\"characters\": [\"角色名\", ...]}，没有具体角色就 {\"characters\": []}。\n"
-    "不要编造；问题没出现具体角色就返回空列表。"
-)
-
-
 async def _llm_candidates(question: str) -> list[str]:
     """名册没命中时的 LLM 兜底，走 tool 模型 qwen3:8b（抽取任务，非 chat）。
 

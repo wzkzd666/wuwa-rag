@@ -64,6 +64,8 @@ export type StreamEvent =
   | { status: 'retrieving' }
   /** 细粒度阶段：抽取/检索/生成，用于在无输出期间告知用户在做什么 */
   | { stage: string; label: string }
+  /** 后端流中途异常：连接不会裸断了，错误以事件下发 */
+  | { error: string; detail?: string }
   | {
       done: true
       answer: string
@@ -84,6 +86,22 @@ export interface IngestRecord {
   createdAt: number
   ok: boolean
   error?: string
+}
+
+/** GET /ingest/status 返回：五步流水线实时进度 */
+export interface IngestStep {
+  key: string
+  label: string
+  status: 'pending' | 'running' | 'success' | 'failed'
+  error: string | null
+}
+
+export interface IngestStatus {
+  character: string
+  status: 'pending' | 'running' | 'success' | 'failed'
+  found: boolean
+  steps: IngestStep[]
+  updated_at: number | null
 }
 
 export interface Settings {

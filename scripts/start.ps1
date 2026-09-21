@@ -10,7 +10,7 @@
       5) FastAPI                        —— 独立窗口，:8000
       6) 前端 Vite                      —— 独立窗口，:5173
       7) 轮询 /health 就绪 + 检查 Ollama aemeath 模型
-    各后台窗口 PID 记录到 logs/dev.pids.json，供 stop.ps1 精准关闭。
+    各后台窗口 PID 记录到 .runtime/dev.pids.json，供 stop.ps1 精准关闭。
     注：生成模型已弃用 serve_amis.py，改走 Ollama 的 aemeath（LLM_URL=:11434）。
 .PARAMETER NoDocker
     跳过 docker compose（容器已在运行时用）
@@ -37,11 +37,14 @@ $ErrorActionPreference = 'Stop'
 # ---------- 路径解析（脚本在 scripts/ 下，项目根是其父目录）----------
 $Root     = Split-Path -Parent $PSScriptRoot
 $LogDir   = Join-Path $Root 'logs'
-$PidFile  = Join-Path $LogDir 'dev.pids.json'
+$RunDir   = Join-Path $Root '.runtime'
+$PidFile  = Join-Path $RunDir 'dev.pids.json'   # 运行时状态放 .runtime/，与日志分离
 $SqlFile  = Join-Path $Root 'pgsql\001_init.sql'
 $FrontDir = Join-Path $Root 'front'
 
-if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
+foreach ($d in $LogDir, $RunDir) {
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
+}
 
 # ---------- 输出助手 ----------
 function Write-Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }

@@ -56,11 +56,6 @@ class LoopGuard:
         self._scanned = 0   # 已判重过的文本前缀长度（闭合边界）
         self._text = ""     # 内部累积，调用方无需自己拼接全文
 
-    @property
-    def text(self) -> str:
-        """目前累积到的全文。"""
-        return self._text
-
     def feed(self, delta: str) -> str | None:
         """追加增量文本；返回触发复读的那个句子，未触发返回 None。"""
         if not delta:

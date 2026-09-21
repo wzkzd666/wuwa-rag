@@ -1,6 +1,8 @@
-import { useMemo, useState } from 'react'
-import { Library, Search, Download, CheckCircle2, XCircle, Clock, Zap, Info } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Library, Search, Download, CheckCircle2, XCircle, Clock, Zap, Info, Loader2 } from 'lucide-react'
 import { useStore } from '../store/useStore'
+import { ingestStatus } from '../lib/api'
+import type { IngestRecord, IngestStatus } from '../types'
 import './KnowledgePage.css'
 
 /** 角色名册（与后端 rag/characters.py CHARACTER_NAMES 对齐，供快捷选择） */
@@ -22,13 +24,86 @@ const PIPELINE_STEPS = [
   { name: '图谱', desc: '正则抽事实 → Neo4j' },
 ]
 
+/** 提交记录「状态」列：优先渲染后端实时五步进度，回落到提交回执 */
+function renderStatus(r: IngestRecord, st?: IngestStatus) {
+  if (r.ok && st && st.found && st.status !== 'pending') {
+    return (
+      <div className="step-bar" title={st.steps.map((s) => `${s.label}:${s.status}${s.error ? ' ' + s.error : ''}`).join('\n')}>
+        {st.steps.map((s) => (
+          <span key={s.key} className={`step-dot step-${s.status}`}>
+            {s.status === 'running' ? (
+              <Loader2 size={10} className="spin" />
+            ) : s.status === 'success' ? (
+              <CheckCircle2 size={10} />
+            ) : s.status === 'failed' ? (
+              <XCircle size={10} />
+            ) : (
+              <Clock size={10} />
+            )}
+            <em>{s.label}</em>
+          </span>
+        ))}
+        <span className={`tag ${st.status === 'success' ? 'tag-ok' : st.status === 'failed' ? 'tag-err' : 'tag-violet'}`}>
+          {st.status === 'success' ? '完成' : st.status === 'failed' ? '失败' : '进行中'}
+        </span>
+      </div>
+    )
+  }
+  return r.ok ? (
+    <span className="tag tag-violet">
+      <Loader2 size={11} className="spin" /> 排队中
+    </span>
+  ) : (
+    <span className="tag tag-err" title={r.error}>
+      <XCircle size={11} /> {r.state}
+    </span>
+  )
+}
+
 export default function KnowledgePage() {
   const ingests = useStore((s) => s.ingests)
   const ingestCharacter = useStore((s) => s.ingestCharacter)
   const health = useStore((s) => s.health)
+  const apiBase = useStore((s) => s.settings.apiBase)
 
   const [name, setName] = useState('')
   const [filter, setFilter] = useState('')
+  // 角色名 -> 实时进度。3s 轮询 /ingest/status，五步全终态后停轮该角色
+  const [progress, setProgress] = useState<Record<string, IngestStatus>>({})
+
+  const pendingChars = useMemo(
+    () =>
+      ingests
+        .filter((r) => r.ok)
+        .map((r) => r.character)
+        .filter((c) => {
+          const p = progress[c]
+          return !p || p.status === 'pending' || p.status === 'running'
+        }),
+    [ingests, progress],
+  )
+
+  useEffect(() => {
+    if (pendingChars.length === 0 || health === 'down') return
+    let alive = true
+    const tick = async () => {
+      for (const c of pendingChars) {
+        try {
+          const st = await ingestStatus(c, apiBase)
+          if (!alive) return
+          setProgress((prev) => ({ ...prev, [c]: st }))
+        } catch {
+          /* 单次失败下轮再试 */
+        }
+      }
+    }
+    tick()
+    const t = setInterval(tick, 3000)
+    return () => {
+      alive = false
+      clearInterval(t)
+    }
+  }, [pendingChars.join('、'), health, apiBase])
 
   const filtered = useMemo(() => {
     const kw = filter.trim()
@@ -141,17 +216,7 @@ export default function KnowledgePage() {
                 <tr key={r.id}>
                   <td className="kb-char">{r.character}</td>
                   <td className="kb-mono">{r.chainId || '—'}</td>
-                  <td>
-                    {r.ok ? (
-                      <span className="tag tag-ok">
-                        <CheckCircle2 size={11} /> {r.state}
-                      </span>
-                    ) : (
-                      <span className="tag tag-err" title={r.error}>
-                        <XCircle size={11} /> {r.state}
-                      </span>
-                    )}
-                  </td>
+                  <td>{renderStatus(r, progress[r.character])}</td>
                   <td className="kb-time">{new Date(r.createdAt).toLocaleString('zh-CN')}</td>
                 </tr>
               ))}

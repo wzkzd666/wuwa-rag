@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import asdict
 
+import redis as redis_lib
 from celery import Celery, chain
 from wuwa_mcp.core.container import get_container
 
@@ -48,6 +50,76 @@ class CharacterNotFound(Exception):
     """角色在 wiki 上不存在，链应中止（不重试）。"""
 
 
+# ───────────── 入库进度打点（Redis，供 GET /ingest/status 轮询） ─────────────
+# 双通道：_step_update 走 Celery backend（按 task_id），_progress_mark 写 Redis 聚合键
+# （按角色）。/ingest/status 以聚合键为主数据源——chain .si 的 result.parent 链接不可靠，
+# 按角色一个键最稳。步骤名与序号绑定，勿随意增删改名。
+PIPELINE_STEPS = ("crawl", "chunk", "ingest", "index", "graph")
+STEP_LABELS = {"crawl": "抓取", "chunk": "分块", "ingest": "入库", "index": "索引", "graph": "图谱"}
+_PROGRESS_TTL = 3600
+_r: redis_lib.Redis | None = None
+
+
+def _redis() -> redis_lib.Redis:
+    global _r
+    if _r is None:
+        _r = redis_lib.Redis.from_url(s.REDIS_URL, decode_responses=True, socket_connect_timeout=3)
+    return _r
+
+
+def progress_key(character: str) -> str:
+    return f"ingest:progress:{character}"
+
+
+def _progress_mark(character: str, step: str, status: str, error: str | None = None) -> None:
+    """尽力而为的打点：Redis 故障绝不能把流水线任务本身带崩。"""
+    try:
+        key = progress_key(character)
+        raw = _redis().get(key)
+        data = json.loads(raw) if raw else {
+            "character": character,
+            "steps": {k: "pending" for k in PIPELINE_STEPS},
+            "errors": {},
+        }
+        data["steps"][step] = status
+        if error:
+            data["errors"][step] = error[:300]
+        else:
+            data["errors"].pop(step, None)
+        data["updated_at"] = int(time.time())
+        _redis().setex(key, _PROGRESS_TTL, json.dumps(data, ensure_ascii=False))
+    except Exception as exc:  # noqa: BLE001 —— 打点失败只记日志
+        log.warning("进度打点失败（忽略）step=%s: %s", step, exc)
+
+
+def get_progress(character: str) -> dict | None:
+    """读某角色的聚合进度快照；未开跑（worker 还没消费）返回 None。"""
+    try:
+        raw = _redis().get(progress_key(character))
+        return json.loads(raw) if raw else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("读进度失败（忽略）: %s", exc)
+        return None
+
+
+# 流水线五步与标签见上方 PIPELINE_STEPS / STEP_LABELS
+
+
+def _step_update(task, character: str, step: str, status: str, error: str | None = None) -> None:
+    """双通道步骤上报（供 GET /ingest/status 轮询）：
+    1) Celery backend update_state（按 task_id，保留给外部工具）；
+    2) _progress_mark 聚合键（按角色，/ingest/status 的主数据源）。
+    status ∈ start|done|fail。task 未 bind 时传 None 静默跳过；
+    上报抛错只记日志，绝不因观测性代码弄挂业务流水线。
+    """
+    if task is not None:
+        try:
+            task.update_state(state="PROGRESS", meta={"step": step, "status": status})
+        except Exception as exc:
+            log.warning("步骤上报失败 %s/%s: %s", step, status, exc)
+    _progress_mark(character, step, {"start": "running", "done": "success", "fail": "failed"}[status], error)
+
+
 # ───────────── crawl_runs 落地（crawl 步骤用） ─────────────
 async def _crawl_run_insert(character: str) -> int:
     async with get_cursor() as cur:
@@ -75,6 +147,7 @@ async def _fetch_markdown(character: str) -> str:
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=15)
 def crawl_character(self, character: str, run_id: int | None = None):
     # 只在首次插入；重试通过 args 回传 run_id，避免重复 INSERT 污染 crawl_runs
+    _step_update(self, character, "crawl", "start")
     if run_id is None:
         run_id = _run(_crawl_run_insert(character))
     try:
@@ -84,14 +157,17 @@ def crawl_character(self, character: str, run_id: int | None = None):
         (s.RAW_DIR / f"{character}.md").write_text(md, encoding="utf-8")
     except CharacterNotFound:
         _run(_crawl_run_update(run_id, "failed", {"error": "not_found"}))   # 补状态
+        _step_update(self, character, "crawl", "fail", "wiki 上不存在该角色")
         raise
     except Exception as exc:
         _run(_crawl_run_update(run_id, "failed", {"error": f"fetch: {exc}"}))
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, args=(character, run_id))             # run_id 带回
+        _step_update(self, character, "crawl", "fail", f"抓取失败(已重试): {exc}")
         raise
     else:
         _run(_crawl_run_update(run_id, "success", {"bytes": len(md)}))
+        _step_update(self, character, "crawl", "done")
     finally:
         _run(close_pool())
 
@@ -120,9 +196,15 @@ async def _chunk_character_async(character: str) -> None:
 
 
 
-@celery_app.task
-def chunk_character(character: str):
-    _run(_chunk_character_async(character))
+@celery_app.task(bind=True)
+def chunk_character(self, character: str):
+    _step_update(self, character, "chunk", "start")
+    try:
+        _run(_chunk_character_async(character))
+    except Exception as exc:
+        _step_update(self, character, "chunk", "fail", f"{exc}")
+        raise
+    _step_update(self, character, "chunk", "done")
     return {"character": character}
 
 
@@ -134,9 +216,15 @@ async def _ingest_character_async(character: str) -> int:
     return n
 
 
-@celery_app.task
-def ingest_character(character: str):
-    n = _run(_ingest_character_async(character))
+@celery_app.task(bind=True)
+def ingest_character(self, character: str):
+    _step_update(self, character, "ingest", "start")
+    try:
+        n = _run(_ingest_character_async(character))
+    except Exception as exc:
+        _step_update(self, character, "ingest", "fail", f"{exc}")
+        raise
+    _step_update(self, character, "ingest", "done")
     return {"character": character, "chunks": n}
 
 
@@ -149,9 +237,15 @@ async def _index_character_async(character: str) -> None:
     await close_pool()
 
 
-@celery_app.task
-def index_character(character: str):
-    _run(_index_character_async(character))
+@celery_app.task(bind=True)
+def index_character(self, character: str):
+    _step_update(self, character, "index", "start")
+    try:
+        _run(_index_character_async(character))
+    except Exception as exc:
+        _step_update(self, character, "index", "fail", f"{exc}")
+        raise
+    _step_update(self, character, "index", "done")
     return {"character": character}
 
 
@@ -165,9 +259,15 @@ async def _graph_character_async(character: str) -> None:
     await close_driver()
 
 
-@celery_app.task
-def graph_character(character: str):
-    _run(_graph_character_async(character))
+@celery_app.task(bind=True)
+def graph_character(self, character: str):
+    _step_update(self, character, "graph", "start")
+    try:
+        _run(_graph_character_async(character))
+    except Exception as exc:
+        _step_update(self, character, "graph", "fail", f"{exc}")
+        raise
+    _step_update(self, character, "graph", "done")
     return {"character": character}
 
 

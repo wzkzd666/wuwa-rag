@@ -48,14 +48,14 @@ class Settings(BaseSettings):
     S3_ACCESS_KEY: str = "rustfsadmin"
     S3_SECRET_KEY: str = "rustfsadmin"
     S3_BUCKET_RAW: str = "wuwa-raw"
-    S3_BUCKET_IMAGES: str = "wuwa-images"
+    S3_BUCKET_IMAGES: str = "wuwa-images"   # 预留：立绘桶，images 表已建、VLM 链路未接入主链
 
-    # ---------- LLM：双模型分工（多 agent）----------
+    # ---------- LLM：多模型分工（多 agent）----------
     # aemeath = chat 专用（角色扮演微调，人设由模型自带 Modelfile SYSTEM）
-    # qwen3:8b = tool 模型（字典抽取 / 工具调用等结构化任务）
+    # qwen3:8b = tool 模型（字典抽取 / 工具调用 / 滚动摘要）
     LLM_MODEL: str = "aemeath"
     TOOL_MODEL: str = "qwen3:8b"
-    VLM_MODEL: str = "qwen3-vl:8b"
+    VLM_MODEL: str = "qwen3-vl:8b"      # 预留：立绘视觉描述（未接入主链）
     LLM_URL: str = "http://localhost:11434"       # ChatOllama
     LLM_API_KEY: str = "wuwa"                   # 不校验，随便填
     LLM_TEMPERATURE: float = 0.3
@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # 所以抽取侧关 thinking 是纯收益。
     TOOL_TEMPERATURE: float = 0.0
     TOOL_MAX_TOKENS: int = 512
+    # 滚动摘要（intent.summarize_turns 压缩滑出窗口的旧轮次）复用 TOOL_MODEL：
+    # 实测 0.6b 合并多轮会丢角色名，而摘要的价值恰恰在保住名字。
+    # 这里只留长度硬帽：超长视为模型跑偏，丢尾部并标记降级。
+    SUMMARY_MAX_CHARS: int = 160
 
     # ---------- 采样 / 防复读（aemeath 是 8B 角色扮演模型，容易陷入整句复读）----------
     # Ollama 默认 repeat_penalty=1.1 对弱模型不够；实测 1.3 + 窗口 512 能压住段落级循环
