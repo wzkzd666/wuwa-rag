@@ -5,24 +5,28 @@
 from __future__ import annotations
 
 import asyncio
-def _run(func):
-    """Windows 下 psycopg/neo4j 异步必须用 SelectorEventLoop，否则连接池初始化超时。"""
-    return asyncio.run(func, loop_factory=asyncio.SelectorEventLoop)
-
 import json
 from dataclasses import asdict
 
 from celery import Celery, chain
+from wuwa_mcp.core.container import get_container
 
 from .config import ensure_dirs, get_settings
 from .db import close_pool, get_cursor
-from .ww_logger import get_logger
+from .graph.build_graph import close_driver, init_schema, ping, upsert_character
+from .graph.extract import extract_character, load_chunks
 from .ingest.chunker import chunk_markdown
-from .ingest.pipeline import ingest_one, _load_chunks as load_chunks_by_char
-from .retrieval.build_index import build_sparse, build_dense, _load_chunks as load_all_chunks
-from .graph.build_graph import upsert_character, ping, init_schema, close_driver
-from .graph.extract import load_chunks, extract_character
-from wuwa_mcp.core.container import get_container
+from .ingest.pipeline import _load_chunks as load_chunks_by_char
+from .ingest.pipeline import ingest_one
+from .retrieval.build_index import _load_chunks as load_all_chunks
+from .retrieval.build_index import build_dense, build_sparse
+from .ww_logger import get_logger
+
+
+def _run(func):
+    """Windows 下 psycopg/neo4j 异步必须用 SelectorEventLoop，否则连接池初始化超时。"""
+    return asyncio.run(func, loop_factory=asyncio.SelectorEventLoop)
+
 
 log = get_logger("celery")
 s = get_settings()
@@ -100,7 +104,7 @@ async def _chunk_character_async(character: str) -> None:
     new_chunks = chunk_markdown(raw.read_text(encoding="utf-8"), character)
     path = s.CHUNKS_JSONL
     existing = (
-        [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         if path.exists() else []
     )
     existing = [c for c in existing if c.get("character") != character]  # 丢掉旧版

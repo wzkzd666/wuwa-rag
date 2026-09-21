@@ -2,7 +2,7 @@ import logging
 import sys
 from logging.handlers import TimedRotatingFileHandler
 
-from .config import get_settings, ensure_dirs
+from .config import ensure_dirs, get_settings
 
 s=get_settings()
 

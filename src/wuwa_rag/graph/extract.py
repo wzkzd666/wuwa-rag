@@ -68,7 +68,7 @@ def _noisy(v: str, words: tuple[str, ...]) -> bool:
 
 def load_chunks(path: Path | None = None) -> list[dict]:
     p = path or get_settings().CHUNKS_JSONL
-    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [json.loads(ln) for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
 def all_characters(chunks: list[dict]) -> list[str]:

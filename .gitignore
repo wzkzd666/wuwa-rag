@@ -13,7 +13,4 @@ wheels/
 .env
 data
 logs
-scripts
-.workbuddy
-wuwa-model/qwen3_8b_amis
 CLAUDE.md

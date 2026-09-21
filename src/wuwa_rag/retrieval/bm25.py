@@ -85,7 +85,7 @@ class BM25Index:
         return path
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "BM25Index":
+    def load(cls, path: Path | None = None) -> BM25Index:
         path = path or (s.VECTOR_DIR / "bm25.pkl")
         with path.open("rb") as f:
             d = pickle.load(f)

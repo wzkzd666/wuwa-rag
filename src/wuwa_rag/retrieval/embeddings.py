@@ -5,15 +5,20 @@
   且与 reranker(bge-reranker-v2-m3) 同一套 sentence-transformers，代码一致。
 """
 from __future__ import annotations
-from ..config import get_settings
-s = get_settings()
-import os
-os.environ.setdefault("HF_HOME", s.HF_HOME)
 
+import os
 from functools import lru_cache
 
 from langchain_core.embeddings import Embeddings
-from sentence_transformers import SentenceTransformer
+
+from ..config import get_settings
+
+s = get_settings()
+# HF_HOME 必须赶在 sentence_transformers 之前设好：它经 huggingface_hub 在
+# **import 时**就读取并缓存该路径，事后再设无效。所以下面这行 import 只能留在原地。
+os.environ.setdefault("HF_HOME", s.HF_HOME)
+
+from sentence_transformers import SentenceTransformer  # noqa: E402
 
 
 @lru_cache(maxsize=1)

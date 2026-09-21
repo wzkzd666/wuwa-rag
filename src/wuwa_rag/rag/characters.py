@@ -10,7 +10,7 @@ import re
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..ww_logger import get_logger
-from .llm import get_chat_llm
+from .llm import get_tool_llm
 
 log = get_logger('rag')
 
@@ -54,8 +54,14 @@ _EXTRACT_PROMPT = (
 
 
 async def _llm_candidates(question: str) -> list[str]:
+    """名册没命中时的 LLM 兜底，走 tool 模型 qwen3:8b（抽取任务，非 chat）。
+
+    ⚠️ 输出不要用 CHARACTER_NAMES 过滤：规则层已覆盖名册内角色（实测兜底触发率 0%），
+    这个兜底的唯一价值就是识别「名册里还没有的新角色」以触发自动爬取；
+    拿名册过滤等于把该功能废掉。幻觉名由爬取侧 CharacterNotFound 兜住。
+    """
     try:
-        resp = await get_chat_llm().ainvoke([
+        resp = await get_tool_llm().ainvoke([
             SystemMessage(content=(
                 "你是《鸣潮》wiki 的角色名抽取器。只输出一个 JSON："
                 '{"characters": ["角色名"]}，没有具体角色就 {"characters": []}。'

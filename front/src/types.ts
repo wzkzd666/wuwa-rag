@@ -10,6 +10,8 @@ export interface Message {
   streaming?: boolean
   /** 仅 assistant：后端返回的检索状态标记 */
   status?: 'retrieving' | 'done' | 'error'
+  /** 仅 assistant：当前阶段的用户可读文案（抽取/检索/生成），流式期间更新 */
+  stageLabel?: string
   /** 仅 assistant：问答元数据 */
   meta?: AskMeta
   /** 仅 assistant：出错信息 */
@@ -60,6 +62,8 @@ export interface IngestOut {
 export type StreamEvent =
   | { token: string }
   | { status: 'retrieving' }
+  /** 细粒度阶段：抽取/检索/生成，用于在无输出期间告知用户在做什么 */
+  | { stage: string; label: string }
   | {
       done: true
       answer: string

@@ -11,11 +11,10 @@ from chromadb.config import Settings
 
 from ..config import ensure_dirs, get_settings
 from ..db import close_pool, get_cursor
+from ..text import embed_input
+from ..ww_logger import get_logger
 from .bm25 import BM25Index, add_terms, tokenize
 from .embeddings import BgeM3Embeddings
-from ..ww_logger import get_logger
-from ..text import embed_input        
-
 
 bm25_logger=get_logger('bm25')
 vec_logger=get_logger('vec')

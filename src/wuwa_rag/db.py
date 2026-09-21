@@ -5,8 +5,9 @@ Windows 前置：入口必须先切 SelectorEventLoop，
 多引一套驱动徒增平台耦合。
 """
 import asyncio
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 from psycopg import AsyncCursor
 from psycopg_pool import AsyncConnectionPool
 
@@ -30,7 +31,7 @@ async def get_pool() -> AsyncConnectionPool:
 
 
 @asynccontextmanager
-async def get_cursor(commit: bool = True) -> AsyncGenerator[AsyncCursor,None]:
+async def get_cursor(commit: bool = True) -> AsyncGenerator[AsyncCursor]:
     """游标管理器，自动关闭游标和归还连接"""
     pool = await get_pool()
     async with pool.connection() as conn:
