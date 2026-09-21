@@ -191,6 +191,16 @@ export const useStore = create<Store>()(
                         m.id === botMsg.id ? { ...m, content: m.content + evt.token, status: undefined } : m,
                       ),
                     }))
+                  } else if ('error' in evt) {
+                    // 后端 SSE 流中途异常（响应头已发出，错误以事件下发）：
+                    // 已吐出的 token 保留在气泡里，标记 error 态供重生成
+                    updateMsg(convId, botMsg.id, {
+                      streaming: false,
+                      status: 'error',
+                      stageLabel: undefined,
+                      error: evt.error + (evt.detail ? `（${evt.detail}）` : ''),
+                    })
+                    get().toast('err', evt.error)
                   } else if ('done' in evt && evt.done) {
                     const meta: AskMeta = {
                       intent: evt.intent,

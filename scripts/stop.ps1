@@ -2,7 +2,7 @@
 .SYNOPSIS
     潮声智库 · 一键停止（关闭 start.ps1 拉起的 Celery / FastAPI / 前端，并停 Docker 容器）
 .DESCRIPTION
-    读取 logs/dev.pids.json 里记录的后台窗口 PID，用 taskkill /T /F 精准结束其进程树
+    读取 .runtime/dev.pids.json 里记录的后台窗口 PID，用 Stop-Process / taskkill 精准结束其进程树
     （PowerShell 宿主 -> uv/npm -> 实际服务）。不碰记录之外的任何进程。
     默认 docker compose stop（保留数据卷），加 -Down 则 docker compose down（同样不删卷）。
 .PARAMETER KeepDocker
@@ -23,7 +23,7 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $Root    = Split-Path -Parent $PSScriptRoot
-$PidFile = Join-Path $Root 'logs\dev.pids.json'
+$PidFile = Join-Path $Root '.runtime\dev.pids.json'
 
 function Write-Step([string]$msg) { Write-Host "`n==> $msg" -ForegroundColor Cyan }
 function Write-Ok([string]$msg)   { Write-Host "    [OK] $msg" -ForegroundColor Green }

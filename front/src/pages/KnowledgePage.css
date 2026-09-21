@@ -185,3 +185,43 @@
     display: none;
   }
 }
+
+/* 五步入库进度条 */
+.step-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.step-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  color: var(--text-muted);
+}
+.step-dot em {
+  font-style: normal;
+}
+.step-running {
+  border-color: rgba(129, 140, 248, 0.5);
+  color: #a5b0ff;
+  background: rgba(129, 140, 248, 0.1);
+}
+.step-success {
+  border-color: rgba(52, 211, 153, 0.45);
+  color: var(--ok);
+  background: rgba(52, 211, 153, 0.08);
+}
+.step-failed {
+  border-color: rgba(248, 113, 113, 0.5);
+  color: var(--err);
+  background: rgba(248, 113, 113, 0.09);
+}
+.step-bar .tag {
+  margin-left: 4px;
+}

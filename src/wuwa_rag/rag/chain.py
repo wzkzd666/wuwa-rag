@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
@@ -19,6 +21,8 @@ from .intent import (
     detect_slots,
     detect_stage,
     extract_characters,
+    rewrite_query,
+    summarize_turns,
 )
 from .llm import get_chat_llm
 from .loopguard import LoopGuard, trim_loop
@@ -65,31 +69,119 @@ def _new_loop_guard() -> LoopGuard:
     )
 
 
+async def _commit_history(state: RagState, answer: str) -> dict:
+    """本轮问答写回记忆，并在轮次被挤出窗口时滚动压缩（B）。
+
+    evicted 必须在截断**之前**取：checkpointer 里只存截断后的窗口，
+    事后再也拿不到被挤出的轮次。只有真有 eviction 才调摘要模型——
+    窗口没满时无需压缩，省一次调用。摘要失败保持原摘要（回落不压缩）。
+    生成与闲聊两个节点共用。
+    """
+    prev = state.get("history", [])
+    window = setting.MAX_HISTORY_TURNS * 2
+    grown = prev + [
+        {"role": "user", "content": state["question"]},
+        {"role": "assistant", "content": answer},
+    ]
+    new_history = grown[-window:]
+    out: dict = {"history": new_history}
+    evicted = grown[:-window]
+    if evicted:
+        out["context_summary"] = await summarize_turns(
+            evicted, state.get("context_summary", ""))
+    return out
+
+
+
+# 名册 TTL 缓存：每轮问答 intent_node 与 ensure_characters 至少各查一次 Neo4j，
+# 而名册只在入库时变化——60s 缓存直接省掉一次往返。入库成功后主动失效。
+_KNOWN_TTL = 60.0
+_known_cache: tuple[float, list[str]] = (0.0, [])
+
 
 async def _known_characters() -> list[str]:
+    global _known_cache
+    now = time.monotonic()
+    if _known_cache[1] and now - _known_cache[0] < _KNOWN_TTL:
+        return _known_cache[1]
     async with get_session() as s:
         rows = await (await s.run("MATCH (c:Character) RETURN c.name AS n")).data()
-    return [r["n"] for r in rows]
+    names = [r["n"] for r in rows]
+    if names:                      # 空结果（Neo4j 抖动）不缓存，避免脏 60s
+        _known_cache = (now, names)
+    return names
+
+
+def _invalidate_known_cache() -> None:
+    """新角色建库完成后调用，下一轮立刻能看到。"""
+    global _known_cache
+    _known_cache = (0.0, [])
+
+
+# 远指代信号：问句（含改写句）里出现这些词，说明指代对象在窗口外的摘要里。
+# 「开头聊的那位武器推荐什么」即便改写器没解析出名字，图谱检索也需要角色。
+_FAR_REF_RE = re.compile(r"开头|先前|之前|前面|上次|刚才|最初|那位")
+
+
+def _inject_far_characters(
+    sq: str, chars: list[str], summary: str, known: set[str],
+) -> list[str]:
+    """前角色注入（尾巴修复）：远指代问句从滚动摘要补「前面的角色」。
+
+    - 触发只看**远指代词**（开头/之前/那位…），不看 chars 是否为空——比较句
+      （「开头那位和长离谁强」）原有角色照常保留，前角色**追加**进去，
+      extract_characters 的多角色抽取与每角色补召回原功能不受影响。
+    - 「开头聊的那位」= 摘要里**最先**出现的名字（摘要按谈话顺序保留角色名），
+      取法与 focus_anchors 的最近优先相反，按摘要文本位置排序。
+    - 改写成功时远指代词已被替换掉，sq 不再命中 → 天然 no-op；已在 chars 中也不重复。
+    """
+    if not summary or not known or not _FAR_REF_RE.search(sq):
+        # known 为空时空正则会在每个位置匹配出垃圾，必须挡
+        return chars
+    # 名字长度降序：「秧秧」是「秧秧·玄翎」的前缀，短的在前会误抢匹配
+    pattern = "|".join(re.escape(n) for n in sorted(known, key=len, reverse=True) if n)
+    hits = [m.group(0) for m in re.finditer(pattern, summary)]
+    if not hits:
+        return chars
+    name = hits[0]
+    if name in chars:
+        return chars
+    log.info("前角色注入: %s（远指代=%r 摘要=%r）", name, sq[:24], summary[:40])
+    return [*chars, name]
 
 
 async def intent_node(state: RagState) -> dict:
     q = state["question"]
-    slots = detect_slots(q)
-    chars = extract_characters(q, await _known_characters()) or state.get("characters", [])
-    element = detect_element(q) or state.get("element", "")
-    stage = detect_stage(q)
-    intent = classify(q, slots)
+    known = await _known_characters()
+    # 追问改写（A+B 输入）：滚动摘要（窗口外压缩记忆）+ 焦点锚点（全量文本提角色，
+    # 不怕 120 字截断丢名）+ 最近 2 轮短原文。检索信号全部吃改写句——
+    # 「那她配什么声骸」单拿原句必落空，补出角色名才能命中。
+    # 生成侧仍用原句+history（_build_context 里有对话历史），展示不受影响。
+    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
+    summary = state.get("context_summary", "")
+    sq = await rewrite_query(q, history, known=known, summary=summary)
+
+    slots = detect_slots(sq)
+    chars = extract_characters(sq, known) or state.get("characters", [])
+    # 远指代兜底：改写器偶发解析失败/半解析时，摘要里的「前角色」兜住
+    chars = _inject_far_characters(sq, chars, summary, set(known))
+    element = detect_element(sq) or state.get("element", "")
+    stage = detect_stage(sq)
+    intent = classify(sq, slots)
 
     # 闲聊分流（qwen3:8b 主题 agent）：仅在「无角色名 且 无槽位 且 无属性/阶段」时才调用。
-    # 槽位非空几乎必然是游戏提问（实测「秧秧怎么玩」这类靠语义命中；真闲聊句槽位为空，
-    # 误触发 rule_has_signal 的是 SEMANTIC_PATTERNS 的「怎么」——所以判据用 slots 而非它）。
+    # 槽位非空几乎必然是游戏提问（实测「秧秧怎么玩」这类靠语义命中；真闲聊句槽位为空）。
+    # 不能用 SEMANTIC_PATTERNS 当判据——「怎么」会误命中闲聊句（「怎么这么晚才来」）。
     # 有角色名绝不当闲聊（「你好呀卡卡罗」是提问）；LLM 解析失败回落 game。
+    # 判据用改写句 sq：追问「那她配什么声骸」原句无角色，改写后有——不会误入闲聊。
     if not chars and not slots and not stage and not element:
-        topic = await classify_topic(q)
+        topic = await classify_topic(sq)
         if topic == "chitchat":
             intent = "chitchat"
-    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s", intent, slots, chars or "未识别", element or "-", stage or "-")
-    return {"intent": intent, "slots": slots, "characters": chars, "element": element, "stage": stage}
+    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s%s", intent, slots, chars or "未识别",
+             element or "-", stage or "-", f" | 改写={sq!r}" if sq != q else "")
+    return {"search_query": sq, "intent": intent, "slots": slots,
+            "characters": chars, "element": element, "stage": stage}
 
 
 def _route(state: RagState) -> str:
@@ -113,7 +205,8 @@ def _after_graph(state: RagState) -> str:
 
 
 async def vector_node(state: RagState) -> dict:
-    q = state["question"]
+    # 检索吃改写句（intent_node 产出）：追问「那她配什么声骸」原句召不到秧秧的文档
+    q = state.get("search_query") or state["question"]
     chars = state.get("characters") or []
     n = max(len(chars), 1)
 
@@ -138,6 +231,9 @@ async def vector_node(state: RagState) -> dict:
 
 def _build_context(state: RagState) -> str:
     parts: list[str] = []
+    # 注意：不要把 context_summary 塞进生成上下文——实测 aemeath 会把摘要句
+    # 原样复述进答案（「…讨论声骸选择及毕业配装…」这种第三人称腔调穿帮）。
+    # 摘要只喂给 rewrite_query 消解指代；生成侧靠窗口内 history + 改写后的检索结果。
     history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
     if history:
         parts.append("## 对话历史\n" + "\n".join(
@@ -173,8 +269,8 @@ async def generate_node(state: RagState):
 
     - 非流式（ask → chain.ainvoke）：LangGraph 自动收集所有 yield 的最终状态，
       行为等价于返回 dict。
-    - 流式（ask_stream → chain.astream_events）：每个 yield 都会产出
-      on_chain_stream 事件，前端可从 on_chat_model_stream 抽 token。
+    - 流式（ask_stream → chain.astream_events）：token 从 on_chat_model_stream 抽取
+      （llm.astream 自带回调），节点内部不再逐 token yield 中间态。
 
     内部用 llm.astream() 逐 token 生成，同时做复读检测。
     """
@@ -198,10 +294,9 @@ async def generate_node(state: RagState):
                 truncated = True
                 break
             full.append(chunk.content)
-            # 增量 yield：让 astream_events 产出 on_chain_stream 事件
-            # 注意：answer_chunk 是临时字段，不在 RagState 里声明，
-            # LangGraph 会忽略未声明字段的持久化，但事件里仍然能看到。
-            yield {"answer_chunk": chunk.content}
+            # 不再逐 token yield 中间态：前端 token 取自 on_chat_model_stream
+            # （llm.astream 自带回调），逐 token yield 只产生无人消费的
+            # on_chain_stream 事件；str 字段本就覆盖非拼接，中间值无意义。
     except Exception as exc:
         log.error("LLM 调用失败: %s", exc)
         answer_ok = False
@@ -212,17 +307,14 @@ async def generate_node(state: RagState):
     if answer_ok and truncated and hit:
         answer = trim_loop(answer, hit)
 
-    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
-    new_history = history + [
-        {"role": "user", "content": state["question"]},
-        {"role": "assistant", "content": answer},
-    ]
-    # 最终状态：answer/truncated/history 是 RagState 声明的字段，会被 checkpointer 持久化
+    # 最终状态：answer/truncated/history/context_summary 是 RagState 声明字段，
+    # 由 checkpointer 持久化；_commit_history 顺带压缩被挤出窗口的旧轮次（B）。
+    committed = await _commit_history(state, answer)
     yield {
         "context": context,
         "answer": answer,
         "truncated": truncated,
-        "history": new_history[-setting.MAX_HISTORY_TURNS * 2:],
+        **committed,
     }
 
 
@@ -257,7 +349,8 @@ async def chitchat_node(state: RagState):
                 truncated = True
                 break
             full.append(chunk.content)
-            yield {"answer_chunk": chunk.content}
+            # 同 generate_node：不再逐 token yield 中间态（前端 token 走
+            # on_chat_model_stream，此处中间 yield 无人消费）
     except Exception as exc:
         log.error("闲聊生成失败: %s", exc)
         answer_ok = False
@@ -268,15 +361,11 @@ async def chitchat_node(state: RagState):
     if answer_ok and truncated and hit:
         answer = trim_loop(answer, hit)
 
-    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
-    new_history = history + [
-        {"role": "user", "content": state["question"]},
-        {"role": "assistant", "content": answer},
-    ]
+    committed = await _commit_history(state, answer)
     yield {
         "answer": answer,
         "truncated": truncated,
-        "history": new_history[-setting.MAX_HISTORY_TURNS * 2:],
+        **committed,
     }
 
 
@@ -322,15 +411,19 @@ async def _crawl_and_wait(names: list[str], timeout: int = 180) -> bool:
         r = build_pipeline(n).apply_async()
         results.append(r)
         log.info("自动爬取: 已入队 chain_id=%s 角色=%s", r.id, n)
+    t0 = time.perf_counter()
     try:
         for r in results:
             await asyncio.to_thread(r.get, timeout=timeout)
-        return True
     except CharacterNotFound:
         return False
     except CeleryTimeout:
-        log.warning("自动爬取: 等待超时(%ss)，视为抓取失败", timeout)
+        log.warning("自动爬取: 等待超时(%ss) 角色=%s，视为抓取失败", timeout, names)
         return False
+    # 新角色已进图谱：失效名册缓存，下一轮 _known_characters 立刻看得到
+    _invalidate_known_cache()
+    log.info("自动爬取: %s 建库完成，耗时 %.1fs", names, time.perf_counter() - t0)
+    return True
 
 
 async def ensure_characters(question: str) -> tuple[list[str], bool, list[str]]:
@@ -381,6 +474,7 @@ async def ask_stream(question: str, thread_id: str = "default"):
     与 ask() 共享同一张图和 checkpointer，thread_id 真正生效。
     """
     # 阶段文案：检索+重排实测约 19s、生成仅 1~2s，所以必须让用户看到在干什么
+    t0 = time.perf_counter()
     yield {"stage": "crawl", "label": "检查角色是否在知识库中"}
 
     candidates, ok, crawled = await ensure_characters(question)
@@ -412,7 +506,12 @@ async def ask_stream(question: str, thread_id: str = "default"):
         # token 级事件：**必须按节点过滤**。intent_node 里的主题分类器也调 LLM，
         # 它的流式事件同样挂在 on_chat_model_stream 上（metadata.langgraph_node='intent'），
         # 不过滤会把 {"topic":"chitchat"} 这类分类输出当答案吐给前端（实测发生过）。
+        # 另挡 wwa:summary 标签一路：_commit_history 在 generate/chitchat 节点**内部**
+        # 调 summarize_turns，其 ainvoke 的流式回调 node='generate'，节点过滤挡不住，
+        # 实测摘要整句被拼进答案尾巴（六轮深会话测试抓到，intent 侧已打标签）。
         elif kind == "on_chat_model_stream":
+            if "wwa:summary" in (event.get("tags") or []):
+                continue
             node = event.get("metadata", {}).get("langgraph_node", "")
             if node not in ("generate", "chitchat"):
                 continue
@@ -431,6 +530,14 @@ async def ask_stream(question: str, thread_id: str = "default"):
     # 如果 generate_node 内部已截断，final_state["answer"] 是截断后的权威全文
     if final_state.get("truncated") and final_state.get("answer"):
         answer = final_state["answer"]
+
+    # 全链路耗时：排查「慢在检索还是生成」刚需（阶段事件只给顺序不给时长）
+    log.info(
+        "流式完成 thread=%s 耗时=%.1fs intent=%s 角色=%s docs=%d 答案=%d字%s",
+        thread_id, time.perf_counter() - t0, final_state.get("intent", "-"),
+        final_state.get("characters") or "-", len(final_state.get("docs") or []),
+        len(answer), " [截断]" if final_state.get("truncated") else "",
+    )
 
     yield {
         "done": True,

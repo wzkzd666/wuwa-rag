@@ -15,6 +15,7 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from ..config import get_settings
 from ..ww_logger import get_logger
 from .llm import get_tool_llm
 
@@ -101,15 +102,6 @@ _TOPIC_EXAMPLES = (
 )
 
 
-def rule_has_signal(question: str) -> bool:
-    """规则层是否抓到了任何信号（槽位/语义/属性/阶段）。
-
-    已不被主链使用（chain 里的闲聊判定用更严格的「无角色名+无槽位+无属性+无阶段」，
-    因为 SEMANTIC_PATTERNS 的「怎么」会误命中闲聊句），保留仅作离线分析用。
-    """
-    return bool(detect_slots(question)) or is_semantic(question) or bool(detect_element(question)) or bool(detect_stage(question))
-
-
 async def classify_topic(question: str) -> str:
     """判断主题是闲聊还是游戏提问。返回 "chitchat" 或 "game"。
 
@@ -139,3 +131,144 @@ async def classify_topic(question: str) -> str:
     except Exception as exc:
         log.warning("主题分类失败，回落 game: %s", exc)
         return "game"
+
+
+# ---------- 追问改写：把指代残缺的追问补成自包含问句（qwen3:8b agent）----------
+
+_REWRITE_SYSTEM = """你是《鸣潮》问答助手的查询改写器。用户的问题可能带指代（她/它/他/那个/再/那/换成/开头那位…），需要结合对话上下文把它改写成一个不需要上下文就能看懂、适合拿去检索的自包含问句。
+规则：
+- 只输出改写后的一句话，不要引号、不要 JSON、不要解释。
+- 把「她/它/他/那位」替换成具体的角色名；省略主语的要补上。
+- 上下文里有角色锚点（话题角色）时，指代优先解析为锚点角色。
+- 「话题角色」按最近提及排序：「她/他/它/那位」默认指**列表第一个**（最近讨论的角色）。
+- 「开头/之前/前面聊的那位」这类**远指代**，解析为**摘要**里提到的角色（摘要按谈话顺序保留角色名，「开头聊的」= 摘要里最先出现的名字），不是最近话题。
+- 如果问题本身已自包含（无指代、无省略），原样输出。
+- 不改写主题，不加信息，不回答问题。
+
+示例：
+上下文：
+更早对话摘要：卡卡罗毕业配装推荐彻空冥雷。
+话题角色: 长离、今汐
+最近对话：
+用户: 长离的共鸣链效果
+助手: 第一链提高抗打断
+问题：开头聊的那位武器推荐什么
+改写为：卡卡罗的武器推荐是什么"""
+
+
+def focus_anchors(history: list[dict], known: list[str]) -> str:
+    """A·结构化焦点压缩：从历史里提炼「话题角色 + 聊过的槽位」微型锚点。
+
+    零 LLM、零延迟（全现成正则）。存在的意义：rewrite_query 里每轮原文截 120
+    字符，角色名出现在长回答的深处就会被截丢；锚点用全量文本提名字，不受截断影响。
+    角色按**最近提及优先**排序（倒序遍历历史）——实测正序时「她」在两个角色间
+    歧义，8b 会放弃改写；配合 _REWRITE_SYSTEM 的「默认第一个」规则消歧。
+    """
+    chars: list[str] = []
+    slots: list[str] = []
+    for m in reversed(history):
+        for c in extract_characters(m.get("content", ""), known):
+            if c not in chars:
+                chars.append(c)
+        for s in detect_slots(m.get("content", "")):
+            if s not in slots:
+                slots.append(s)
+    if not chars and not slots:
+        return ""
+    parts = []
+    if chars:
+        parts.append(f"话题角色: {'、'.join(chars[:3])}")
+    if slots:
+        parts.append(f"聊过的方面: {'、'.join(slots[:4])}")
+    return "；".join(parts)
+
+
+_SUMMARY_SYSTEM = """你是对话压缩器。把「已有摘要」和「即将被遗忘的旧对话」合并压缩成一句不超过80字的会话摘要，只保留：聊过哪些《鸣潮》角色、涉及哪些方面（声骸/配队/突破/共鸣链等）、用户的偏好倾向。
+- **角色名是最高优先级信息，必须逐字保留**，其次才是细节。宁可丢细节也不能丢名字。
+- 只输出摘要正文，不要前缀、不要引号、不要解释。
+- 旧摘要里的信息如果新对话没再提及，仍要保留（除非与新增内容冲突）。"""
+
+_DEGRADED_MARK = "（摘要失败，话题未知）"
+
+
+async def summarize_turns(evicted: list[dict], prev_summary: str) -> str:
+    """B·滚动摘要：压缩将被滑出记忆窗口的轮次。
+
+    模型选型实测：0.6b 合并多轮时会**丢角色名**（输出「讨论了声骸组合及相关话题」
+    这类空话），而摘要的价值恰恰在保住名字，所以压缩器用 qwen3:8b（get_tool_llm）。
+    实测首次压缩 12.9s、滚动合并 0.2s（输入短时有 KV 前缀缓存）。
+
+    evicted 是被挤出窗口的旧轮次（调用方必须在截断 history 前取好——checkpointer
+    里只有截断后的窗口，事后拿不到）。失败/超长时把 prev_summary 追加降级标记
+    返回——标记的意义是让**下一轮重新压缩完整窗口**来修复（此时被压缩的原文还全在
+    窗口内）；若原样吞掉，坏摘要会被一路继承、再也修不好。
+    """
+    s = get_settings()
+    text = "\n".join(
+        f"{'用户' if m.get('role') == 'user' else '助手'}: {(m.get('content') or '')[:200]}"
+        for m in evicted
+    )
+    if not text:
+        return prev_summary
+    msgs = [
+        SystemMessage(content=_SUMMARY_SYSTEM),
+        HumanMessage(content=f"已有摘要：{prev_summary or '（无）'}\n\n旧对话：\n{text}\n\n合并摘要："),
+    ]
+    try:
+        # tags 打标：ainvoke 内部同样产生 on_chat_model_stream 事件，且与 generate_node
+        # 同属一个节点（langgraph_node='generate'），节点过滤挡不住它——实测摘要文本
+        # 曾作为尾巴拼进流式答案。下游按 "wwa:summary" 标签丢弃（见 chain.ask_stream）。
+        resp = await get_tool_llm().ainvoke(msgs, config={"tags": ["wwa:summary"]})
+        out = (resp.content or "").strip().strip('"「」\'')
+        out = out.splitlines()[0].strip() if out else ""
+        if not out or len(out) > s.SUMMARY_MAX_CHARS:
+            log.warning("摘要异常(%r)，标记降级待下轮修复", out[:60])
+            return f"{prev_summary} {_DEGRADED_MARK}".strip()
+        log.info("滚动摘要: %r（窗口外 %d 条）", out, len(evicted))
+        return out
+    except Exception as exc:
+        log.warning("摘要失败，标记降级待下轮修复: %s", exc)
+        return f"{prev_summary} {_DEGRADED_MARK}".strip()
+
+
+async def rewrite_query(
+    question: str, history: list[dict], *, known: list[str] | None = None, summary: str = "",
+) -> str:
+    """追问改写：有上下文（历史或摘要）才调 LLM，无历史直接原句返回省一次调用。
+
+    输入三路合并（A+B）：滚动摘要（窗口外的压缩记忆）+ 焦点锚点（结构化角色信号）
+    + 最近 2 轮短原文。检索（意图/槽位/图谱/向量）都吃改写句——「那她配什么声骸」
+    单拿去召回必落空，补出角色名后才能命中。任何失败（异常/空/过长）一律回落
+    原句，改写是增益不是依赖，绝不能因它把问答弄挂。history 与展示仍用原句。
+    """
+    if not history and not summary:
+        return question
+    bits = []
+    if summary:
+        bits.append(f"更早对话摘要：{summary}")
+    if history:
+        if known:
+            anchors = focus_anchors(history, known)
+            if anchors:
+                bits.append(anchors)
+        turns = history[-4:]   # 最近两轮足够定位指代对象，也更省 token
+        ctx = "\n".join(
+            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content'][:120]}" for m in turns
+        )
+        bits.append(f"最近对话：\n{ctx}")
+    msgs = [
+        SystemMessage(content=_REWRITE_SYSTEM),
+        HumanMessage(content="\n".join(bits) + f"\n\n原始问题：{question}\n改写为："),
+    ]
+    try:
+        resp = await get_tool_llm().ainvoke(msgs)
+        out = (resp.content or "").strip().strip('"「」\'').splitlines()[0].strip() if resp.content else ""
+        if not out or len(out) > max(len(question) * 4, 60):
+            log.warning("查询改写: 输出异常(%r)，用原句", out[:60])
+            return question
+        if out != question:
+            log.info("查询改写: %r -> %r", question, out)
+        return out
+    except Exception as exc:
+        log.warning("查询改写失败，用原句: %s", exc)
+        return question

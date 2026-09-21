@@ -55,10 +55,11 @@ def get_chat_llm() -> Runnable:
 
 @lru_cache(maxsize=1)
 def get_tool_llm() -> Runnable:
-    """tool 模型：qwen3:8b，负责字典抽取与工具调用。
+    """tool 模型：qwen3:8b，负责字典抽取、工具调用、会话滚动摘要。
 
     temperature 取 TOOL_TEMPERATURE（默认 0）——抽取要的是稳定可解析的 JSON，
     不是文采；num_predict 也压小，抽取输出本就短。
+    摘要也用它的理由见 intent.summarize_turns（0.6b 合并多轮会丢角色名）。
     """
     s = get_settings()
     return _build_ollama(s.TOOL_MODEL, s.TOOL_TEMPERATURE, s.TOOL_MAX_TOKENS)

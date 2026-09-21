@@ -1,4 +1,4 @@
-import type { AskOut, IngestOut, StreamEvent } from '../types'
+import type { AskOut, IngestOut, IngestStatus, StreamEvent } from '../types'
 
 /**
  * API 层。默认走 Vite 代理前缀 /api（开发期转发到 127.0.0.1:8000）。
@@ -36,6 +36,11 @@ export function ask(question: string, threadId: string | null, base?: string): P
 /** POST /ingest */
 export function ingest(character: string, base?: string): Promise<IngestOut> {
   return request('/ingest', { method: 'POST', body: JSON.stringify({ character }) }, base)
+}
+
+/** GET /ingest/status?character=xxx —— 按角色查五步入库进度 */
+export function ingestStatus(character: string, base?: string): Promise<IngestStatus> {
+  return request(`/ingest/status?character=${encodeURIComponent(character)}`, { method: 'GET' }, base)
 }
 
 /**
