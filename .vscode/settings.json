@@ -1,13 +1,16 @@
 {
     "cSpell.words": [
+        "Aemeath",
         "ainvoke",
         "appendonly",
         "astream",
         "asyncio",
         "BAAI",
         "beautifulsoup",
+        "bitsandbytes",
         "boto",
         "cands",
+        "chatcmpl",
         "checkpointer",
         "chromadb",
         "chunker",
@@ -56,12 +59,18 @@
         "SYNERGIZES",
         "tmpl",
         "tmpls",
+        "torchaudio",
+        "torchvision",
+        "tqdm",
         "tsvector",
         "uvicorn",
         "venv",
+        "vllm",
         "wangzhikan",
         "workbuddy",
         "Wuthering",
         "wuwa"
-    ]
+    ],
+    "python-envs.defaultEnvManager": "ms-python.python:venv",
+    "python-envs.defaultPackageManager": "ms-python.python:pip"
 }

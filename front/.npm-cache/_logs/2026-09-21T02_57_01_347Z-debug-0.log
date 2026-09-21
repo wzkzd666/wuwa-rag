@@ -1,0 +1,181 @@
+0 verbose cli D:\nvm\nodejs\node.exe D:\nvm\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.6.0
+2 info using node@v24.9.0
+3 silly config load:file:D:\nvm\v24.9.0\node_modules\npm\npmrc
+4 silly config load:file:D:\ww_tool\wuwa-rag\front\.npmrc
+5 silly config load:file:C:\Users\Administrator\.npmrc
+6 silly config load:file:D:\nvm\nodejs\etc\npmrc
+7 verbose title npm install react@18 react-dom@18 react-router-dom@6 zustand@4 immer@10 marked dompurify lucide-react
+8 verbose argv "install" "--cache" "D:\\ww_tool\\wuwa-rag\\front\\.npm-cache" "--no-audit" "--no-fund" "react@18" "react-dom@18" "react-router-dom@6" "zustand@4" "immer@10" "marked" "dompurify" "lucide-react"
+9 verbose logfile logs-max:10 dir:D:\ww_tool\wuwa-rag\front\.npm-cache\_logs\2026-09-21T02_57_01_347Z-
+10 verbose logfile D:\ww_tool\wuwa-rag\front\.npm-cache\_logs\2026-09-21T02_57_01_347Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+13 silly idealTree buildDeps
+14 silly fetch manifest react@18
+15 silly packumentCache full:https://registry.npmmirror.com/react cache-miss
+16 http fetch GET 200 https://registry.npmmirror.com/npm 185ms
+17 http fetch GET 200 https://registry.npmmirror.com/react 208ms (cache miss)
+18 silly packumentCache full:https://registry.npmmirror.com/react set size:1269714 disposed:false
+19 silly fetch manifest react-dom@18
+20 silly packumentCache full:https://registry.npmmirror.com/react-dom cache-miss
+21 http fetch GET 200 https://registry.npmmirror.com/react-dom 302ms (cache miss)
+22 silly packumentCache full:https://registry.npmmirror.com/react-dom set size:1453602 disposed:false
+23 silly fetch manifest react-router-dom@6
+24 silly packumentCache full:https://registry.npmmirror.com/react-router-dom cache-miss
+25 http fetch GET 200 https://registry.npmmirror.com/react-router-dom 48ms (cache miss)
+26 silly packumentCache full:https://registry.npmmirror.com/react-router-dom set size:477541 disposed:false
+27 silly fetch manifest zustand@4
+28 silly packumentCache full:https://registry.npmmirror.com/zustand cache-miss
+29 http fetch GET 200 https://registry.npmmirror.com/zustand 68ms (cache miss)
+30 silly packumentCache full:https://registry.npmmirror.com/zustand set size:88695 disposed:false
+31 silly fetch manifest @types/react@>=16.8
+32 silly packumentCache full:https://registry.npmmirror.com/@types%2freact cache-miss
+33 http fetch GET 200 https://registry.npmmirror.com/@types%2freact 37ms (cache miss)
+34 silly packumentCache full:https://registry.npmmirror.com/@types%2freact set size:337951 disposed:false
+35 silly fetch manifest immer@10
+36 silly packumentCache full:https://registry.npmmirror.com/immer cache-miss
+37 http fetch GET 200 https://registry.npmmirror.com/immer 35ms (cache miss)
+38 silly packumentCache full:https://registry.npmmirror.com/immer set size:94419 disposed:false
+39 silly fetch manifest marked@*
+40 silly packumentCache full:https://registry.npmmirror.com/marked cache-miss
+41 http fetch GET 200 https://registry.npmmirror.com/marked 26ms (cache miss)
+42 silly packumentCache full:https://registry.npmmirror.com/marked set size:115310 disposed:false
+43 silly fetch manifest dompurify@*
+44 silly packumentCache full:https://registry.npmmirror.com/dompurify cache-miss
+45 http fetch GET 200 https://registry.npmmirror.com/dompurify 36ms (cache miss)
+46 silly packumentCache full:https://registry.npmmirror.com/dompurify set size:101324 disposed:false
+47 silly fetch manifest lucide-react@*
+48 silly packumentCache full:https://registry.npmmirror.com/lucide-react cache-miss
+49 http fetch GET 200 https://registry.npmmirror.com/lucide-react 46ms (cache miss)
+50 silly packumentCache full:https://registry.npmmirror.com/lucide-react set size:429491 disposed:false
+51 silly placeDep ROOT dompurify@3.4.15 OK for: wuwa-rag-front@1.0.0 want: *
+52 silly placeDep ROOT immer@10.2.0 OK for: wuwa-rag-front@1.0.0 want: 10
+53 silly placeDep ROOT lucide-react@1.47.0 OK for: wuwa-rag-front@1.0.0 want: *
+54 silly placeDep ROOT react@18.3.1 OK for: lucide-react@1.47.0 want: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
+55 silly placeDep ROOT marked@18.0.13 OK for: wuwa-rag-front@1.0.0 want: *
+56 silly placeDep ROOT react@18.3.1 REPLACE for: wuwa-rag-front@1.0.0 want: 18
+57 silly placeDep ROOT react-dom@18.3.1 OK for: wuwa-rag-front@1.0.0 want: 18
+58 silly placeDep ROOT react-router-dom@6.30.6 OK for: wuwa-rag-front@1.0.0 want: 6
+59 silly placeDep ROOT zustand@4.5.7 OK for: wuwa-rag-front@1.0.0 want: 4
+60 silly fetch manifest @types/trusted-types@^2.0.7
+61 silly packumentCache full:https://registry.npmmirror.com/@types%2ftrusted-types cache-miss
+62 silly fetch manifest loose-envify@^1.1.0
+63 silly packumentCache full:https://registry.npmmirror.com/loose-envify cache-miss
+64 silly fetch manifest loose-envify@^1.1.0
+65 silly packumentCache full:https://registry.npmmirror.com/loose-envify cache-miss
+66 silly fetch manifest loose-envify@^1.1.0
+67 silly packumentCache full:https://registry.npmmirror.com/loose-envify cache-miss
+68 silly fetch manifest scheduler@^0.23.2
+69 silly packumentCache full:https://registry.npmmirror.com/scheduler cache-miss
+70 silly fetch manifest react-router@6.30.6
+71 silly packumentCache full:https://registry.npmmirror.com/react-router cache-miss
+72 silly fetch manifest @remix-run/router@1.23.4
+73 silly packumentCache full:https://registry.npmmirror.com/@remix-run%2frouter cache-miss
+74 silly fetch manifest use-sync-external-store@^1.2.2
+75 silly packumentCache full:https://registry.npmmirror.com/use-sync-external-store cache-miss
+76 http fetch GET 200 https://registry.npmmirror.com/loose-envify 29ms (cache miss)
+77 silly packumentCache full:https://registry.npmmirror.com/loose-envify set size:2934 disposed:false
+78 http fetch GET 200 https://registry.npmmirror.com/@types%2ftrusted-types 33ms (cache miss)
+79 silly packumentCache full:https://registry.npmmirror.com/@types%2ftrusted-types set size:6632 disposed:false
+80 http fetch GET 200 https://registry.npmmirror.com/loose-envify 62ms (cache miss)
+81 silly packumentCache full:https://registry.npmmirror.com/loose-envify set size:2934 disposed:false
+82 silly packumentCache full:https://registry.npmmirror.com/loose-envify dispose
+83 http fetch GET 200 https://registry.npmmirror.com/loose-envify 82ms (cache miss)
+84 silly packumentCache full:https://registry.npmmirror.com/loose-envify set size:2934 disposed:true
+85 silly packumentCache full:https://registry.npmmirror.com/loose-envify dispose
+86 http fetch GET 200 https://registry.npmmirror.com/@remix-run%2frouter 125ms (cache miss)
+87 silly packumentCache full:https://registry.npmmirror.com/@remix-run%2frouter set size:133555 disposed:false
+88 http fetch GET 200 https://registry.npmmirror.com/react-router 253ms (cache miss)
+89 silly packumentCache full:https://registry.npmmirror.com/react-router set size:576003 disposed:false
+90 http fetch GET 200 https://registry.npmmirror.com/use-sync-external-store 301ms (cache miss)
+91 silly packumentCache full:https://registry.npmmirror.com/use-sync-external-store set size:1113556 disposed:false
+92 http fetch GET 200 https://registry.npmmirror.com/scheduler 318ms (cache miss)
+93 silly packumentCache full:https://registry.npmmirror.com/scheduler set size:1185497 disposed:false
+94 silly placeDep ROOT @types/trusted-types@2.0.7 OK for: dompurify@3.4.15 want: ^2.0.7
+95 silly placeDep ROOT loose-envify@1.4.0 OK for: react@18.3.1 want: ^1.1.0
+96 silly fetch manifest js-tokens@^3.0.0 || ^4.0.0
+97 silly packumentCache full:https://registry.npmmirror.com/js-tokens cache-miss
+98 http fetch GET 200 https://registry.npmmirror.com/js-tokens 21ms (cache miss)
+99 silly packumentCache full:https://registry.npmmirror.com/js-tokens set size:9897 disposed:false
+100 silly placeDep ROOT js-tokens@4.0.0 OK for: loose-envify@1.4.0 want: ^3.0.0 || ^4.0.0
+101 silly placeDep ROOT scheduler@0.23.2 OK for: react-dom@18.3.1 want: ^0.23.2
+102 silly fetch manifest react@>=16.8
+103 silly packumentCache full:https://registry.npmmirror.com/react cache-miss
+104 http cache https://registry.npmmirror.com/react 13ms (cache hit)
+105 silly packumentCache full:https://registry.npmmirror.com/react set size:6753409 disposed:false
+106 silly placeDep ROOT @remix-run/router@1.23.4 OK for: react-router-dom@6.30.6 want: 1.23.4
+107 silly placeDep ROOT react-router@6.30.6 OK for: react-router-dom@6.30.6 want: 6.30.6
+108 silly placeDep ROOT use-sync-external-store@1.7.0 OK for: zustand@4.5.7 want: ^1.2.2
+109 silly reify moves {}
+110 http cache @remix-run/router@https://registry.npmmirror.com/@remix-run/router/-/router-1.23.4.tgz 0ms (cache hit)
+111 http cache use-sync-external-store@https://registry.npmmirror.com/use-sync-external-store/-/use-sync-external-store-1.7.0.tgz 0ms (cache hit)
+112 http cache @types/trusted-types@https://registry.npmmirror.com/@types/trusted-types/-/trusted-types-2.0.7.tgz 0ms (cache hit)
+113 http cache scheduler@https://registry.npmmirror.com/scheduler/-/scheduler-0.23.2.tgz 0ms (cache hit)
+114 http cache loose-envify@https://registry.npmmirror.com/loose-envify/-/loose-envify-1.4.0.tgz 0ms (cache hit)
+115 http cache react-router-dom@https://registry.npmmirror.com/react-router-dom/-/react-router-dom-6.30.6.tgz 0ms (cache hit)
+116 http cache react-router@https://registry.npmmirror.com/react-router/-/react-router-6.30.6.tgz 0ms (cache hit)
+117 http cache js-tokens@https://registry.npmmirror.com/js-tokens/-/js-tokens-4.0.0.tgz 0ms (cache hit)
+118 http cache zustand@https://registry.npmmirror.com/zustand/-/zustand-4.5.7.tgz 0ms (cache hit)
+119 http cache react@https://registry.npmmirror.com/react/-/react-18.3.1.tgz 0ms (cache hit)
+120 http cache lucide-react@https://registry.npmmirror.com/lucide-react/-/lucide-react-1.47.0.tgz 0ms (cache hit)
+121 silly tarball no local data for @remix-run/router@https://registry.npmmirror.com/@remix-run/router/-/router-1.23.4.tgz. Extracting by manifest.
+122 http cache react-dom@https://registry.npmmirror.com/react-dom/-/react-dom-18.3.1.tgz 0ms (cache hit)
+123 silly tarball no local data for use-sync-external-store@https://registry.npmmirror.com/use-sync-external-store/-/use-sync-external-store-1.7.0.tgz. Extracting by manifest.
+124 silly tarball no local data for @types/trusted-types@https://registry.npmmirror.com/@types/trusted-types/-/trusted-types-2.0.7.tgz. Extracting by manifest.
+125 silly tarball no local data for scheduler@https://registry.npmmirror.com/scheduler/-/scheduler-0.23.2.tgz. Extracting by manifest.
+126 silly tarball no local data for loose-envify@https://registry.npmmirror.com/loose-envify/-/loose-envify-1.4.0.tgz. Extracting by manifest.
+127 silly tarball no local data for react-router-dom@https://registry.npmmirror.com/react-router-dom/-/react-router-dom-6.30.6.tgz. Extracting by manifest.
+128 silly tarball no local data for react-router@https://registry.npmmirror.com/react-router/-/react-router-6.30.6.tgz. Extracting by manifest.
+129 silly tarball no local data for js-tokens@https://registry.npmmirror.com/js-tokens/-/js-tokens-4.0.0.tgz. Extracting by manifest.
+130 silly tarball no local data for zustand@https://registry.npmmirror.com/zustand/-/zustand-4.5.7.tgz. Extracting by manifest.
+131 silly tarball no local data for react@https://registry.npmmirror.com/react/-/react-18.3.1.tgz. Extracting by manifest.
+132 silly tarball no local data for lucide-react@https://registry.npmmirror.com/lucide-react/-/lucide-react-1.47.0.tgz. Extracting by manifest.
+133 http cache immer@https://registry.npmmirror.com/immer/-/immer-10.2.0.tgz 0ms (cache hit)
+134 http cache marked@https://registry.npmmirror.com/marked/-/marked-18.0.13.tgz 0ms (cache hit)
+135 http cache dompurify@https://registry.npmmirror.com/dompurify/-/dompurify-3.4.15.tgz 0ms (cache hit)
+136 silly tarball no local data for react-dom@https://registry.npmmirror.com/react-dom/-/react-dom-18.3.1.tgz. Extracting by manifest.
+137 silly tarball no local data for immer@https://registry.npmmirror.com/immer/-/immer-10.2.0.tgz. Extracting by manifest.
+138 silly tarball no local data for marked@https://registry.npmmirror.com/marked/-/marked-18.0.13.tgz. Extracting by manifest.
+139 silly tarball no local data for dompurify@https://registry.npmmirror.com/dompurify/-/dompurify-3.4.15.tgz. Extracting by manifest.
+140 http fetch GET 200 https://cdn.npmmirror.com/packages/use-sync-external-store/1.7.0/use-sync-external-store-1.7.0.tgz 116ms (cache miss)
+141 http fetch GET 200 https://cdn.npmmirror.com/packages/js-tokens/4.0.0/js-tokens-4.0.0.tgz 117ms (cache miss)
+142 http fetch GET 200 https://cdn.npmmirror.com/packages/%40types/trusted-types/2.0.7/trusted-types-2.0.7.tgz 119ms (cache miss)
+143 http fetch GET 200 https://cdn.npmmirror.com/packages/loose-envify/1.4.0/loose-envify-1.4.0.tgz 124ms (cache miss)
+144 http fetch GET 200 https://cdn.npmmirror.com/packages/scheduler/0.23.2/scheduler-0.23.2.tgz 154ms (cache miss)
+145 http fetch GET 200 https://cdn.npmmirror.com/packages/marked/18.0.13/marked-18.0.13.tgz 163ms (cache miss)
+146 http fetch GET 200 https://cdn.npmmirror.com/packages/react/18.3.1/react-18.3.1.tgz 196ms (cache miss)
+147 http fetch GET 200 https://cdn.npmmirror.com/packages/react-router/6.30.6/react-router-6.30.6.tgz 199ms (cache miss)
+148 http fetch GET 200 https://cdn.npmmirror.com/packages/react-router-dom/6.30.6/react-router-dom-6.30.6.tgz 209ms (cache miss)
+149 http fetch GET 200 https://cdn.npmmirror.com/packages/immer/10.2.0/immer-10.2.0.tgz 221ms (cache miss)
+150 http fetch GET 200 https://cdn.npmmirror.com/packages/dompurify/3.4.15/dompurify-3.4.15.tgz 241ms (cache miss)
+151 http fetch GET 200 https://cdn.npmmirror.com/packages/%40remix-run/router/1.23.4/router-1.23.4.tgz 257ms (cache miss)
+152 http fetch GET 200 https://cdn.npmmirror.com/packages/react-dom/18.3.1/react-dom-18.3.1.tgz 279ms (cache miss)
+153 http fetch GET 200 https://cdn.npmmirror.com/packages/zustand/4.5.7/zustand-4.5.7.tgz 333ms (cache miss)
+154 http fetch GET 200 https://cdn.npmmirror.com/packages/lucide-react/1.47.0/lucide-react-1.47.0.tgz 2979ms (cache miss)
+155 silly ADD node_modules/use-sync-external-store
+156 silly ADD node_modules/react-router
+157 silly ADD node_modules/@remix-run/router
+158 silly ADD node_modules/scheduler
+159 silly ADD node_modules/js-tokens
+160 silly ADD node_modules/loose-envify
+161 silly ADD node_modules/@types/trusted-types
+162 silly ADD node_modules/zustand
+163 silly ADD node_modules/react-router-dom
+164 silly ADD node_modules/react-dom
+165 silly ADD node_modules/react
+166 silly ADD node_modules/marked
+167 silly ADD node_modules/lucide-react
+168 silly ADD node_modules/immer
+169 silly ADD node_modules/dompurify
+170 verbose cwd D:\ww_tool\wuwa-rag\front
+171 verbose os Windows_NT 10.0.26200
+172 verbose node v24.9.0
+173 verbose npm  v11.6.0
+174 notice
+174 notice New minor version of npm available! 11.6.0 -> 11.19.1
+174 notice Changelog: https://github.com/npm/cli/releases/tag/v11.19.1
+174 notice To update run: npm install -g npm@11.19.1
+174 notice  { force: true, Symbol(proc-log.meta): true }
+175 verbose exit 0
+176 info ok

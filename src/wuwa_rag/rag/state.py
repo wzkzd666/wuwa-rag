@@ -13,6 +13,7 @@ class RagState(TypedDict, total=False):
     docs: list[dict]       # 向量 + 稀疏召回
     context: str
     answer: str
+    truncated: bool        # 复读兜底触发、答案被截断过
     element: str
     stage: str
     history: list[dict]

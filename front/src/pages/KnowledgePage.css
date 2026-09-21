@@ -1,0 +1,187 @@
+.knowledge-page {
+  max-width: 960px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.kb-warn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 15px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--warn);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.kb-form,
+.kb-roster,
+.kb-records {
+  padding: 18px 20px;
+  margin-bottom: 16px;
+}
+
+.kb-label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-bottom: 9px;
+  font-weight: 500;
+}
+
+.kb-form-row {
+  display: flex;
+  gap: 10px;
+}
+.kb-form-row .input {
+  flex: 1;
+}
+
+/* 流水线步骤 */
+.pipeline {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+.pipeline-step {
+  flex: 1;
+  min-width: 150px;
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  border: 1px solid var(--line);
+}
+.pipeline-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: var(--grad-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.pipeline-step b {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.pipeline-step span {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+/* 名册 */
+.kb-roster-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.kb-roster-head h3 {
+  font-size: 14.5px;
+  font-weight: 650;
+}
+.kb-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+}
+.kb-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+  width: 140px;
+}
+
+.roster-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.roster-chip {
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--bg-deep);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.roster-chip:hover {
+  border-color: rgba(94, 234, 212, 0.5);
+  color: var(--accent);
+  background: rgba(94, 234, 212, 0.08);
+  transform: translateY(-1px);
+}
+.roster-empty {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+/* 记录表 */
+.kb-records h3 {
+  font-size: 14.5px;
+  font-weight: 650;
+  margin-bottom: 12px;
+}
+.kb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.kb-table th {
+  text-align: left;
+  padding: 9px 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 12px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.kb-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.kb-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+.kb-char {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.kb-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.kb-time {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .kb-table th:nth-child(2),
+  .kb-table td:nth-child(2) {
+    display: none;
+  }
+}

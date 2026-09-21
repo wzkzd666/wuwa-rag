@@ -1,0 +1,39 @@
+0 verbose cli D:\nvm\nodejs\node.exe D:\nvm\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@11.6.0
+2 info using node@v24.9.0
+3 silly config load:file:D:\nvm\v24.9.0\node_modules\npm\npmrc
+4 silly config load:file:D:\ww_tool\wuwa-rag\front\.npmrc
+5 silly config load:file:C:\Users\Administrator\.npmrc
+6 silly config load:file:D:\nvm\nodejs\etc\npmrc
+7 verbose title npm install @types/node
+8 verbose argv "install" "--cache" "D:\\ww_tool\\wuwa-rag\\front\\.npm-cache" "--ignore-scripts" "--no-audit" "--no-fund" "--save-dev" "@types/node"
+9 verbose logfile logs-max:10 dir:D:\ww_tool\wuwa-rag\front\.npm-cache\_logs\2026-09-21T03_10_17_822Z-
+10 verbose logfile D:\ww_tool\wuwa-rag\front\.npm-cache\_logs\2026-09-21T03_10_17_822Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4496293888 maxSize:1124073472 maxEntrySize:562036736
+13 silly idealTree buildDeps
+14 silly fetch manifest @types/node@*
+15 silly packumentCache full:https://registry.npmmirror.com/@types%2fnode cache-miss
+16 http fetch GET 200 https://registry.npmmirror.com/@types%2fnode 95ms (cache revalidated)
+17 silly packumentCache full:https://registry.npmmirror.com/@types%2fnode set size:10398896 disposed:false
+18 silly placeDep ROOT @types/node@26.6.2 OK for: wuwa-rag-front@1.0.0 want: *
+19 silly fetch manifest undici-types@~8.9.0
+20 silly packumentCache full:https://registry.npmmirror.com/undici-types cache-miss
+21 http fetch GET 200 https://registry.npmmirror.com/undici-types 41ms (cache miss)
+22 silly packumentCache full:https://registry.npmmirror.com/undici-types set size:49148 disposed:false
+23 silly placeDep ROOT undici-types@8.9.0 OK for: @types/node@26.6.2 want: ~8.9.0
+24 silly reify moves {}
+25 http cache @types/node@https://registry.npmmirror.com/@types/node/-/node-26.6.2.tgz 0ms (cache hit)
+26 http cache undici-types@https://registry.npmmirror.com/undici-types/-/undici-types-8.9.0.tgz 0ms (cache hit)
+27 silly tarball no local data for @types/node@https://registry.npmmirror.com/@types/node/-/node-26.6.2.tgz. Extracting by manifest.
+28 silly tarball no local data for undici-types@https://registry.npmmirror.com/undici-types/-/undici-types-8.9.0.tgz. Extracting by manifest.
+29 http fetch GET 200 https://cdn.npmmirror.com/packages/undici-types/8.9.0/undici-types-8.9.0.tgz 152ms (cache miss)
+30 http fetch GET 200 https://cdn.npmmirror.com/packages/%40types/node/26.6.2/node-26.6.2.tgz 205ms (cache miss)
+31 silly ADD node_modules/undici-types
+32 silly ADD node_modules/@types/node
+33 verbose cwd D:\ww_tool\wuwa-rag\front
+34 verbose os Windows_NT 10.0.26200
+35 verbose node v24.9.0
+36 verbose npm  v11.6.0
+37 verbose exit 0
+38 info ok

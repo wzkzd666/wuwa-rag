@@ -46,9 +46,13 @@ dependencies = [
     "langchain-text-splitters>=1.1.2",
     "wuwa-mcp>=2.2.1",
     "torch>=2.14.0",
+    "torchvision>=0.29.0",
+    "torchaudio>=2.11.0",
     "httpcore>=1.0.9",
     "qianfan>=0.2.5",
     "tqdm>=4.70.1",
+    "accelerate>=1.15.0",
+    "bitsandbytes>=0.50.2",
 ]
 
 [project.optional-dependencies]
@@ -67,15 +71,13 @@ wuwa-graph = "wuwa_rag.graph.build_graph:main"
 wuwa-ingest-character = "wuwa_rag.worker:ingest_cli"
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
 
 [[tool.uv.index]]
-url = "https://pypi.org/simple"
-default = true
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.ruff]

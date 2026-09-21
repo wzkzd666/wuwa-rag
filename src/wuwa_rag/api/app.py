@@ -39,6 +39,7 @@ class AskOut(BaseModel):
     slots: list[str] = []
     characters: list[str] = []
     docs: int = 0
+    truncated: bool = False   # 复读兜底触发、答案被截断过
 
 
 class IngestIn(BaseModel):
@@ -62,6 +63,7 @@ async def api_ask(body: AskIn) -> AskOut:
         slots=r.get("slots") or [],
         characters=r.get("characters") or [],
         docs=len(r.get("docs") or []),
+        truncated=bool(r.get("truncated")),
     )
 
 @app.post("/ask/stream")
