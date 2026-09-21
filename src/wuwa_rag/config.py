@@ -1,6 +1,7 @@
 from functools import lru_cache
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BASE_DIR = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA_DIR = _BASE_DIR / "data"
@@ -49,13 +50,22 @@ class Settings(BaseSettings):
     S3_BUCKET_RAW: str = "wuwa-raw"
     S3_BUCKET_IMAGES: str = "wuwa-images"
 
-    # ---------- LLM ----------
+    # ---------- LLM：双模型分工（多 agent）----------
+    # aemeath = chat 专用（角色扮演微调，人设由模型自带 Modelfile SYSTEM）
+    # qwen3:8b = tool 模型（字典抽取 / 工具调用等结构化任务）
     LLM_MODEL: str = "aemeath"
+    TOOL_MODEL: str = "qwen3:8b"
     VLM_MODEL: str = "qwen3-vl:8b"
-    LLM_URL: str = "http://localhost:11434"       # ChatOllama 
+    LLM_URL: str = "http://localhost:11434"       # ChatOllama
     LLM_API_KEY: str = "wuwa"                   # 不校验，随便填
     LLM_TEMPERATURE: float = 0.3
     MAX_TOKENS: int = 2048
+    LLM_NUM_CTX: int = 8192
+    # tool 模型参数：抽取要稳定可解析的 JSON，不要文采，故 temperature=0、输出压短。
+    # 实测抽取平均 0.2s（think=False）vs 6.36s（think=True），准确率同为 4/8，
+    # 所以抽取侧关 thinking 是纯收益。
+    TOOL_TEMPERATURE: float = 0.0
+    TOOL_MAX_TOKENS: int = 512
 
     # ---------- 采样 / 防复读（aemeath 是 8B 角色扮演模型，容易陷入整句复读）----------
     # Ollama 默认 repeat_penalty=1.1 对弱模型不够；实测 1.3 + 窗口 512 能压住段落级循环
@@ -63,9 +73,9 @@ class Settings(BaseSettings):
     LLM_REPEAT_LAST_N: int = 512        # 惩罚回看的 token 窗口；太小压不住长段复读
     LLM_TOP_P: float = 0.9              # 核采样；收窄候选，减少跑偏进人设独白
     LLM_TOP_K: int = 40
-    # Qwen3 思考模式软开关。langchain_ollama 1.1.0 无 think 字段，只能靠 prompt 里的
-    # /no_think（Qwen3 官方约定）。原 serve_amis.py 强制关 thinking，弃用后由此接手：
-    # 论文结论是 CoT 反而降低角色扮演质量，且 thinking 泄漏会加剧复读。
+    # 关闭思考模式，走 .bind(think=False)（见 llm.py）。
+    # ⚠️ 不要改回 prompt 里的 /no_think：实测对 aemeath 无效（仍 38.3s、输出带 'v'
+    # 泄漏前缀，并触发 Ollama 500 peg-native format 错误）。bind 方式 1.3s 且干净。
     LLM_NO_THINK: bool = True
     LLM_SEED: int = -1                  # -1 = 随机；调试复现时可固定
     # 运行时复读兜底：连续 N 个句子与前文重复即中断生成（采样参数压不住时的最后一道闸）

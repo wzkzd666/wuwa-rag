@@ -10,9 +10,9 @@ import asyncio
 import json
 from pathlib import Path
 
+from ..config import ensure_dirs, get_settings
 from ..db import close_pool, get_cursor
 from ..storage import s3
-from ..config import get_settings, ensure_dirs
 from ..ww_logger import get_logger
 
 upload_logger=get_logger('upload')

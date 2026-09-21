@@ -8,6 +8,7 @@ const INTENT_LABEL: Record<string, string> = {
   fact: '事实查询',
   semantic: '语义问答',
   hybrid: '混合检索',
+  chitchat: '闲聊',
 }
 
 function CopyBtn({ text }: { text: string }) {
@@ -58,7 +59,7 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
                 <i />
                 <i />
               </span>
-              正在检索知识库…
+              {msg.stageLabel ? `${msg.stageLabel}…` : '正在检索知识库…'}
             </span>
           ) : msg.status === 'error' ? (
             <div className="msg-error">

@@ -13,16 +13,18 @@ import os
 from functools import lru_cache
 
 from ..config import get_settings
+from ..text import chunk_text
+from ..ww_logger import get_logger
+
 s = get_settings()
+log = get_logger("rag")
+# HF_HOME 必须赶在 torch/sentence_transformers 之前设好：它经 huggingface_hub 在
+# **import 时**读取并缓存该路径（实测：import 后再改 os.environ 不生效）。
+# 所以下面两行 import 只能留在 setdefault 之后，加 noqa 声明这是有意为之。
 os.environ.setdefault("HF_HOME", s.HF_HOME)
 
-import torch
-from sentence_transformers import CrossEncoder
-
-from ..ww_logger import get_logger
-from ..text import chunk_text
-
-log = get_logger("rag")
+import torch  # noqa: E402
+from sentence_transformers import CrossEncoder  # noqa: E402
 
 
 @lru_cache(maxsize=1)

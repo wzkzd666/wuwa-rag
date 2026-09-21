@@ -178,7 +178,10 @@ export const useStore = create<Store>()(
                 q,
                 threadId,
                 (evt: StreamEvent) => {
-                  if ('status' in evt && evt.status === 'retrieving') {
+                  if ('stage' in evt) {
+                    // 细粒度阶段：抽取/检索/生成。检索实测约 19s，这段必须让用户看到进展
+                    updateMsg(convId, botMsg.id, { status: 'retrieving', stageLabel: evt.label })
+                  } else if ('status' in evt && evt.status === 'retrieving') {
                     updateMsg(convId, botMsg.id, { status: 'retrieving' })
                   } else if ('token' in evt) {
                     // 首个 token 到达即切换为生成态
@@ -206,6 +209,7 @@ export const useStore = create<Store>()(
                     updateMsg(convId, botMsg.id, {
                       streaming: false,
                       status: 'done',
+                      stageLabel: undefined,
                       meta,
                       content: evt.answer || streamed,
                     })

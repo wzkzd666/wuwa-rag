@@ -3,21 +3,28 @@ from __future__ import annotations
 
 import asyncio
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 
 from ..config import ensure_dirs, get_settings
 from ..graph.neo4j_client import get_session
-from ..ww_logger import get_logger
-from .intent import classify, detect_slots, extract_characters, detect_element, detect_stage
-from .llm import get_chat_llm, no_think_marker
-from .loopguard import LoopGuard, trim_loop
-from .tools import graph_search_tool, vector_search_tool
-from .state import RagState
-from .memory import get_checkpointer
 from ..text import chunk_text
+from ..worker import CharacterNotFound, build_pipeline
+from ..ww_logger import get_logger
 from .characters import resolve_candidates
-from ..worker import build_pipeline, CharacterNotFound
+from .intent import (
+    classify,
+    classify_topic,
+    detect_element,
+    detect_slots,
+    detect_stage,
+    extract_characters,
+)
+from .llm import get_chat_llm
+from .loopguard import LoopGuard, trim_loop
+from .memory import get_checkpointer
+from .state import RagState
+from .tools import graph_search_tool, vector_search_tool
 
 setting = get_settings()
 log = get_logger("rag")
@@ -37,6 +44,17 @@ _SYSTEM = """依据下面的资料作答。术语对照（资料用词和提问�
 - 用中文，简洁、要点化；资料里列了几条就答几条，不要自行补充「没有提到其他/更多」。
 - 资料里没有的内容，用一句话说不知道就停住，不要展开、不要举例、不要反复解释。
 - 严禁重复：同一句话、同一段落、同一句口头禅只能说一次。答完即止，不要为凑长度反复输出相同内容。"""
+
+# 流式阶段文案：只收真正干活的节点。LangGraph / _route / _after_graph 是图容器与
+# 路由函数（实测 astream_events 也会为它们发 on_chain_start），对用户无意义，排除。
+# 检索+重排实测约 19s，而生成仅 1~2s —— 这段静默期正是用户焦虑的来源。
+_STAGE_LABELS = {
+    "intent": "分析问题类型与角色",
+    "chitchat": "陪家人聊两句",
+    "graph": "查询角色关系图谱",
+    "vector": "检索并重排相关资料",
+    "generate": "整理答案中",
+}
 
 
 def _new_loop_guard() -> LoopGuard:
@@ -61,6 +79,15 @@ async def intent_node(state: RagState) -> dict:
     element = detect_element(q) or state.get("element", "")
     stage = detect_stage(q)
     intent = classify(q, slots)
+
+    # 闲聊分流（qwen3:8b 主题 agent）：仅在「无角色名 且 无槽位 且 无属性/阶段」时才调用。
+    # 槽位非空几乎必然是游戏提问（实测「秧秧怎么玩」这类靠语义命中；真闲聊句槽位为空，
+    # 误触发 rule_has_signal 的是 SEMANTIC_PATTERNS 的「怎么」——所以判据用 slots 而非它）。
+    # 有角色名绝不当闲聊（「你好呀卡卡罗」是提问）；LLM 解析失败回落 game。
+    if not chars and not slots and not stage and not element:
+        topic = await classify_topic(q)
+        if topic == "chitchat":
+            intent = "chitchat"
     log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s", intent, slots, chars or "未识别", element or "-", stage or "-")
     return {"intent": intent, "slots": slots, "characters": chars, "element": element, "stage": stage}
 
@@ -136,44 +163,117 @@ def _build_context(state: RagState) -> str:
 
 
 def _build_prompt(context: str, question: str) -> str:
-    # /no_think 放在末尾：Qwen3 的软开关，关掉思考模式（CoT 会降低角色扮演质量，
-    # 且 thinking 泄漏会加剧复读）。原 serve_amis.py 在服务端强制关，弃用后由此接手。
-    marker = no_think_marker()
-    tail = f"\n\n{marker}" if marker else ""
-    return f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}{tail}"
+    # 不在这里注入 /no_think：实测它对 aemeath 无效（仍 38s + 'v' 泄漏前缀 + 触发
+    # Ollama 500）。思考模式由 llm.py 的 .bind(think=False) 统一关闭。
+    return f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}"
 
 
-async def generate_node(state: RagState) -> dict:
+async def generate_node(state: RagState):
+    """生成节点：支持流式与非流式两种调用方式。
+
+    - 非流式（ask → chain.ainvoke）：LangGraph 自动收集所有 yield 的最终状态，
+      行为等价于返回 dict。
+    - 流式（ask_stream → chain.astream_events）：每个 yield 都会产出
+      on_chain_stream 事件，前端可从 on_chat_model_stream 抽 token。
+
+    内部用 llm.astream() 逐 token 生成，同时做复读检测。
+    """
     context = _build_context(state)
     prompt = _build_prompt(context, state["question"])
+
+    guard = _new_loop_guard()
+    full: list[str] = []
+    hit: str | None = None
+    truncated = False
+    answer_ok = True
+
     try:
-        resp = await get_chat_llm().ainvoke([HumanMessage(content=prompt)])
-        answer = resp.content
+        async for chunk in get_chat_llm().astream([HumanMessage(content=prompt)]):
+            if not chunk.content:
+                continue
+            h = guard.feed(chunk.content)
+            if h:
+                log.warning("流式复读检测命中，中断生成（触发句=%.30s…）", h)
+                hit = h
+                truncated = True
+                break
+            full.append(chunk.content)
+            # 增量 yield：让 astream_events 产出 on_chain_stream 事件
+            # 注意：answer_chunk 是临时字段，不在 RagState 里声明，
+            # LangGraph 会忽略未声明字段的持久化，但事件里仍然能看到。
+            yield {"answer_chunk": chunk.content}
     except Exception as exc:
         log.error("LLM 调用失败: %s", exc)
-        answer = "抱歉，模型服务暂时不可用，请稍后再试。"
         answer_ok = False
-    else:
-        answer_ok = True
+        if not full:
+            full.append("抱歉，模型服务暂时不可用，请稍后再试。")
 
-    # 复读兜底放在 try 之外：检测/截断自身若出错，不该被误报成「模型服务不可用」
-    truncated = False
-    if answer_ok:
-        # 采样参数只能降低复读概率，压不死；这里是最后一道闸。
-        # 非流式拿到的是完整文本，整篇喂一次即可。
-        hit = _new_loop_guard().feed(answer)
-        if hit:
-            log.warning("复读检测命中，已截断答案（触发句=%.30s… 原长=%d）", hit, len(answer))
-            answer = trim_loop(answer, hit)
-            truncated = True
+    answer = "".join(full)
+    if answer_ok and truncated and hit:
+        answer = trim_loop(answer, hit)
 
     history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
     new_history = history + [
         {"role": "user", "content": state["question"]},
         {"role": "assistant", "content": answer},
     ]
-    return {
+    # 最终状态：answer/truncated/history 是 RagState 声明的字段，会被 checkpointer 持久化
+    yield {
         "context": context,
+        "answer": answer,
+        "truncated": truncated,
+        "history": new_history[-setting.MAX_HISTORY_TURNS * 2:],
+    }
+
+
+# 闲聊人设提示：模型自带人设，这里只给最小引导；不带术语表与 RAG 答题约束，
+# 否则会诱发「资料里没有…」式拒答独白（正是复读的温床）。
+_CHITCHAT_HINT = "家人在跟你闲聊，没有要查资料。自然、简短地回应，不要提资料、检索或知识库。"
+
+
+async def chitchat_node(state: RagState):
+    """闲聊分支：不挂检索，带对话历史，人设自然回应。streaming node。"""
+    msgs: list = []
+    for m in (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]:
+        if m["role"] == "user":
+            msgs.append(HumanMessage(content=m["content"]))
+        else:
+            msgs.append(AIMessage(content=m["content"]))
+    msgs.append(HumanMessage(content=f"{_CHITCHAT_HINT}\n\n家人说：{state['question']}"))
+
+    guard = _new_loop_guard()
+    full: list[str] = []
+    hit: str | None = None
+    truncated = False
+    answer_ok = True
+    try:
+        async for chunk in get_chat_llm().astream(msgs):
+            if not chunk.content:
+                continue
+            h = guard.feed(chunk.content)
+            if h:
+                log.warning("闲聊复读检测命中，中断生成（触发句=%.30s…）", h)
+                hit = h
+                truncated = True
+                break
+            full.append(chunk.content)
+            yield {"answer_chunk": chunk.content}
+    except Exception as exc:
+        log.error("闲聊生成失败: %s", exc)
+        answer_ok = False
+        if not full:
+            full.append("诶？我刚才走神了……你再说一遍嘛。")
+
+    answer = "".join(full)
+    if answer_ok and truncated and hit:
+        answer = trim_loop(answer, hit)
+
+    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
+    new_history = history + [
+        {"role": "user", "content": state["question"]},
+        {"role": "assistant", "content": answer},
+    ]
+    yield {
         "answer": answer,
         "truncated": truncated,
         "history": new_history[-setting.MAX_HISTORY_TURNS * 2:],
@@ -183,19 +283,21 @@ async def generate_node(state: RagState) -> dict:
 def build_graph() -> StateGraph:
     g = StateGraph(RagState)
     g.add_node("intent", intent_node)
+    g.add_node("chitchat", chitchat_node)
     g.add_node("graph", graph_node)
     g.add_node("vector", vector_node)
     g.add_node("generate", generate_node)
 
     g.add_edge(START, "intent")
     g.add_conditional_edges("intent", _route, {
-        "fact": "graph", "semantic": "vector", "hybrid": "graph",
+        "fact": "graph", "semantic": "vector", "hybrid": "graph", "chitchat": "chitchat",
     })
     g.add_conditional_edges("graph", _after_graph, {
         "need_vector": "vector", "done": "generate",
     })
     g.add_edge("vector", "generate")
     g.add_edge("generate", END)
+    g.add_edge("chitchat", END)
     return g
 
 
@@ -268,9 +370,19 @@ async def ask(question: str, thread_id: str = "default") -> dict:
 
 
 async def ask_stream(question: str, thread_id: str = "default"):
-    """流式问答：先检索（非流式，首屏延迟），再逐 token 吐答案。
-    yield dict：{'token': str}（增量）/ {'status': 'retrieving'}（开始检索）/
-                {'done': True, ...}（结束，带元数据）。"""
+    """流式问答：走 LangGraph astream_events，checkpointer 自动管理多轮记忆。
+
+    yield dict：
+      {'token': str}                        答案增量
+      {'status': 'retrieving'}              兼容旧前端的粗粒度状态
+      {'stage': str, 'label': str}          细粒度阶段（前端显示「正在…」用）
+      {'done': True, ...}                   结束，带元数据
+
+    与 ask() 共享同一张图和 checkpointer，thread_id 真正生效。
+    """
+    # 阶段文案：检索+重排实测约 19s、生成仅 1~2s，所以必须让用户看到在干什么
+    yield {"stage": "crawl", "label": "检查角色是否在知识库中"}
+
     candidates, ok, crawled = await ensure_characters(question)
     if candidates and not ok:
         yield {"token": "不知道（知识库里没有这个角色，尝试联网抓取也没找到）。"}
@@ -279,54 +391,55 @@ async def ask_stream(question: str, thread_id: str = "default"):
 
     yield {"status": "retrieving"}  # 前端可显示「检索中…」
 
-    slots = detect_slots(question)
-    chars = extract_characters(question, await _known_characters()) or []
-    element = detect_element(question)
-    stage = detect_stage(question)
-    intent = classify(question, slots)
+    chain = await get_chain()
+    injected = crawled if crawled else []
+    input_state = {"question": question, "characters": injected}
+    config = {"configurable": {"thread_id": thread_id}}
 
-    state: RagState = {
-        "question": question,
-        "characters": crawled or chars,
-        "slots": slots, "element": element, "stage": stage, "intent": intent,
-    }
-    if intent in ("fact", "hybrid"):
-        state["graph_facts"] = (await graph_node(state))["graph_facts"]
-    if intent in ("semantic", "hybrid"):
-        state["docs"] = (await vector_node(state))["docs"]
-
-    prompt = _build_prompt(_build_context(state), question)
-
-    guard = _new_loop_guard()
+    # 从事件流抽 token + 阶段 + 最终元数据
     full: list[str] = []
-    hit: str | None = None   # 循环外要用，先初始化避免依赖循环内赋值
-    truncated = False
-    async for chunk in get_chat_llm().astream([HumanMessage(content=prompt)]):
-        if not chunk.content:
-            continue
-        hit = guard.feed(chunk.content)
-        if hit:
-            # 提前止损：break 会关闭生成器，Ollama 侧随之中断，不会继续写满 num_predict
-            log.warning("流式复读检测命中，中断生成（触发句=%.30s…）", hit)
-            truncated = True
-            break
-        full.append(chunk.content)
-        yield {"token": chunk.content}
+    final_state: dict = {}
+    emitted_stages: set[str] = set()   # streaming node 会触发两次 on_chain_start，去重
+    async for event in chain.astream_events(input_state, version="v2", config=config):
+        kind = event.get("event", "")
+        name = event.get("name", "")
+
+        # 节点开始事件：转成用户可读的阶段提示（同一节点只发一次）
+        if kind == "on_chain_start" and name in _STAGE_LABELS and name not in emitted_stages:
+            emitted_stages.add(name)
+            yield {"stage": name, "label": _STAGE_LABELS[name]}
+
+        # token 级事件：**必须按节点过滤**。intent_node 里的主题分类器也调 LLM，
+        # 它的流式事件同样挂在 on_chat_model_stream 上（metadata.langgraph_node='intent'），
+        # 不过滤会把 {"topic":"chitchat"} 这类分类输出当答案吐给前端（实测发生过）。
+        elif kind == "on_chat_model_stream":
+            node = event.get("metadata", {}).get("langgraph_node", "")
+            if node not in ("generate", "chitchat"):
+                continue
+            chunk = event.get("data", {}).get("chunk")
+            if chunk and hasattr(chunk, "content") and chunk.content:
+                full.append(chunk.content)
+                yield {"token": chunk.content}
+
+        # 图执行结束事件：拿最终完整状态（含 intent/slots/characters/docs/truncated/answer）
+        elif kind == "on_chain_end" and name == "LangGraph":
+            output = event.get("data", {}).get("output", {})
+            if isinstance(output, dict):
+                final_state = output
 
     answer = "".join(full)
-    if truncated:
-        # token 已经吐给前端、收不回来，所以把截断后的权威全文放进 done 事件，
-        # 由前端覆盖已渲染内容。
-        answer = trim_loop(answer, hit)
+    # 如果 generate_node 内部已截断，final_state["answer"] 是截断后的权威全文
+    if final_state.get("truncated") and final_state.get("answer"):
+        answer = final_state["answer"]
 
     yield {
         "done": True,
         "answer": answer,
-        "intent": intent,
-        "slots": slots,
-        "characters": chars,
-        "docs": len(state.get("docs") or []),
-        "truncated": truncated,
+        "intent": final_state.get("intent", ""),
+        "slots": final_state.get("slots") or [],
+        "characters": final_state.get("characters") or [],
+        "docs": len(final_state.get("docs") or []),
+        "truncated": bool(final_state.get("truncated")),
     }
 
 

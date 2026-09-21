@@ -1,18 +1,18 @@
 """Step 9：FastAPI 端点。"""
 from __future__ import annotations
 
+import json
 import uuid
 from contextlib import asynccontextmanager
-import json
 
-from fastapi.responses import StreamingResponse
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from ..ww_logger import get_logger
 from ..rag.chain import ask, ask_stream
 from ..rag.memory import close_checkpointer, get_checkpointer
 from ..worker import build_pipeline
+from ..ww_logger import get_logger
 
 log = get_logger("app")
 

@@ -17,9 +17,8 @@ from functools import lru_cache
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 
-from ..config import get_settings, ensure_dirs
+from ..config import ensure_dirs, get_settings
 from ..ww_logger import get_logger
-
 
 HEADERS_TO_SPLIT_ON = [("#", "H1"), ("##", "H2"), ("###", "H3"), ("####", "H4")]
 TABLE_RE = re.compile(r"^\s*\|")
