@@ -20,12 +20,17 @@ from langchain_ollama import ChatOllama
 from ..config import get_settings
 
 
-def _build_ollama(model: str, temperature: float, num_predict: int) -> Runnable:
+def _build_ollama(
+    model: str, temperature: float, num_predict: int, repeat_penalty: float | None = None,
+) -> Runnable:
     """构造 ChatOllama 并 bind(think=False) 固化关思考。
 
     bind() 返回 _ChatModelBinding（仍有 bind_tools，可与 agent 链式组合）。
     注意：不要写 streaming=True —— ChatOllama 无该字段且 pydantic extra='ignore'，
     会被静默丢弃（误导性死参数）；流式与否只由调 .astream() 还是 .ainvoke() 决定。
+
+    repeat_penalty 留 None 取 settings 默认；照抄长表格的轮次会传更低的 STRICT 档
+    （见 config.LLM_REPEAT_PENALTY 的实测说明：惩罚过高会把相似行罚到写不下去）。
     """
     s = get_settings()
     llm = ChatOllama(
@@ -36,7 +41,7 @@ def _build_ollama(model: str, temperature: float, num_predict: int) -> Runnable:
         num_predict=num_predict,
         num_ctx=s.LLM_NUM_CTX,
         # ---- 防复读：8B 角色扮演模型在「无资料可答」时极易整句循环 ----
-        repeat_penalty=s.LLM_REPEAT_PENALTY,
+        repeat_penalty=s.LLM_REPEAT_PENALTY if repeat_penalty is None else repeat_penalty,
         repeat_last_n=s.LLM_REPEAT_LAST_N,
         top_p=s.LLM_TOP_P,
         top_k=s.LLM_TOP_K,
@@ -46,11 +51,21 @@ def _build_ollama(model: str, temperature: float, num_predict: int) -> Runnable:
     return llm.bind(think=False) if s.LLM_NO_THINK else llm
 
 
-@lru_cache(maxsize=1)
-def get_chat_llm() -> Runnable:
-    """chat 专用：aemeath，负责最终作答（人设自带）。"""
+@lru_cache(maxsize=4)
+def _chat_llm(repeat_penalty: float) -> Runnable:
+    """按惩罚档位缓存实例，避免每轮重建。"""
     s = get_settings()
-    return _build_ollama(s.LLM_MODEL, s.LLM_TEMPERATURE, s.MAX_TOKENS)
+    return _build_ollama(s.LLM_MODEL, s.LLM_TEMPERATURE, s.MAX_TOKENS, repeat_penalty)
+
+
+def get_chat_llm(strict: bool = False) -> Runnable:
+    """chat 专用：aemeath，负责最终作答（人设自带）。
+
+    strict=True：本轮要照抄「满级数值表 / 突破材料表」这种成片的高相似度行，
+    改用更低的重复惩罚——默认档仍有概率把相似行罚到「只抄前几行就收尾」。
+    """
+    s = get_settings()
+    return _chat_llm(s.LLM_REPEAT_PENALTY_STRICT if strict else s.LLM_REPEAT_PENALTY)
 
 
 @lru_cache(maxsize=1)

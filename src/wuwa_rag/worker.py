@@ -15,13 +15,13 @@ from wuwa_mcp.core.container import get_container
 
 from .config import ensure_dirs, get_settings
 from .db import close_pool, get_cursor
-from .graph.build_graph import close_driver, init_schema, ping, upsert_character
+from .graph.build_graph import close_driver, delete_character, init_schema, ping, upsert_character
 from .graph.extract import extract_character, load_chunks
 from .ingest.chunker import chunk_markdown
 from .ingest.pipeline import _load_chunks as load_chunks_by_char
-from .ingest.pipeline import ingest_one
+from .ingest.pipeline import ingest_one, purge_character
 from .retrieval.build_index import _load_chunks as load_all_chunks
-from .retrieval.build_index import build_dense, build_sparse
+from .retrieval.build_index import build_dense, build_sparse, delete_dense_by_character
 from .ww_logger import get_logger
 
 
@@ -100,6 +100,21 @@ def get_progress(character: str) -> dict | None:
     except Exception as exc:  # noqa: BLE001
         log.warning("读进度失败（忽略）: %s", exc)
         return None
+
+
+def reset_progress(character: str) -> None:
+    """刷新重爬前重置五步进度（否则前端会一直看到上一轮全绿的旧快照）。"""
+    try:
+        data = {
+            "character": character,
+            "steps": {k: "pending" for k in PIPELINE_STEPS},
+            "errors": {},
+            "updated_at": int(time.time()),
+        }
+        _redis().setex(progress_key(character), _PROGRESS_TTL,
+                       json.dumps(data, ensure_ascii=False))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("进度重置失败（忽略）: %s", exc)
 
 
 # 流水线五步与标签见上方 PIPELINE_STEPS / STEP_LABELS
@@ -275,6 +290,51 @@ def build_pipeline(character: str):
     """返回整条链（不入队），由 CLI / API 直接 apply_async。
     用 .si() 让每一步都拿到 character，不被上一步返回值覆盖。"""
     return chain(
+        crawl_character.si(character),
+        chunk_character.si(character),
+        ingest_character.si(character),
+        index_character.si(character),
+        graph_character.si(character),
+    )
+
+
+# ───────────── 刷新（verify 判资料不匹配时的重爬链：先清后爬） ─────────────
+@celery_app.task(bind=True)
+def purge_character_data(self, character: str):
+    """刷新链第 0 步：清该角色在 PG/Chroma/Neo4j 的旧知识。
+
+    不清就是「新旧块并存 → 召回到旧知识」的根源（chunks 表 ON CONFLICT DO
+    NOTHING 只挡同 hash，wiki 改版后 hash 全变）。S3 旧对象留孤儿由存储生命周期
+    回收；进度键重置让前端能看到新一轮五步。
+    """
+    _step_update(self, character, "crawl", "start")   # 借位：清库算重爬前置，避免前端空窗
+    try:
+        _run(_purge_async(character))
+    except Exception as exc:
+        _step_update(self, character, "crawl", "fail", f"清库: {exc}")
+        raise
+    return {"character": character}
+
+
+async def _purge_async(character: str) -> None:
+    await purge_character(character)                    # PG documents（chunks 级联）
+    delete_dense_by_character(character)                # Chroma 该角色向量
+    if await ping():
+        await delete_character(character)               # Neo4j 私有节点+出边
+        await close_driver()
+    # BM25 是全量文件，index 步秒级重建，无需单删
+    # 注意：本函数已在 _run 的循环内，close_pool 必须 await，不能再 _run（loop 套 loop）
+    await close_pool()
+
+
+def build_refresh_pipeline(character: str):
+    """刷新链：清库 → 重爬 → 分块 → 入库 → 索引 → 图谱。
+
+    与 build_pipeline 只差开头挂一步 purge_character_data；chunk 步按角色
+    整写 chunks.jsonl（--pool=solo 串行前提不变）。
+    """
+    return chain(
+        purge_character_data.si(character),
         crawl_character.si(character),
         chunk_character.si(character),
         ingest_character.si(character),

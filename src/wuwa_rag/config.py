@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -72,8 +73,17 @@ class Settings(BaseSettings):
     SUMMARY_MAX_CHARS: int = 160
 
     # ---------- 采样 / 防复读（aemeath 是 8B 角色扮演模型，容易陷入整句复读）----------
-    # Ollama 默认 repeat_penalty=1.1 对弱模型不够；实测 1.3 + 窗口 512 能压住段落级循环
-    LLM_REPEAT_PENALTY: float = 1.3     # >1 惩罚重复 token，1.0=不惩罚
+    # ⚠️ 别再调回 1.3：实测 1.3 会让 aemeath「不敢继续写相似内容」而**提前收尾**——
+    #    同一张满级数值表，1.3 下只输出前 4 行就收口（还补一句「其他参数未在该列表中
+    #    出现」），问共鸣解放倍率时 7 行里稳定丢 1~3 行；连**没有补料块**的普通轮次也
+    #    会丢行。降到 1.15 后同一 prompt 7 行全出，零资料/闲聊两个复读高发场景都没见
+    #    复读（重复句占比 0.00，闲聊反而从 252 字缩到 85 字）。last_n=64/512/1024 三档
+    #    结果一致，说明**惩罚强度是主因、窗口不是**。
+    #    抗复读不靠加码惩罚：运行时另有 LoopGuard（复读即中断 + 截断）兜底。
+    LLM_REPEAT_PENALTY: float = 1.15    # >1 惩罚重复 token，1.0=不惩罚
+    # 要照抄长表格的轮次（满级数值表 / 突破材料表）再降一档：表里各行彼此高度相似，
+    # 最容易被重复惩罚误伤成「只抄前几行」。
+    LLM_REPEAT_PENALTY_STRICT: float = 1.05
     LLM_REPEAT_LAST_N: int = 512        # 惩罚回看的 token 窗口；太小压不住长段复读
     LLM_TOP_P: float = 0.9              # 核采样；收窄候选，减少跑偏进人设独白
     LLM_TOP_K: int = 40
@@ -98,6 +108,22 @@ class Settings(BaseSettings):
     TOPK_DENSE: int = 30     # Chroma 稠密召回
     TOPK_SPARSE: int = 30    # BM25 稀疏召回
     TOPK_RERANK: int = 6     # 重排后送进 LLM
+
+    # ---------- 知识验证 / 重新检索（qwen3:8b verifier agent）----------
+    # generate 前用 tool 模型判「检索到的资料是否真能回答问题」；判不匹配则
+    # 重检索→按角色刷新重爬→仍不足走千帆联网搜索兜底（见 rag/websearch.py）。
+    # verifier 每次问答多一次 8b 调用（实测 0.3~0.9s）；EMPTY_SKIP=True 时
+    # 材料全空直接判不足、省这次调用（空材料无需模型也该刷新）。
+    VERIFY_ENABLED: bool = True
+    VERIFY_EMPTY_SKIP: bool = False
+    VERIFY_MAX_RETRY: int = 1         # 验证不通过→重检索的最多次数（防图内死循环）
+    REFRESH_WAIT_TIMEOUT: int = 180   # 刷新链（清库+重爬5步）同步等待上限，同自动爬取
+    # 百度千帆联网搜索（v2 chat/completions + web_search，API 直连不走本地 SDK）。
+    # ⚠️ API key 留空 = 联网兜底整体关闭，链路降级为「不知道」，不报配置错误。
+    QIANFAN_API_KEY: str = os.getenv('BAIDUQIANFAN_API_KEY')
+    QIANFAN_CHAT_URL: str = "https://qianfan.baidubce.com/v2/chat/completions"
+    QIANFAN_WEB_MODEL: str = "ernie-4.5-turbo-128k"   # 支持 web_search 的对话模型
+    QIANFAN_TIMEOUT: float = 20.0
 
     # ---------- 切块参数 ----------
     MIN_CHARS: int = 60

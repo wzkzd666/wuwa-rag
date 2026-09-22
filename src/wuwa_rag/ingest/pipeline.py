@@ -70,6 +70,24 @@ async def ingest_one(md_path: Path, rows: list[dict]) -> tuple[int, int]:
     return doc_id, len(payload)
 
 
+async def purge_character(character: str) -> int:
+    """刷新重爬前清该角色旧数据（PG 真源：documents 级联删 chunks）。
+
+    chunks 表外键是 ON DELETE CASCADE，删 documents 即连带删块；
+    不删的话 wiki 改版产生的新旧块会并存（hash 各不同，DO NOTHING 挡不住），
+    召回到旧知识——这正是「缓存知识不匹配」要重爬前清掉的东西。
+    S3 的旧对象不清：documents 重建后 raw_uri 指向新对象，旧对象成孤儿，
+    靠对象存储生命周期策略回收（清理属运维范畴，不混进业务刷新链）。
+    """
+    async with get_cursor() as cur:
+        await cur.execute(
+            "DELETE FROM documents WHERE character = %s", (character,)
+        )
+        n = cur.rowcount
+    upload_logger.info(f"清库 {character}: documents 删 {n} 行（chunks 级联）")
+    return n
+
+
 async def _main() -> None:
     s=get_settings()
     ensure_dirs()

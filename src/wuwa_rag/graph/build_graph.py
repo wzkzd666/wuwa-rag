@@ -98,6 +98,39 @@ async def _write(tx, cypher: str, rows: list[dict]) -> None:
     await (await tx.run(cypher, rows=rows)).consume()
 
 
+# 按角色清图（刷新重爬前）。三条铁律：
+# 1) 私有节点（Skill/ChainNode 带 character 属性）连边一起删；
+# 2) 共享节点（Material/Weapon/EchoSet/其他 Character）**只删边不删点**；
+# 3) Character 本体保留只 REMOVE 属性——若 DETACH DELETE 它，会连**别人的队友
+#    入边**（other-[:SYNERGIZES_WITH]->c）一起毁掉，而那些边属于别人的页面、
+#    本次刷新不会重建。MERGE 按 name 命中现节点，upsert 时 SET += 填回新属性。
+_C_DELETE_CHAR = """
+MATCH (c:Character {name: $n})
+OPTIONAL MATCH (c)-[r:HAS_SKILL]->(s:Skill {character: $n})
+DETACH DELETE s, r
+WITH DISTINCT c
+OPTIONAL MATCH (c)-[r2:HAS_CHAIN]->(x:ChainNode {character: $n})
+DETACH DELETE x, r2
+WITH DISTINCT c
+MATCH (c)-[rel:NEEDS_MATERIAL|RECOMMENDS_WEAPON|RECOMMENDS_ECHO|SYNERGIZES_WITH]->()
+DELETE rel
+WITH DISTINCT c
+REMOVE c.element, c.weapon, c.gender, c.birthplace,
+       c.echo_main, c.echo_main_stats, c.echo_sub_stats
+"""
+
+
+async def _delete_tx(tx, name: str) -> None:
+    await (await tx.run(_C_DELETE_CHAR, n=name)).consume()
+
+
+async def delete_character(name: str) -> None:
+    """按角色清图谱（刷新重爬前调用）。出边方向精确限定 ->，绝不误删入边。"""
+    async with get_session() as s:
+        await s.execute_write(_delete_tx, name)
+    log.info("清图谱完成: %s", name)
+
+
 async def upsert_character(f: CharacterFacts) -> None:
     attrs = {
         "element": f.attrs.get("属性", ""),
