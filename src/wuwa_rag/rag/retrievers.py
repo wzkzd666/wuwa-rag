@@ -146,6 +146,28 @@ def _embedder() -> BgeM3Embeddings:
     return BgeM3Embeddings()
 
 
+def fetch_chunks(character: str, component: str | None = None) -> list[dict]:
+    """按角色（可选再按组件）直取原始块，不过向量召回、不过重排。
+
+    给「技能数值表」「突破材料表」这类结构固定的材料用：它们块小、与问句的语义
+    相似度天然低于大段机制描述，在 topk=6 的精排里必然被挤掉（实测数值表 0 条进
+    top6，且 top6 分数 0.9983~0.9994 完全无区分度）。但这两类材料的元数据
+    （character + component）足以精确定位——绕开语义召回反而必中，且零 embedding、
+    零重排开销，只多一次本地元数据查询。
+    """
+    col = _collection()
+    where: dict = {"character": character}
+    if component:
+        where = {"$and": [{"character": character}, {"component": component}]}
+    got = col.get(where=where)
+    out = [
+        {"chunk_id": cid, "text": doc, **(meta or {})}
+        for cid, doc, meta in zip(got["ids"], got["documents"], got["metadatas"])
+    ]
+    log.info("直取原始块 %s/%s -> %d 条", character, component or "*", len(out))
+    return out
+
+
 def _rrf(rank_lists: list[list[str]], k: int = 60) -> list[str]:
     """RRF 融合：dense 余弦分和 BM25 分值量纲不同，不能直接加权。"""
     score: dict[str, float] = {}

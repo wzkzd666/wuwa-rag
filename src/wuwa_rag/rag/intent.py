@@ -38,6 +38,16 @@ SEMANTIC_PATTERNS: tuple[str, ...] = (
     r"怎么|如何|怎样|为什么|原因|理由|依据|优势|好处|队友|组队|配队|和谁|一起|阵容|队伍|思路|玩法|攻略|讲解|介绍|分析|评价|强吗|值得|机制|原理",
 )
 
+# 人格/身份类硬信号：问「你」的台词/口头禅/名字/身份，是角色人格不是游戏数值资料。
+# aemeath 人设由模型自带（Modelfile SYSTEM），这类应走 chitchat 让人设自由发挥；
+# 走 RAG 反而召回大段「角色故事/珍贵之物」剧情文案被整段倾倒（实测「你的台词是什
+# 么」→ hybrid → 809 字剧情故事，用户反馈「混入无关内容」）。注意必须用**原句**匹配：
+# 改写器会把「你」补成角色名（「你的台词」→「爱弥斯的台词」），第二人称信号丢失。
+_IDENTITY_PATTERNS: tuple[str, ...] = (
+    r"你的台词", r"你的语音", r"你的语录", r"你的口头禅", r"你的口头语",
+    r"你是谁", r"你叫什么", r"你叫啥", r"你的名字", r"你的身份",
+)
+
 # 属性值（鸣潮共 6 种）——「导电角色有哪些」里没有「属性」二字，只有属性值
 ELEMENTS = ("导电", "冷凝", "热熔", "气动", "衍射", "湮灭")
 ELEMENT_RE = "|".join(ELEMENTS)
@@ -62,6 +72,11 @@ def detect_slots(question: str) -> list[str]:
 def is_semantic(question: str) -> bool:
     """提取语义关键词"""
     return any(re.search(p, question) for p in SEMANTIC_PATTERNS)
+
+
+def is_identity(question: str) -> bool:
+    """是否在问角色人格（台词/口头禅/名字/身份），而非游戏数值资料。"""
+    return any(re.search(p, question) for p in _IDENTITY_PATTERNS)
 
 
 def classify(question: str, slots: list[str]) -> str:

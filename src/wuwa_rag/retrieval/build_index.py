@@ -94,6 +94,28 @@ def build_dense(rows: list[dict]) -> None:
     vec_logger.info(f"Chroma: 共 {col.count()} 条")
 
 
+def delete_dense_by_character(character: str) -> int:
+    """按角色删 Chroma 旧向量（刷新重爬前清脏数据用）。
+
+    chunk_id 含内容 hash，wiki 改版后新旧块并存 → 召回到旧知识。
+    返回删前的该角色点数（仅日志用途，不保证与 delete 完全原子）。
+    """
+    s = get_settings()
+    client = chromadb.PersistentClient(
+        path=str(s.VECTOR_DIR / "chroma"),
+        settings=Settings(anonymized_telemetry=False),
+    )
+    col = client.get_or_create_collection(
+        name=s.CHUNK_COLLECTION, metadata={"hnsw:space": "cosine"}
+    )
+    got = col.get(where={"character": character})
+    ids = got["ids"]
+    if ids:
+        col.delete(ids=ids)
+    vec_logger.info("按角色清稠密向量 %s: %d 点", character, len(ids))
+    return len(ids)
+
+
 async def _main() -> None:
     ensure_dirs()
     rows = await _load_chunks()

@@ -43,16 +43,17 @@ if (Test-Path $PidFile) {
         $records = @()
     }
 
-    # 结束进程：优先 PowerShell 原生 Stop-Process（部分环境 taskkill 会 Access denied），
-    # 失败再用 taskkill /T /F 兜底连带子进程树。
+    # 结束进程：**必须先杀整棵树**（taskkill /T）。
+    # 曾经的写法是「先 Stop-Process 单杀，杀掉就 return」—— 而杀窗口总是成功，于是
+    # 后面那句 taskkill /T 永远不执行：窗口死了，它派生的 uv → celery.exe → python
+    # 全部变成孤儿活下来（2026-09-22 实测：两套 Celery 共 8 个进程残留，抢同一个
+    # Redis 队列）。现在改为 taskkill /T 优先；仅当它不可用（个别环境 Access denied）
+    # 时退回 Stop-Process。
     function Stop-ServiceProcess([int]$TargetPid) {
-        try {
-            Stop-Process -Id $TargetPid -Force -ErrorAction Stop
-            Start-Sleep -Milliseconds 400
-            if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) { return $true }
-        } catch { }
-        # 兜底：taskkill 连子进程树（uv/npm 派生的实际服务进程）
         taskkill /PID $TargetPid /T /F 2>&1 | Out-Null
+        Start-Sleep -Milliseconds 400
+        if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) { return $true }
+        Stop-Process -Id $TargetPid -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 400
         return (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue))
     }
@@ -102,6 +103,21 @@ foreach ($port in 8000, 5173) {
                 Stop-Process -Id $ownerPid -Force -ErrorAction SilentlyContinue
             }
         }
+    }
+}
+
+# 兜底 2：按命令行特征清扫本项目遗留进程。
+# 为什么需要：Celery worker **不监听任何端口**，上面的端口兜底抓不到它；一旦它的宿主
+# 窗口先死，uv / celery.exe / python 就成了孤儿（2026-09-22 实测曾两套 Celery 并存、
+# 抢同一个 Redis 队列）。这里只匹配本项目独有的命令行特征，不会误伤其他进程。
+$stale = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -and ($_.CommandLine -like '*wuwa_rag.worker*' -or $_.CommandLine -like '*wuwa_rag.api.server*')
+})
+if ($stale.Count -gt 0) {
+    Write-Warn2 "清扫本项目遗留进程 $($stale.Count) 个"
+    foreach ($sp in $stale) {
+        Write-Info "  PID $($sp.ProcessId)  $($sp.Name)"
+        Stop-Process -Id $sp.ProcessId -Force -ErrorAction SilentlyContinue
     }
 }
 

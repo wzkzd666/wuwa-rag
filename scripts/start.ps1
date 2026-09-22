@@ -139,6 +139,12 @@ try {
         }
         Push-Location $Root
         try {
+            # 必须**裸调用**（stderr 不重定向）：compose 的彩色进度渲染靠检测真终端，
+            # 一旦把 stderr 接进管道（2>&1 / 2>$null）它就退化成灰白纯文本。
+            # 实测（PS 5.1，2026-09-22）：只有「重定向原生 stderr」才会产生
+            # ErrorRecord 并在 $ErrorActionPreference='Stop' 下抛错（2>&1 实测抛
+            # RemoteException）；**裸调用不抛**，$LASTEXITCODE 照常可读。
+            # 所以这里既不要包装、也不要重定向。
             docker compose up -d
             if ($LASTEXITCODE -ne 0) { Write-Err2 'docker compose up 失败'; exit 1 }
         } finally { Pop-Location }
@@ -185,13 +191,17 @@ try {
 
     # ========== 3. Celery worker ==========
     Write-Step '启动 Celery worker（--pool=solo，Windows 必须）'
+    # 日志角色由启动方显式声明（ww_logger 的 argv 推断只作兜底）——只用于给每行
+    # 日志的 role 列打标签；两个进程共写同一个 rag.log，跨进程轮转安全靠
+    # concurrent-log-handler 的文件锁（**不再按 role 拆文件**）。
+    # 改这里要同步 ww_logger._process_tag 的注释。
     Start-ServiceWindow -Name 'celery' -Title '潮声智库 · Celery Worker' -WorkDir $Root `
-        -Command 'uv run celery -A wuwa_rag.worker:celery_app worker --pool=solo --loglevel=info' | Out-Null
+        -Command '$env:WUWA_LOG_ROLE=''worker''; uv run celery -A wuwa_rag.worker:celery_app worker --pool=solo --loglevel=info' | Out-Null
 
     # ========== 4. FastAPI ==========
     Write-Step '启动 FastAPI（:8000）'
     Start-ServiceWindow -Name 'api' -Title '潮声智库 · FastAPI :8000' -WorkDir $Root `
-        -Command 'uv run python -m wuwa_rag.api.server' | Out-Null
+        -Command '$env:WUWA_LOG_ROLE=''api''; uv run python -m wuwa_rag.api.server' | Out-Null
 
     # ========== 5. 前端 Vite ==========
     if (-not $NoFront) {
