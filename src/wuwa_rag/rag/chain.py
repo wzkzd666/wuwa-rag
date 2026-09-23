@@ -10,7 +10,13 @@ from langgraph.graph import END, START, StateGraph
 
 from ..config import ensure_dirs, get_settings
 from ..graph.neo4j_client import get_session
-from ..text import chunk_text
+from ..text import (
+    AnswerFilter,
+    chunk_text,
+    dedup_list_items,
+    lock_focus,
+    strip_ref_marks,
+)
 from ..worker import (
     CharacterNotFound,
     build_pipeline,
@@ -47,18 +53,47 @@ log = get_logger("rag")
 # 本提示词只负责三件事：术语对照、答题约束、防重复。
 # 另：Ollama 的 system 参数会覆盖 Modelfile 内置 SYSTEM，所以这些约束必须拼在
 # HumanMessage 里，不能改成 SystemMessage 传，否则人设会丢。
-_SYSTEM = """依据下面的资料作答。术语对照（资料用词和提问可能不同，按下表理解）：
+#
+# ⚠️⚠️ 2026-09-22 铁律：本提示词**只写正面要求，绝不写「实测反例」**（哪怕加「不要」）。
+# aemeath 会把提示词里点名的反例**当成要模仿的样本照抄**——即 negative-example
+# contamination。三条实证：
+#   ① 原文写了「不要自行补充『没有提到其他/更多』」→ 输出结尾**稳定**出现
+#      「资料里没有提到其他组合啦。」（用户现场 + 本地复现各命中，字面级一致）。
+#   ② 原文写了「不许给条目编序号或计数器（如『守岸人 + 尤诺*5』）」→ 输出开始出现
+#      `[1]`~`[7]` 引用编号（用户报「数字这些噪声」）。
+#   ③ 原文写了「开场就是『我呀~』」→ 该开场概率性复现。
+# 对照实验（直连 Ollama、固定 seed=42、同一资料）：
+#   · prompt 里**点名** `[1] [2]` 禁止 → 仍写 `[1]`；放在末尾时**更糟**（自编到 `[5]`）。
+#   · 改用**泛化措辞**「不要标注来源序号或引用标记」→ 完全不出现（基线组则写 `[1][2]`）。
+#   · 纯问题、不给资料的基线组**不会**写 `[n]` → 说明 `[n]` 是「有资料可依」这件事诱发的
+#     模型微调习惯，不是它天生爱写；也**不是**语料里的 `[图]` 诱发（去掉方括号照样写）。
+# 开发期的反例/踩坑记录请写在本注释里，**不要进 _SYSTEM**。
+#
+# ⚠️ 2026-09-22 追加：「家人问的是哪位，那位所在的那个『或』组只列他」这条**不在
+# _SYSTEM 里写**（写过，实测完全不生效：问守岸人时答案照旧输出 `守岸人 / 维里奈 / 白芷`）。
+# 它已改由 `text.lock_focus` 在**数据侧确定性落实**：图谱（retrievers.graph_search）与
+# 参考文档（chain._lock_focus）进 prompt 之前，含本次角色的「或」组就已收窄成他本人。
+_SYSTEM = """依据下面的资料作答。你是爱弥斯（《鸣潮》里那个爱笑、话多的女孩），资料是
+存档记录，要用你自己的口吻把它讲给家人听。
+
+术语对照（资料用词和提问可能不同，按下表理解）：
 - 声骸 = 角色装备，资料里也写作「套装」；COST 是声骸的费用点数组合
 - 共鸣链 = 相当于命座，序号 1~6 对应一链到六链
 - 贝币 = 游戏货币
 - 突破阶段：一阶~六阶
+- 配队写法「守岸人+吟霖/长离/散华+卡卡罗」：`/` 之间是「或」（同一个位置三选一，
+  不是三个人一起上），`+` 之间是「和」（不同位置）。鸣潮一支队伍只有 3 个人。
 
 作答要求：
-- 用中文，简洁、要点化；资料里列了几条就答几条，不要自行补充「没有提到其他/更多」。
-- 资料里出现「满级数值表」或「突破材料表」时，必须把该表**逐行完整列出**：数值、材料名与
-  「+」「*」「×」「%」原样照抄，不得换算、不得合并同类项、不得改写成中文数字、不得略过。
-- 资料里没有的内容，用一句话说不知道就停住，不要展开、不要举例、不要反复解释。
-- 严禁重复：同一句话、同一段落、同一句口头禅只能说一次。答完即止，不要为凑长度反复输出相同内容。"""
+- 讲到爱弥斯本人时用第一人称「我」，活泼亲切；讲到其他角色时用角色名或「她/他」称呼。
+- 先用自己的话把要点讲清楚，再按下面的格式要求列数据。
+- 用中文，简洁、要点化；资料里有几个要点就讲几个要点。
+- 资料里出现「满级数值表」或「突破材料表」时，必须把该表逐行完整列出：数值、材料名与
+  「+」「*」「×」「%」原样照抄，不换算、不合并同类项、不改写成中文数字、不略过。
+- 事实严格依据资料，只讲资料里有的内容；资料里没有的，用一句话说不知道就停住。
+- 同一句话、同一段落、同一口头禅只说一次，讲完即止。
+- 列表、配队这类条目每条只出现一次，直接平铺列出即可。
+- 直接把内容讲出来即可，不要给内容加来源序号或引用标记。"""
 
 # 流式阶段文案：只收真正干活的节点。LangGraph / _route / _after_graph 是图容器与
 # 路由函数（实测 astream_events 也会为它们发 on_chain_start），对用户无意义，排除。
@@ -79,6 +114,21 @@ def _new_loop_guard() -> LoopGuard:
     return LoopGuard(
         max_repeat=setting.LLM_LOOP_MAX_REPEAT,
         min_chars=setting.LLM_LOOP_MIN_CHARS,
+        min_item=setting.LLM_LOOP_MIN_ITEM,
+        period_max=setting.LLM_LOOP_PERIOD_MAX,
+        min_cycles=setting.LLM_LOOP_MIN_CYCLES,
+    )
+
+
+def _trim_loop(text: str, sentence: str | None) -> str:
+    """按 config 阈值截断复读尾巴（guard 与 trim 必须用同一套阈值）。"""
+    return trim_loop(
+        text, sentence,
+        max_repeat=setting.LLM_LOOP_MAX_REPEAT,
+        min_chars=setting.LLM_LOOP_MIN_CHARS,
+        min_item=setting.LLM_LOOP_MIN_ITEM,
+        period_max=setting.LLM_LOOP_PERIOD_MAX,
+        min_cycles=setting.LLM_LOOP_MIN_CYCLES,
     )
 
 
@@ -182,6 +232,19 @@ async def intent_node(state: RagState) -> dict:
     stage = detect_stage(sq)
     intent = classify(sq, slots)
 
+    # ⚠️ 2026-09-22 爸爸要求：**不走向量就必须标成 fact**，intent 不能名不副实。
+    # intent 是对外字段（`AskOut.intent` / SSE done.intent），「报 hybrid 却 docs=0」
+    # 会让前端与排查都读到假信息。
+    # 概括性配队（slots 恰为 ['队友'] 且未指名，见 _is_team_overview）只在图谱就能答全
+    # （含「或」的模板已完整），**语义上就是 fact**。在此降级后：
+    #   · `_route` 自然走 fact 分支（graph → verify），
+    #   · 那条更宽的「hybrid → 补向量」规则也就不再命中 ——
+    #   **不需要、也不该在 _after_graph 里再写一条例外**（双判据必然迟早不同步）。
+    # 为什么必须在这里而不是 _after_graph：_after_graph 是**路由函数**，只能返回分支名，
+    # 改不了 state；而 intent 要如实落到 state 里对外。
+    if _is_team_overview(slots, chars):
+        intent = "fact"
+
     # 闲聊分流，两层：
     # ① 人格/身份类硬信号（问「你」的台词/名字/身份）——即使改写出了角色名，本质也
     #    是问人格不是查资料，直接判 chitchat。用**原句 q** 判：改写 sq 已把「你」补成
@@ -219,17 +282,90 @@ async def graph_node(state: RagState) -> dict:
     return {"graph_facts": facts}
 
 
+# 鸣潮一队只有 3 个人 —— **凑满 3 个角色名才算「点名一支具体队伍」**。
+_TEAM_SLOTS = 3
+
+
+def _is_named_team(slots, characters) -> bool:
+    """点名一支具体队伍：≥3 个角色名 + 问的是配队（队友槽位）。
+
+    ⚠️ 2026-09-22 阈值由 2 提到 3：2 个名字时用户其实还没定下队伍（图谱会列出所有
+    「含这两人」的队），补的向量是「这帮人相关的正文」，答非所问、还白等十几秒。
+
+    为什么指名时要补向量：**队名在图谱、打法循环在正文描述里**（wiki 配队页正文
+    有出招顺序，如「守岸人：AAAA-Z-E-Q-AAAA-Z-R」）。
+    """
+    return len(characters or []) >= _TEAM_SLOTS and "队友" in (slots or [])
+
+
+def _is_team_overview(slots, characters) -> bool:
+    """**概括性**问配队：只问了配队（slots 恰为 `['队友']`），且**没有**指名一支具体队伍。
+
+    2026-09-22 爸爸要求：「**概括性询问配队不再走向量检索**，模型回答完之后可追问一句
+    『你对哪个队伍感兴趣，需要我给你详细介绍吗』」。
+
+    为什么能不走向量：图谱侧泛问给的就是含「或」的模板
+    （`守岸人+吟霖/长离/散华+卡卡罗`），信息已完整；走向量只会把正文里**别的**队伍
+    的打法描述召回来（答非所问），还要多等一次检索 + 重排（实测约 15~19s）。
+
+    ⚠️ 判据限定 `slots == ['队友']`：同时还有别的槽位（「守岸人配队和声骸」
+    → `['队友','声骸']`）时那些槽位仍需要向量，别一刀切。
+
+    ⚠️ 这是**唯一真相源**（state 版包装见 _named_team / _team_overview）。两处消费它，
+    必须口径一致：
+      · `intent_node` —— 命中则把 intent 从 `hybrid` 降级为 **`fact`**（不走向量就该是 fact）；
+      · `_should_ask_team` —— 命中则在答案末尾追问一句。
+    """
+    return list(slots or []) == ["队友"] and not _is_named_team(slots, characters)
+
+
+def _named_team(state: RagState) -> bool:
+    """state 版包装（见 _is_named_team）。"""
+    return _is_named_team(state.get("slots"), state.get("characters"))
+
+
+def _team_overview(state: RagState) -> bool:
+    """state 版包装（见 _is_team_overview）。"""
+    return _is_team_overview(state.get("slots"), state.get("characters"))
+
+
+def _should_ask_team(state: RagState) -> bool:
+    """要不要在答案末尾追问「对哪支队伍感兴趣」。
+
+    两个条件缺一不可：① 本轮是概括性配队；② **图谱侧确实给出了队伍**
+    （`graph_facts` 里出现了队友块标题）——否则问了也是无源之水
+    （角色不在库 / 该角色 wiki 没有配队段时，图谱给不出队伍）。
+    """
+    return _team_overview(state) and "【可组队伍" in (state.get("graph_facts") or "")
+
+
+# 概括性配队答完后的一句追问（2026-09-22 爸爸要求）。**固定文案走确定性拼接**，
+# 不求模型生成：这类"元话语"8B 会写得千奇百怪、时有时无，而且写进提示词就有
+# negative-example 污染风险（见文件头铁律）。措辞用爸爸给的原话 + 一点点 aemeath 语气。
+_TEAM_FOLLOWUP = "你对哪个队伍感兴趣？需要我给你详细介绍一下吗~"
+
+
 def _after_graph(state: RagState) -> str:
     """graph 之后：hybrid 还要补向量，其余直接进 verify。
 
-    例外：技能类问题（slots 含「技能」）强制补一轮向量。原因：图谱的 HAS_SKILL
+    ⚠️ 2026-09-22：**「概括性配队不走向量」这件事由 `intent` 承载，不在本函数里额外判** ——
+    `intent_node` 已把这类问题的 intent 从 `hybrid` **降级为 `fact`**（见 _is_team_overview），
+    于是 `_route` 走 fact 分支、这里 `state["intent"] == "hybrid"` 也不再成立，自然只走图谱。
+    **不要再在这里加一条 `if _team_overview(state): return "done"`**：同一个语义挂两条判据
+    迟早不同步；更要紧的是 intent 字段是对外字段，必须与实际走的路径一致
+    （爸爸 2026-09-22 原话：「这个 intent 不能例外，不走向量就应该标记为 fact」）。
+
+    例外一：技能类问题（slots 含「技能」）强制补一轮向量。原因：图谱的 HAS_SKILL
     每个 kind 只存了**技能名**（见 graph/extract.py::_extract_skills 取首个加粗串），
     没有效果描述与数值——问「爱弥斯共鸣解放」只喂得到「共鸣解放=飞至启明之时」
     这 7 行名字，模型无从作答（实测答「至于具体效果嘛……我记不清了啦」）。
     技能描述在原文里（爱弥斯 61 个技能 chunk 含「造成热熔伤害」「消耗全部【同步率】」
     等），必须走向量才能拿到。代价：技能类多一次检索 + 重排（约 15~19s）。
+
+    例外二：指名具体队伍（见 _named_team，≥3 个角色名）——同理，队名在图谱、打法在正文。
     """
-    if state["intent"] == "hybrid" or "技能" in (state.get("slots") or []):
+    if (state["intent"] == "hybrid" or "技能" in (state.get("slots") or [])
+            or _named_team(state)):
         return "need_vector"
     return "done"
 
@@ -600,6 +736,38 @@ async def _value_blocks(state: RagState) -> list[str]:
     return blocks
 
 
+def doc_sources(docs: list[dict]) -> list[str]:
+    """从召回文档里提取「引用来源」面包屑，给前端折叠面板用。
+
+    格式 `角色 › 模块 › 组件[ › 页签]`（chunker 写入时生成，见 ingest/chunker.py），
+    同一来源只留一条、保持召回顺序。**只回面包屑字符串、不回全文**：SSE 体积可控，
+    前端要的也只是「这条答案查了哪几页」，用于建立信任与排查。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for d in docs:
+        bc = (d.get("breadcrumb") or "").strip()
+        if not bc or bc in seen:
+            continue
+        seen.add(bc)
+        out.append(bc)
+    return out
+
+
+def _lock_focus(text: str, characters: list[str]) -> str:
+    """把正文里含「本次问到的那位角色」的配队「或」组收窄成他本人（见 text.lock_focus）。
+
+    图谱侧已在 graph_search 里就地锁过；这里补**参考文档**侧——两处形态必须一致，
+    否则图谱给 `守岸人+吟霖/长离/散华+卡卡罗`、文档给 `守岸人/维里奈/白芷+吟霖/长离/散华+卡卡罗`，
+    8B 会挑文档那份抄回去，锁定等于白做（这正是「提示词规则 + 文档原样」组合失效的原因）。
+    """
+    out = text
+    for c in characters:
+        if c:
+            out = lock_focus(out, c)
+    return out
+
+
 def _build_context(state: RagState, extra: list[str] | None = None) -> str:
     parts: list[str] = []
     # 注意：不要把 context_summary 塞进生成上下文——实测 aemeath 会把摘要句
@@ -614,9 +782,16 @@ def _build_context(state: RagState, extra: list[str] | None = None) -> str:
         parts.append("## 图谱事实\n" + state["graph_facts"])
     docs = state.get("docs") or []
     if docs:
+        # ⚠️ 2026-09-22 修：原来给每份资料加 `[1]` `[2]` 前缀想着引导溯源，实测 aemeath 会
+        # 把它当引用标记**抄进正文**——「- 守岸人 + 尤诺 [1][4]」「- 莫宁 + 琳奈 [1][5]」，
+        # 用户报「还有数字这些噪声」，三轮复现稳定出现。前端引用面板走的是 SSE
+        # `done.sources`（`doc_sources`），**不依赖模型在正文写 `[n]`**，去掉零损失：
+        # 每块自带 breadcrumb 开头，来源照样可辨。
+        # 若将来真要做「正文引用徽章」，请改用 `（资料1）` 这类非方括号标记，别退回 `[n]`。
+        # 同时在这里做「问谁锁谁」的文档侧收窄（见 _lock_focus）：图谱与文档必须同形。
+        focus = [c for c in (state.get("characters") or []) if c]
         parts.append("## 参考文档\n" + "\n\n".join(
-            f"[{i + 1}] {chunk_text(d)}" for i, d in enumerate(docs)
-        ))
+            _lock_focus(chunk_text(d), focus) for d in docs))
     web_facts = state.get("web_facts") or ""
     if web_facts:
         parts.append("## 联网搜索资料\n（实时搜索结果，本地资料不足时以本段为准）\n" + web_facts)
@@ -632,20 +807,56 @@ def _build_context(state: RagState, extra: list[str] | None = None) -> str:
     # 零资料信号被吞掉 → 模型收不到约束 → 退化成自由发挥（人设独白 + 复读）。
     if not (state.get("graph_facts") or docs or web_facts or extra):
         # 这里不要再写「## 资料」标题：_build_prompt 已经加了，重复标题会干扰模型
+        # 2026-09-22：光说「说明你不清楚」会被模型答成一句干巴巴的公文腔（用户报
+        # 「不知道的时候回答没有人设感」）。明确要求**用自己的口吻**说，并给一个
+        # 口径示例，人设才在「答不出来」这条路上也保住。
         parts.append(
-            "（本次没有检索到任何资料。请只用一句话说明你不清楚，然后立即停止；"
-            "不要解释原因，不要重复这句话，不要补充任何其他内容。）"
+            "（本次没有检索到任何资料。请用你自己的口吻、一句话说明你手里没有这份记录——"
+            "可以俏皮一点、带点小遗憾（就像「这个我记不太清了呀……」），然后立刻停住；"
+            "不要解释检索过程，不要重复这句话，不要补充任何其他内容。）"
         )
     return "\n\n".join(parts)
 
 
-def _build_prompt(context: str, question: str, blocks: list[str] | None = None) -> str:
+def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
+                  characters: list[str] | None = None,
+                  team_focus: bool = False,
+                  user_context: str = "") -> str:
     # 不在这里注入 /no_think：实测它对 aemeath 无效（仍 38s + 'v' 泄漏前缀 + 触发
     # Ollama 500）。思考模式由 llm.py 的 .bind(think=False) 统一关闭。
     prompt = f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}"
+    # 人称硬要求压在 prompt **最末**（近因位）：_SYSTEM 里那条通用规则实测压不住——
+    # 同一条 prompt 换 seed 重跑，「我呀~」开场仍会**概率性**冒出来（用户报「把清宵当
+    # 自己了」）。点名具体角色 + 放末尾，比在长 _SYSTEM 里写通用规则强得多。
+    # 问爱弥斯自己（characters 只含「爱弥斯」）时不加，否则会把人设本身顶掉。
+    others = [c for c in (characters or []) if c and c != "爱弥斯"]
+    # 这两条硬要求必须压在 prompt **最末**（近因位），写进前面的 _SYSTEM 等于白写——
+    # 实测：同一条「不要标注来源序号或引用标记」放在 _SYSTEM 里，配队答案照样出现
+    # `[1]`~`[10]`；末尾泛化措辞则完全不出现。
+    # ⚠️ 措辞必须**泛化**：点名 `[1] [2]` 反而会诱发编号（放末尾时更糟，自编到 `[5]`）。
+    tail = ("\n\n## 表达（硬要求）\n"
+            "资料没有编号，直接陈述内容即可，不要标注来源序号或引用标记。")
+    if others:
+        tail += ("\n本次问的是「" + "、".join(others) + "」，不是你——"
+                 "正文里一律用角色名或「她/他」称呼，不要冒充成她。")
+    if team_focus:
+        # 指名具体队伍时（见 _named_team，≥3 个角色名）：把注意力钉在那一支上。
+        # ⚠️ 措辞用「围绕这一支展开」而不是「只介绍这一支」——本文件记过的教训：
+        # 「只」字会让模型把介绍性口吻整个砍掉、退化成机械罗列（用户原话「怎么变成
+        # 这种垃圾回复了…不能丢人设」）。
+        tail += ("\n用户已经点名了一支具体队伍，本轮就围绕这一支展开："
+                 "成员是谁、怎么打（出手顺序 / 循环）、为什么这么配。")
+    if user_context:
+        # 用户画像（rag/profile.py，user_facts 表）：注入到近因位。措辞是「可参考」
+        # 而非硬要求——画像只是个性化佐料，答错资料比忽略画像严重得多；且不写
+        # negative-example（本文件铁律：反例会被当成样本照抄）。
+        tail += ("\n\n## 这位用户的小档案\n"
+                 f"{user_context}\n"
+                 "回答时可以自然贴合这位玩家的情况（比如TA主玩的角色、熟悉程度），"
+                 "与资料冲突时以资料为准。")
     blocks = blocks or []
     if not blocks:
-        return prompt
+        return prompt + tail
     # 指令必须压在 prompt **末尾**：_SYSTEM 里那条规则实测只能让模型「带上几个数」，
     # 面对长表仍会概括成「各需不同数量」而不逐行列（实测）。近因位置 + 点名禁止的
     # 偷懒写法，才能把它按回照抄状态。
@@ -679,7 +890,7 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None) 
     else:
         lines.append("「## 参考文档」里分等级展开的长表（尤其是各种材料表）一律不要照抄，"
                      "更不要主动列出没被问到的内容——数值只以「满级数值表」为准。")
-    return prompt + "\n".join(lines)
+    return prompt + "\n".join(lines) + tail
 
 
 async def generate_node(state: RagState):
@@ -698,7 +909,10 @@ async def generate_node(state: RagState):
     if blocks:
         log.info("补料 %d 块（%s）", len(blocks),
                  " + ".join(b.splitlines()[0].lstrip("# ") for b in blocks))
-    prompt = _build_prompt(context, state["question"], blocks=blocks)
+    prompt = _build_prompt(context, state["question"], blocks=blocks,
+                           characters=state.get("characters"),
+                           team_focus=_named_team(state),
+                           user_context=state.get("user_context") or "")
 
     guard = _new_loop_guard()
     full: list[str] = []
@@ -728,7 +942,20 @@ async def generate_node(state: RagState):
 
     answer = "".join(full)
     if answer_ok and truncated and hit:
-        answer = trim_loop(answer, hit)
+        answer = _trim_loop(answer, hit)
+    # 输出侧兜底清洗：剥来源标记 `[n]`（提示词只能概率压住）+ 去重重复的列表项（图谱与
+    # 参考文档给的是同一批队伍、只是角色名先后不同，8B 会读成「还有一批」再列一遍）。
+    clean = dedup_list_items(strip_ref_marks(answer))
+    if clean != answer:
+        log.info("输出清洗：去掉 %d 个字符（来源标记 / 重复列表项）", len(answer) - len(clean))
+        answer = clean
+
+    # 概括性配队：答完追问一句，引导用户点名具体队伍（点名后才会补向量检索打法）。
+    # 用**确定性拼接**而非提示词（见 _TEAM_FOLLOWUP 注释）；答案被复读闸截断时不加
+    # （半截答案后面跟一句追问很突兀）。流式路径由 ask_stream 补吐同一段差量。
+    if answer_ok and not truncated and _should_ask_team(state):
+        answer = answer.rstrip() + "\n\n" + _TEAM_FOLLOWUP
+        log.info("概括性配队：答案末尾追加追问句（图谱侧已给出队伍）")
 
     # 最终状态：answer/truncated/history/context_summary 是 RagState 声明字段，
     # 由 checkpointer 持久化；_commit_history 顺带压缩被挤出窗口的旧轮次（B）。
@@ -782,7 +1009,7 @@ async def chitchat_node(state: RagState):
 
     answer = "".join(full)
     if answer_ok and truncated and hit:
-        answer = trim_loop(answer, hit)
+        answer = _trim_loop(answer, hit)
 
     committed = await _commit_history(state, answer)
     yield {
@@ -877,7 +1104,7 @@ async def ensure_characters(question: str) -> tuple[list[str], bool, list[str]]:
     return candidates, ok, to_crawl
 
 
-def _fresh_state(question: str, characters: list[str]) -> dict:
+def _fresh_state(question: str, characters: list[str], user_context: str = "") -> dict:
     """每轮问答的初始状态：检索侧字段全部清零。
 
     docs/graph_facts/web_facts 等是普通字段（无 reducer），checkpointer 会把上一轮
@@ -898,26 +1125,41 @@ def _fresh_state(question: str, characters: list[str]) -> dict:
         "retry_count": 0,
         "refreshed": False,
         "used_web": False,
+        "user_context": user_context,   # 用户画像事实串；checkpointer 会跨轮带旧值，每轮显式覆盖
     }
 
 
-async def ask(question: str, thread_id: str = "default") -> dict:
+def _unknown_text(names: list[str]) -> str:
+    """角色不在知识库、联网抓取也没找到时的兜底话术。
+
+    2026-09-22：原来是一句「不知道（知识库里没有这个角色，尝试联网抓取也没找到）。」
+    ——事实没错但**完全没有人设**（用户报「不知道的时候回答没有人设感」）。
+    改成爱弥斯的口吻，同时保留三件事实：翻了本地、联网找过、确实没有。
+    """
+    who = "、".join(names) if names else "这个角色"
+    return (
+        f"诶…「{who}」我在小本本里翻遍了都没找着，刚也联网去问了一圈，还是没着落。"
+        "这个我确实不清楚呀，家人帮我确认一下名字嘛~"
+    )
+
+
+async def ask(question: str, thread_id: str = "default", user_context: str = "") -> dict:
     candidates, ok, crawled = await ensure_characters(question)
     if candidates and not ok:
         log.info("自动爬取: 最终回「不知道」(角色=%s)", candidates)
         return {
-            "answer": "不知道（知识库里没有这个角色，尝试联网抓取也没找到）。",
+            "answer": _unknown_text(candidates),
             "characters": candidates, "intent": "", "slots": [], "docs": 0,
         }
     chain = await get_chain()
     injected = crawled if crawled else []
     return await chain.ainvoke(
-        _fresh_state(question, injected),
+        _fresh_state(question, injected, user_context),
         config={"configurable": {"thread_id": thread_id}},
     )
 
 
-async def ask_stream(question: str, thread_id: str = "default"):
+async def ask_stream(question: str, thread_id: str = "default", user_context: str = ""):
     """流式问答：走 LangGraph astream_events，checkpointer 自动管理多轮记忆。
 
     yield dict：
@@ -934,21 +1176,28 @@ async def ask_stream(question: str, thread_id: str = "default"):
 
     candidates, ok, crawled = await ensure_characters(question)
     if candidates and not ok:
-        yield {"token": "不知道（知识库里没有这个角色，尝试联网抓取也没找到）。"}
-        yield {"done": True}
+        text = _unknown_text(candidates)
+        yield {"token": text}
+        # done 事件补齐字段：原来只 `{"done": True}`，前端 meta 全是 undefined、
+        # 引用面板也拿不到 sources（与正常路径的 done 结构对齐）。
+        yield {
+            "done": True, "answer": text, "intent": "", "slots": [],
+            "characters": candidates, "docs": 0, "sources": [], "truncated": False,
+        }
         return
 
     yield {"status": "retrieving"}  # 前端可显示「检索中…」
 
     chain = await get_chain()
     injected = crawled if crawled else []
-    input_state = _fresh_state(question, injected)
+    input_state = _fresh_state(question, injected, user_context)
     config = {"configurable": {"thread_id": thread_id}}
 
     # 从事件流抽 token + 阶段 + 最终元数据
     full: list[str] = []
     final_state: dict = {}
     emitted_stages: set[str] = set()   # streaming node 会触发两次 on_chain_start，去重
+    answer_filter = AnswerFilter()     # 流式剥 `[n]` + 去重重复列表项（见 text.AnswerFilter）
     async for event in chain.astream_events(input_state, version="v2", config=config):
         kind = event.get("event", "")
         name = event.get("name", "")
@@ -973,7 +1222,10 @@ async def ask_stream(question: str, thread_id: str = "default"):
             chunk = event.get("data", {}).get("chunk")
             if chunk and hasattr(chunk, "content") and chunk.content:
                 full.append(chunk.content)
-                yield {"token": chunk.content}
+                # 输出侧清洗：剥 `[n]` 来源标记 + 去重重复列表项（见 text.AnswerFilter）
+                safe = answer_filter.feed(chunk.content)
+                if safe:
+                    yield {"token": safe}
 
         # 图执行结束事件：拿最终完整状态（含 intent/slots/characters/docs/truncated/answer）
         elif kind == "on_chain_end" and name == "LangGraph":
@@ -981,10 +1233,27 @@ async def ask_stream(question: str, thread_id: str = "default"):
             if isinstance(output, dict):
                 final_state = output
 
-    answer = "".join(full)
+    # 收尾：吐出过滤器扣住的尾巴（被切成多 token 的 `[n]` 开头、最后一行列表项）
+    tail_out = answer_filter.flush()
+    if tail_out:
+        yield {"token": tail_out}
+    if answer_filter.removed_marks or answer_filter.removed_lines:
+        log.info("流式清洗：来源标记 %d 处 / 重复列表项 %d 行",
+                 answer_filter.removed_marks, answer_filter.removed_lines)
+
+    answer = dedup_list_items(strip_ref_marks("".join(full)))
     # 如果 generate_node 内部已截断，final_state["answer"] 是截断后的权威全文
     if final_state.get("truncated") and final_state.get("answer"):
         answer = final_state["answer"]
+
+    # 概括性配队：generate_node 已把追问句拼进 final_state["answer"]，但流式的 token
+    # 是**旁路抽取**的（on_chat_model_stream），只有模型生成的正文，必须把这段差量补吐
+    # 出去——否则前端少显示一句、与 done.answer 不一致。endswith 防重复。
+    if not final_state.get("truncated") and _should_ask_team(final_state):
+        suffix = "\n\n" + _TEAM_FOLLOWUP
+        if not answer.endswith(_TEAM_FOLLOWUP):
+            yield {"token": suffix}
+            answer = answer.rstrip() + suffix
 
     # 全链路耗时：排查「慢在检索还是生成」刚需（阶段事件只给顺序不给时长）
     log.info(
@@ -1001,6 +1270,7 @@ async def ask_stream(question: str, thread_id: str = "default"):
         "slots": final_state.get("slots") or [],
         "characters": final_state.get("characters") or [],
         "docs": len(final_state.get("docs") or []),
+        "sources": doc_sources(final_state.get("docs") or []),
         "truncated": bool(final_state.get("truncated")),
     }
 

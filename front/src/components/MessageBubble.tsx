@@ -1,7 +1,8 @@
 import { memo, useState } from 'react'
-import { Bot, User, AlertTriangle, RefreshCw, Copy, Check, Target, Layers, Users, FileText, Scissors } from 'lucide-react'
+import { Bot, User, AlertTriangle, RefreshCw, Copy, Check, Target, Layers, Users, FileText, Scissors, ChevronDown } from 'lucide-react'
 import type { Message } from '../types'
 import { renderMarkdown } from '../lib/markdown'
+import { useStore } from '../store/useStore'
 import './MessageBubble.css'
 
 const INTENT_LABEL: Record<string, string> = {
@@ -38,14 +39,60 @@ interface Props {
   canRegenerate?: boolean
 }
 
+/**
+ * 引用来源折叠面板：默认只显示「N 条引用」，点开列出召回文档的面包屑
+ * （`角色 › 模块 › 组件`，后端 doc_sources 去重保序返回）。
+ * 无 sources 时退化为纯展示标签（兼容旧会话记录）。
+ */
+function SourcePanel({ count, sources }: { count: number; sources?: string[] }) {
+  const [open, setOpen] = useState(false)
+  const has = !!sources && sources.length > 0
+  if (!has) {
+    return (
+      <span className="tag">
+        <FileText size={11} />
+        {count} 条引用
+      </span>
+    )
+  }
+  return (
+    <div className={`tag tag-src${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="src-toggle"
+        onClick={() => setOpen((v) => !v)}
+        title="查看引用来源"
+      >
+        <FileText size={11} />
+        {count} 条引用
+        <ChevronDown size={11} className="src-caret" />
+      </button>
+      {open && (
+        <ul className="src-list">
+          {sources.map((s) => (
+            <li key={s}>{s}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
   const isUser = msg.role === 'user'
   const html = !isUser && msg.content ? renderMarkdown(msg.content) : ''
+  // 个性化头像：设置里上传后，气泡头像用图；空则回落默认图标
+  const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
+  const avatarUser = useStore((s) => s.settings.avatarUser)
 
   return (
     <div className={`msg-row ${isUser ? 'msg-user' : 'msg-bot'} fade-up`}>
       <div className={`avatar ${isUser ? 'avatar-user' : 'avatar-bot'}`}>
-        {isUser ? <User size={16} /> : <Bot size={16} />}
+        {isUser ? (
+          avatarUser ? <img src={avatarUser} alt="我" /> : <User size={16} />
+        ) : (
+          avatarAssistant ? <img src={avatarAssistant} alt="AI" /> : <Bot size={16} />
+        )}
       </div>
 
       <div className="msg-main">
@@ -100,10 +147,7 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
               </span>
             )}
             {typeof msg.meta.docs === 'number' && msg.meta.docs > 0 && (
-              <span className="tag">
-                <FileText size={11} />
-                {msg.meta.docs} 条引用
-              </span>
+              <SourcePanel count={msg.meta.docs} sources={msg.meta.sources} />
             )}
             {msg.meta.truncated && (
               <span className="tag tag-warn" title="模型出现重复输出，已自动截断">

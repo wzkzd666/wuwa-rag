@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { Conversation, Message, Settings, AskMeta, IngestRecord, StreamEvent } from '../types'
+import type { Conversation, Message, Settings, AskMeta, IngestRecord, StreamEvent, AuthInfo } from '../types'
 import * as api from '../lib/api'
 
 /** 生成短 id */
@@ -32,6 +32,13 @@ const DEFAULT_SETTINGS: Settings = {
   theme: 'dark',
   stream: true,
   fontSize: 14,
+  sidebarCollapsed: false,
+  avatarAssistant: '',
+  avatarUser: '',
+  bgPreset: 'default',
+  bgImage: '',
+  bgDim: 0.45,
+  bgBlur: 0,
 }
 
 interface Toast {
@@ -44,12 +51,18 @@ interface Store {
   conversations: Conversation[]
   activeId: string
   settings: Settings
+  /** 登录态（token/用户名/角色）；null = 未登录。persist 到 localStorage */
+  auth: AuthInfo | null
   /** 正在流式接收的会话 id（用于禁用输入、显示停止按钮） */
   busyId: string | null
   toasts: Toast[]
   ingests: IngestRecord[]
   /** 后端连通性：unknown | ok | down */
   health: 'unknown' | 'ok' | 'down'
+
+  // 鉴权
+  setAuth: (a: AuthInfo) => void
+  clearAuth: () => void
 
   // 会话
   newConversation: () => string
@@ -100,10 +113,21 @@ export const useStore = create<Store>()(
         conversations: [],
         activeId: '',
         settings: DEFAULT_SETTINGS,
+        auth: null,
         busyId: null,
         toasts: [],
         ingests: [],
         health: 'unknown',
+
+        setAuth: (a) => {
+          api.setAuthToken(a.token)
+          set({ auth: a })
+        },
+
+        clearAuth: () => {
+          api.setAuthToken('')
+          set({ auth: null })
+        },
 
         newConversation: () => {
           const c = nowConv()
@@ -207,6 +231,7 @@ export const useStore = create<Store>()(
                       slots: evt.slots,
                       characters: evt.characters,
                       docs: evt.docs,
+                      sources: evt.sources,
                       truncated: evt.truncated,
                     }
                     // done.answer 是后端给出的权威全文：
@@ -242,6 +267,7 @@ export const useStore = create<Store>()(
                   slots: out.slots,
                   characters: out.characters,
                   docs: out.docs,
+                  sources: out.sources,
                   truncated: out.truncated,
                 },
               })
@@ -250,6 +276,11 @@ export const useStore = create<Store>()(
             const msg = err instanceof Error ? err.message : String(err)
             if (msg.includes('abort')) {
               updateMsg(convId, botMsg.id, { streaming: false, status: 'done' })
+            } else if (err instanceof api.UnauthorizedError) {
+              // token 过期/被撤：清登录态，App 会自动切到登录页
+              updateMsg(convId, botMsg.id, { streaming: false, status: 'error', error: msg })
+              get().clearAuth()
+              get().toast('err', msg)
             } else {
               updateMsg(convId, botMsg.id, {
                 streaming: false,
@@ -361,6 +392,17 @@ export const useStore = create<Store>()(
     {
       name: 'wuwa-rag-front',
       version: 1,
+      // persist 的默认合并是**浅合并**：老存档里的 settings 是个完整对象，会整体顶掉
+      // DEFAULT_SETTINGS，新增的个性化字段（头像 / 背景 / 侧栏折叠）全成 undefined。
+      // 这里显式深合一层 settings，保证旧存档升级后新字段有默认值。
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<Store>
+        return {
+          ...current,
+          ...p,
+          settings: { ...DEFAULT_SETTINGS, ...(p.settings ?? {}) },
+        }
+      },
       partialize: (s) => ({
         conversations: s.conversations.map((c) => ({
           ...c,
@@ -369,6 +411,7 @@ export const useStore = create<Store>()(
         })),
         activeId: s.activeId,
         settings: s.settings,
+        auth: s.auth,
         ingests: s.ingests.slice(0, 50),
       }),
     },

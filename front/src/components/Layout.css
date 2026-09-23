@@ -40,6 +40,48 @@
   color: #0b1020;
   box-shadow: var(--glow);
   flex-shrink: 0;
+  overflow: hidden;
+}
+.brand-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+/* logo 即头像替换入口（点一下选图）；相机角标 hover 时亮起 */
+.brand-logo-btn {
+  position: relative;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 11px;
+  line-height: 0;
+}
+.brand-logo-btn:hover .brand-logo {
+  filter: brightness(1.15);
+}
+.brand-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line-strong);
+  color: var(--text-secondary);
+  opacity: 0.9;
+  transition: all 0.15s ease;
+}
+.brand-logo-btn:hover .brand-badge {
+  opacity: 1;
+  transform: scale(1.12);
+  color: var(--accent);
 }
 
 .brand-text {
@@ -132,6 +174,11 @@
   flex-direction: column;
 }
 
+/* 侧栏宽度过渡：折叠/展开有动画 */
+.sidebar {
+  transition: width 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .topbar {
   height: var(--topbar-h);
   flex-shrink: 0;
@@ -172,8 +219,73 @@
   color: var(--text-secondary);
 }
 
+/* 顶栏当前用户徽章 + 退出按钮 */
+.user-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 11px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  max-width: 180px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.user-logout {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  transition: all 0.15s;
+}
+.user-logout:hover {
+  color: var(--err);
+  background: rgba(248, 113, 113, 0.1);
+}
+
 .menu-btn {
-  display: none;
+  flex-shrink: 0;
+}
+
+/* ---------- 桌面端折叠成图标窄栏（2026-09-22） ----------
+   ⚠️ 折叠态的 class 是 `.rail`（Layout.tsx 里 sidebarCollapsed 挂上去的）。
+   这套样式之前完全缺失 —— 按钮点了、class 加了、但没有任何视觉变化，
+   表现成「折叠按键存在但是使用不了」。只在桌面档生效（窄屏走抽屉，不折叠）。 */
+@media (min-width: 861px) {
+  .sidebar.rail {
+    width: 64px;
+  }
+  .sidebar.rail .brand {
+    padding: 18px 0 16px;
+    justify-content: center;
+  }
+  .sidebar.rail .brand-text {
+    display: none;
+  }
+  .sidebar.rail .nav {
+    padding: 12px 8px;
+  }
+  .sidebar.rail .nav-item {
+    justify-content: center;
+    padding: 10px 0;
+  }
+  .sidebar.rail .nav-item span {
+    display: none;
+  }
+  .sidebar.rail .sidebar-foot {
+    justify-content: center;
+    padding: 13px 0;
+  }
+  .sidebar.rail .health-text {
+    display: none;
+  }
 }
 
 .content {
@@ -210,7 +322,32 @@
     background: rgba(4, 7, 15, 0.6);
     backdrop-filter: blur(2px);
   }
-  .menu-btn {
-    display: inline-flex;
+  /* 窄屏走抽屉：忽略桌面折叠态，抽屉始终全宽 */
+  .sidebar.rail {
+    width: var(--sidebar-w);
+  }
+  .sidebar.rail .brand {
+    padding: 18px 18px 16px;
+    justify-content: flex-start;
+  }
+  .sidebar.rail .brand-text {
+    display: flex;
+  }
+  .sidebar.rail .nav {
+    padding: 12px 10px;
+  }
+  .sidebar.rail .nav-item {
+    justify-content: flex-start;
+    padding: 9px 12px;
+  }
+  .sidebar.rail .nav-item span {
+    display: inline;
+  }
+  .sidebar.rail .sidebar-foot {
+    justify-content: flex-start;
+    padding: 13px 18px;
+  }
+  .sidebar.rail .health-text {
+    display: inline;
   }
 }

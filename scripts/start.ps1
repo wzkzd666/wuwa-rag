@@ -11,7 +11,7 @@
       6) 前端 Vite                      —— 独立窗口，:5173
       7) 轮询 /health 就绪 + 检查 Ollama aemeath 模型
     各后台窗口 PID 记录到 .runtime/dev.pids.json，供 stop.ps1 精准关闭。
-    注：生成模型已弃用 serve_amis.py，改走 Ollama 的 aemeath（LLM_URL=:11434）。
+    生成模型由 Ollama 承载（LLM_URL=:11434，模型名 aemeath），无需另起本地推理服务。
 .PARAMETER NoDocker
     跳过 docker compose（容器已在运行时用）
 .PARAMETER NoMigrate

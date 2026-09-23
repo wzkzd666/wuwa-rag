@@ -146,6 +146,140 @@
   min-width: 52px;
 }
 
+/* 头像预览（设置页） */
+.avatar-prev {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: var(--grad);
+  color: #0b1020;
+  box-shadow: var(--glow);
+}
+.avatar-prev img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.avatar-prev-empty {
+  background: var(--bg-deep);
+  color: var(--text-muted);
+  box-shadow: none;
+  border: 1px dashed var(--line-strong);
+}
+
+/* 背景预设色板 */
+.bg-row {
+  flex-direction: column;
+  align-items: stretch;
+}
+.bg-swatches {
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-top: 4px;
+}
+.bg-swatch {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  padding: 4px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s;
+  min-width: 64px;
+}
+.bg-swatch:hover {
+  border-color: var(--line-strong);
+  background: var(--bg-hover);
+}
+.bg-swatch-on {
+  border-color: rgba(129, 140, 248, 0.65);
+  background: var(--grad-soft);
+}
+.bg-swatch-fill {
+  width: 52px;
+  height: 30px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background-color: var(--bg-elevated);
+  background-size: cover;
+  background-position: center;
+  color: var(--text-secondary);
+}
+.bg-swatch-label {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.bg-swatch-on .bg-swatch-label {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* 我的画像（user_facts） */
+.profile-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  padding: 6px 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.profile-loading {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  padding: 16px 0 8px;
+  text-align: center;
+}
+.profile-list {
+  list-style: none;
+  padding-top: 6px;
+}
+.profile-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 4px;
+  border-bottom: 1px dashed var(--line);
+  font-size: 13px;
+}
+.profile-item:last-child {
+  border-bottom: none;
+}
+.profile-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+}
+.profile-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.profile-del {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 5px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  transition: all 0.15s;
+}
+.profile-del:hover {
+  color: var(--err);
+  background: rgba(248, 113, 113, 0.1);
+}
+
 /* 统计 */
 .set-stats {
   display: flex;

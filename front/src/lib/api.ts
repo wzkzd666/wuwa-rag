@@ -1,8 +1,11 @@
-import type { AskOut, IngestOut, IngestStatus, StreamEvent } from '../types'
+import type { AskOut, IngestOut, IngestStatus, StreamEvent, UserFact } from '../types'
 
 /**
  * API 层。默认走 Vite 代理前缀 /api（开发期转发到 127.0.0.1:8000）。
  * 生产或用户自定义时，可在设置里填写完整后端地址，此时直接用绝对地址。
+ *
+ * 鉴权（2026-09-22）：登录后 setAuthToken 存 token，所有请求自动带
+ * `Authorization: Bearer <token>`；401 统一抛 UnauthorizedError，由调用方踢回登录页。
  */
 
 function resolveBase(customBase?: string): string {
@@ -12,15 +15,76 @@ function resolveBase(customBase?: string): string {
   return '/api'
 }
 
+let authToken = ''
+
+/** 登录态变化时由 store 调用；token 为空 = 未登录 */
+export function setAuthToken(token: string): void {
+  authToken = token
+}
+
+/** 401 专用错误：store / 页面据此清登录态、跳登录页 */
+export class UnauthorizedError extends Error {
+  constructor() {
+    super('登录已过期，请重新登录')
+    this.name = 'UnauthorizedError'
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {}
+}
+
 async function request<T>(path: string, init?: RequestInit, base?: string): Promise<T> {
   const res = await fetch(`${resolveBase(base)}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     ...init,
   })
+  if (res.status === 401) throw new UnauthorizedError()
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText}`)
+    // 后端 {detail: ...} 的业务错误（注册重名 / 密码错误等）直接透出给用户
+    let msg = `HTTP ${res.status} ${res.statusText}`
+    try {
+      const j = await res.json()
+      if (j?.detail) msg = String(j.detail)
+    } catch { /* 保留默认消息 */ }
+    throw new Error(msg)
   }
   return (await res.json()) as T
+}
+
+// ---------- 鉴权 ----------
+
+export interface AuthOut {
+  token: string
+  username: string
+  role: 'admin' | 'guest'
+}
+
+export function register(username: string, password: string, base?: string): Promise<AuthOut> {
+  return request('/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) }, base)
+}
+
+export function login(username: string, password: string, base?: string): Promise<AuthOut> {
+  return request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }, base)
+}
+
+/** 校验 token 是否仍有效（启动时用）；无效抛 UnauthorizedError */
+export function me(base?: string): Promise<{ username: string; role: string }> {
+  return request('/auth/me', { method: 'GET' }, base)
+}
+
+export function logout(base?: string): Promise<{ ok: boolean }> {
+  return request('/auth/logout', { method: 'POST' }, base)
+}
+
+// ---------- 用户画像 ----------
+
+export function getProfile(base?: string): Promise<{ username: string; facts: UserFact[] }> {
+  return request('/profile', { method: 'GET' }, base)
+}
+
+export function deleteFact(factId: number, base?: string): Promise<{ ok: boolean }> {
+  return request(`/profile/fact/${factId}`, { method: 'DELETE' }, base)
 }
 
 /** GET /health */
@@ -61,10 +125,11 @@ export function askStream(
   const done = (async () => {
     const res = await fetch(`${resolveBase(base)}/ask/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
       body: JSON.stringify({ question, thread_id: threadId }),
       signal: controller.signal,
     })
+    if (res.status === 401) throw new UnauthorizedError()
     if (!res.ok || !res.body) {
       throw new Error(`HTTP ${res.status} ${res.statusText}`)
     }

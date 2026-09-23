@@ -28,6 +28,8 @@ function SessionList() {
   const [draft, setDraft] = useState('')
   // 两步删除确认：首次点击标记，再次点击才删
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
+  // 收录入口仅管理员可见（后端 /ingest 也是 admin 守卫）
+  const isAdmin = useStore((s) => s.auth?.role === 'admin')
 
   const startEdit = (id: string, title: string) => {
     setEditing(id)
@@ -105,9 +107,11 @@ function SessionList() {
           </div>
         ))}
       </div>
-      <button className="btn btn-ghost goto-knowledge" onClick={() => navigate('/knowledge')}>
-        <Library size={14} /> 收录新角色
-      </button>
+      {isAdmin && (
+        <button className="btn btn-ghost goto-knowledge" onClick={() => navigate('/knowledge')}>
+          <Library size={14} /> 收录新角色
+        </button>
+      )}
     </div>
   )
 }
@@ -120,6 +124,7 @@ export default function ChatPage() {
   const stop = useStore((s) => s.stop)
   const regenerate = useStore((s) => s.regenerate)
   const health = useStore((s) => s.health)
+  const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const navigate = useNavigate()
 
   const conv = conversations.find((c) => c.id === activeId)
@@ -158,7 +163,7 @@ export default function ChatPage() {
           {isEmpty ? (
             <div className="chat-welcome">
               <div className="welcome-logo">
-                <Sparkles size={26} />
+                {avatarAssistant ? <img src={avatarAssistant} alt="爱弥斯" /> : <Sparkles size={26} />}
               </div>
               <h1>
                 你好，我是<b className="grad-text">爱弥斯</b>

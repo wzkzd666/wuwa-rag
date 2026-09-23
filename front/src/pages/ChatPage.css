@@ -181,7 +181,14 @@
   color: #0b1020;
   box-shadow: var(--glow);
   margin-bottom: 18px;
+  overflow: hidden;
   animation: fade-up 0.5s ease both;
+}
+.welcome-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
 }
 .chat-welcome h1 {
   font-size: 26px;

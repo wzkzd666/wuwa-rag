@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import get_settings
+from ..rag.characters import normalize_character_name, normalize_team
 from ..ww_logger import get_logger
 
 log=get_logger('rag')
@@ -33,7 +34,10 @@ _SKILL_NOISE = ("分支强化", "属性加成", "伤害", "等级", "Lv", "效�
 _ECHO_NOISE = ("主流", "推荐", "武器", "词条", "分配", "声骸", "配装")
 _RE_STAGE = re.compile(r"([一二三四五六]阶突破)")
 _TEAM_SLOT_NOISE = ("奶&辅", "副输出", "主输出", "输出", "配队", "备注", "说明", "PS")
-_RE_NAME = re.compile(r"[\u4e00-\u9fa5]{2,4}")
+# 注：曾有一个 `_RE_NAME = re.compile(r"[\u4e00-\u9fa5]{2,4}")` 用来过滤队友名，
+# 2026-09-22 删除 —— 它把含 `-`/`·` 的名字全挡掉（`漂泊者-男-湮灭`、`秧秧·玄翎`
+# 从未进过图），却又让 `主输出`/`卡提`/`暗主` 漏进图。队友名过滤现在统一走
+# `rag.characters.normalize_character_name`（落回名册才算数，见其 docstring）。
 
 
 @dataclass
@@ -295,7 +299,11 @@ def _extract_team_effects(chunks: list[dict], self_name: str) -> dict[str, str]:
                 continue
             if who == self_name or self_name in who or who in _TEAM_SLOT_NOISE:
                 continue
-            if not _RE_NAME.fullmatch(who):
+            # ⚠️ 原来用 `_RE_NAME.fullmatch(who)`（`[\u4e00-\u9fa5]{2,4}`），
+            # 会把含 `-`/`·` 的名字全挡掉 → `漂泊者-男-湮灭` 这类队友的推荐理由抽不到。
+            # 换成 `normalize_character_name`：同样要求落回名册，但认别名与括号注释。
+            who = normalize_character_name(who)
+            if not who:
                 continue
             if len(effect) > len(fx.get(who, "")):      # 同人取最长描述
                 fx[who] = effect
@@ -312,10 +320,28 @@ def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
     out, seen = [], set()
 
     def _add(mate: str, team: str) -> None:
-        mate = _clean(mate)
-        if not mate or mate == self_name or not _RE_NAME.fullmatch(mate):
+        # 队友名归一：原来用 `_RE_NAME.fullmatch`（纯汉字 2~4 个）过滤，会把含
+        # `-`/`·` 的名字**全部挡掉** —— 实测图谱里 `漂泊者-男-湮灭/气动/衍射/导电`
+        # 四个与 `秧秧·玄翎` **从未作为队友出现过**
+        # （`MATCH (:Character)-[:SYNERGIZES_WITH]->(t:Character) RETURN DISTINCT t.name`
+        # 里没有它们），反倒是 `主输出`/`副输出`/`卡提`/`暗主` 漏进图、成了 4 个垃圾
+        # Character 节点。`normalize_character_name` 同样"不编造"（必须落回名册才算数），
+        # 但认别名、括号注释、位置标签粘连与漂泊者变体，认不出来的一律丢。
+        mate = normalize_character_name(mate)
+        if not mate or mate == self_name:
             return
-        if (mate, team) in seen:
+        # ⚠️ 2026-09-22 修：**标题行只写「另外两个队友」，不含本角色**（清宵页的
+        # `#### 守岸人+尤诺` 里没有「清宵」，因为整页都是清宵的）。原样存进图的
+        # `teams` 就变成不含主角的组合名，喂给模型后它会读成「守岸人和尤诺是一对」，
+        # 把「队友→队伍」反查表抄成配队清单、还开始编编号（实测：5 行反查表被抄成
+        # 9 项带 `1`/`*5` 的清单）。补全成含本角色的完整组队，语义才对。
+        # 幂等：team 已含本角色（如来源 2 的 `…+卡卡罗`）则不动，重建图谱/索引安全。
+        # `normalize_team` 与读取侧 `retrievers.graph_search` 用的是**同一个函数**，
+        # 两侧形态必须一致（wiki 表格的 `漂泊者·湮灭`/`渊武其他输出`/`主输出` 都在这里清掉）。
+        team = normalize_team(_clean(team))
+        if team and self_name not in team:
+            team = f"{self_name}+{team}"
+        if not team or (mate, team) in seen:
             return
         seen.add((mate, team))
         out.append({"name": mate, "team": team, "effect": fx.get(mate, "")})

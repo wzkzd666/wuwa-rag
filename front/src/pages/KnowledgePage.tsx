@@ -65,6 +65,8 @@ export default function KnowledgePage() {
   const ingestCharacter = useStore((s) => s.ingestCharacter)
   const health = useStore((s) => s.health)
   const apiBase = useStore((s) => s.settings.apiBase)
+  // 收录仅管理员（后端 /ingest 与 /ingest/status 均为 admin 守卫）
+  const isAdmin = useStore((s) => s.auth?.role === 'admin')
 
   const [name, setName] = useState('')
   const [filter, setFilter] = useState('')
@@ -137,61 +139,69 @@ export default function KnowledgePage() {
         </div>
       )}
 
-      {/* 提交表单 */}
-      <section className="card kb-form">
-        <label className="kb-label">角色名（中文名册标准名，如「忌炎」）</label>
-        <div className="kb-form-row">
-          <input
-            className="input"
-            value={name}
-            placeholder="输入或从下方名册点选…"
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && submit(name)}
-          />
-          <button className="btn btn-primary" onClick={() => submit(name)} disabled={!name.trim()}>
-            <Download size={15} /> 提交入库
-          </button>
-        </div>
+      {/* 提交表单（仅管理员） */}
+      {isAdmin ? (
+        <>
+          <section className="card kb-form">
+            <label className="kb-label">角色名（中文名册标准名，如「忌炎」）</label>
+            <div className="kb-form-row">
+              <input
+                className="input"
+                value={name}
+                placeholder="输入或从下方名册点选…"
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && submit(name)}
+              />
+              <button className="btn btn-primary" onClick={() => submit(name)} disabled={!name.trim()}>
+                <Download size={15} /> 提交入库
+              </button>
+            </div>
 
-        <div className="pipeline">
-          {PIPELINE_STEPS.map((s, i) => (
-            <div key={s.name} className="pipeline-step">
-              <span className="pipeline-dot">
-                <Zap size={11} />
-              </span>
-              <div>
-                <b>
-                  {i + 1}. {s.name}
-                </b>
-                <span>{s.desc}</span>
+            <div className="pipeline">
+              {PIPELINE_STEPS.map((s, i) => (
+                <div key={s.name} className="pipeline-step">
+                  <span className="pipeline-dot">
+                    <Zap size={11} />
+                  </span>
+                  <div>
+                    <b>
+                      {i + 1}. {s.name}
+                    </b>
+                    <span>{s.desc}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* 名册快捷选择 */}
+          <section className="card kb-roster">
+            <div className="kb-roster-head">
+              <h3>角色名册</h3>
+              <div className="kb-search">
+                <Search size={14} />
+                <input
+                  value={filter}
+                  placeholder="筛选角色…"
+                  onChange={(e) => setFilter(e.target.value)}
+                />
               </div>
             </div>
-          ))}
+            <div className="roster-grid">
+              {filtered.map((r) => (
+                <button key={r} className="roster-chip" onClick={() => submit(r)}>
+                  {r}
+                </button>
+              ))}
+              {filtered.length === 0 && <span className="roster-empty">没有匹配的角色</span>}
+            </div>
+          </section>
+        </>
+      ) : (
+        <div className="kb-warn">
+          <Info size={15} /> 收录新角色需要管理员账号（admin）登录。你当前是游客，可以正常问答。
         </div>
-      </section>
-
-      {/* 名册快捷选择 */}
-      <section className="card kb-roster">
-        <div className="kb-roster-head">
-          <h3>角色名册</h3>
-          <div className="kb-search">
-            <Search size={14} />
-            <input
-              value={filter}
-              placeholder="筛选角色…"
-              onChange={(e) => setFilter(e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="roster-grid">
-          {filtered.map((r) => (
-            <button key={r} className="roster-chip" onClick={() => submit(r)}>
-              {r}
-            </button>
-          ))}
-          {filtered.length === 0 && <span className="roster-empty">没有匹配的角色</span>}
-        </div>
-      </section>
+      )}
 
       {/* 提交记录 */}
       <section className="card kb-records">
