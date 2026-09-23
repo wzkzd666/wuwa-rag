@@ -116,6 +116,57 @@ body::before {
     radial-gradient(520px 380px at -6% 104%, rgba(94, 234, 212, 0.1), transparent 60%);
 }
 
+/* ---------- 应用背景层（设置里可切换 / 换自定义图片） ---------- */
+/* z-index 与 .layout 拉开一档：始终压在内容下面 */
+.app-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  transition: filter 0.25s ease, transform 0.25s ease;
+}
+
+/* 预设背景（渐进式：极光 / 暮紫 / 深青 / 纯色） */
+.app-bg[data-preset='aurora'] {
+  background-image: linear-gradient(160deg, #0a1024 0%, #16224a 42%, #2c1f52 100%);
+}
+.app-bg[data-preset='dusk'] {
+  background-image: linear-gradient(160deg, #1a1030 0%, #3a1d4e 46%, #6b2d55 100%);
+}
+.app-bg[data-preset='cyber'] {
+  background-image: linear-gradient(160deg, #04121c 0%, #0b2b3a 46%, #123d4a 100%);
+}
+.app-bg[data-preset='plain'] {
+  background-image: none;
+  background-color: var(--bg-deep);
+}
+
+[data-theme='light'] .app-bg[data-preset='aurora'] {
+  background-image: linear-gradient(160deg, #eef2ff 0%, #e4e3ff 45%, #f8e9ff 100%);
+}
+[data-theme='light'] .app-bg[data-preset='dusk'] {
+  background-image: linear-gradient(160deg, #fdf0f7 0%, #f1eaff 50%, #e8f0ff 100%);
+}
+[data-theme='light'] .app-bg[data-preset='cyber'] {
+  background-image: linear-gradient(160deg, #e8f7fb 0%, #e2eefc 50%, #eef4ff 100%);
+}
+
+/* 自定义图片的遮罩：深色主题压黑、浅色主题压白，都为了正文可读 */
+.app-bg-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: #05080f;
+}
+
+[data-theme='light'] .app-bg-veil {
+  background: #f7f9ff;
+}
+
 ::selection {
   background: rgba(129, 140, 248, 0.38);
   color: #fff;

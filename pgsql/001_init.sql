@@ -42,7 +42,12 @@ CREATE TABLE IF NOT EXISTS chunks (
     meta        JSONB       NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_chunks_hash     ON chunks(hash);
+-- ⚠️ 2026-09-22：hash 是「纯正文」sha256，跨角色会大量复用（突破材料表这类小表格的正文
+-- 不含角色名，57 个角色逐字相同）。曾写成 UNIQUE 当幂等键 → 第 2 个角色起的同文本块被
+-- `ON CONFLICT (hash) DO NOTHING` 静默吞掉（实测丢 124 块，「含一阶突破」的角色 9→57）。
+-- 幂等键是 chunk_id（含角色，见下面 ux_chunks_chunk_id）；hash 只作查询索引，必须非唯一。
+DROP INDEX IF EXISTS ux_chunks_hash;              -- 清掉历史库里遗留的错误唯一索引
+CREATE INDEX IF NOT EXISTS ix_chunks_hash     ON chunks(hash);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_chunks_chunk_id ON chunks(chunk_id);
 CREATE INDEX IF NOT EXISTS ix_chunks_character ON chunks(character);
 CREATE INDEX IF NOT EXISTS ix_chunks_char_mod   ON chunks(character, module);

@@ -1,8 +1,22 @@
 """Step 4：把 chunks.jsonl 落进 RustFS + PostgreSQL。
 
 顺序：先 documents（父），再 chunks（子，外键引用）。
-幂等：documents 靠 raw_sha256、chunks 靠 hash，均用 ON CONFLICT，重跑安全。
+幂等：documents 靠 raw_sha256、chunks 靠 chunk_id，均用 ON CONFLICT，重跑安全。
       documents 用 DO UPDATE（冲突时也能 RETURNING id），chunks 用 DO NOTHING。
+
+⚠️⚠️ 2026-09-22 修（重要）：冲突目标必须是 **chunk_id**，曾经写成 `ON CONFLICT (hash)`。
+`hash` 是**纯正文** sha256，而 chunk_id = `角色::H2::H3::H4::hash8`（含角色）。
+两者差在「跨角色同文本」上：一阶突破材料表这类小表格的正文**不含角色名**，
+57 个角色里正文**逐字相同** → 只保留第一份，其余全被 DO NOTHING 静默丢掉。
+
+实测（2026-09-22）：chunks.jsonl 6572 行、不同 hash **6448** 个、跨角色重复 **124** 处
+—— 而 PG 里正好 **6448** 行，缺的 124 块与这个数字分毫不差。
+症状：卡卡罗问「一阶突破材料」永远答不出（该行落在别的角色名下，`fetch_chunks` 按
+character 过滤取不到），而 Chroma/BM25 三方一致，**看上去完全不像缺数据**，极难排查。
+
+⚠️ 配套：`pgsql/001_init.sql` 里 `CREATE UNIQUE INDEX ux_chunks_hash ON chunks(hash)`
+必须放宽（改非唯一），否则跨角色同文本会撞唯一约束**直接报错**而不是被跳过。
+`chunk_id` 自带角色名，`ux_chunks_chunk_id` 已能保证每个角色的块唯一，够用。
 """
 from __future__ import annotations
 
@@ -63,7 +77,7 @@ async def ingest_one(md_path: Path, rows: list[dict]) -> tuple[int, int]:
                                 module, component, tab, level, breadcrumb, text,
                                 has_table, char_count, hash, source, meta)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            ON CONFLICT (hash) DO NOTHING
+            ON CONFLICT (chunk_id) DO NOTHING
             """,
             payload,
         )

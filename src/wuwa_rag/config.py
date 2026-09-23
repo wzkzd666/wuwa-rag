@@ -2,6 +2,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BASE_DIR = Path(__file__).resolve().parents[2]
@@ -92,9 +93,17 @@ class Settings(BaseSettings):
     # 泄漏前缀，并触发 Ollama 500 peg-native format 错误）。bind 方式 1.3s 且干净。
     LLM_NO_THINK: bool = True
     LLM_SEED: int = -1                  # -1 = 随机；调试复现时可固定
-    # 运行时复读兜底：连续 N 个句子与前文重复即中断生成（采样参数压不住时的最后一道闸）
+    # 运行时复读兜底：命中即中断生成 + 截断尾巴（采样参数压不住时的最后一道闸）
     LLM_LOOP_MAX_REPEAT: int = 2        # 同一句子最多允许出现的次数
-    LLM_LOOP_MIN_CHARS: int = 12        # 短于此长度的句子不参与判重（避免「好的。」「嗯。」误杀）
+    LLM_LOOP_MIN_CHARS: int = 12        # 「长句」门槛：≥ 此长度才做精确重复计数
+    # ⚠️ 2026-09-22 加：光有上面的长句规则会**漏网**。实测「清宵配队」的输出把 6 行
+    #    一组的目标配队循环了 5 遍，且每行带 `*1`…`*28` 计数后缀（`守岸人 + 尤诺*17`），
+    #    ① 每行都短于 12 字被 MIN_CHARS 跳过；② 后缀让每行看起来都唯一，精确判重抓不到。
+    #    故补「周期块循环」检测：一组行整体重复 ≥ MIN_CYCLES 遍即判退化（比较前剥掉
+    #    行尾计数标记，仅用于序列比较，不做精确计数——否则真实材料表会误杀）。
+    LLM_LOOP_MIN_ITEM: int = 4          # 参与判重的单行最短长度（归一化后），滤掉「嗯~」
+    LLM_LOOP_PERIOD_MAX: int = 12       # 周期长度上限（行）
+    LLM_LOOP_MIN_CYCLES: int = 3        # 同一周期至少重复几遍才判退化
 
     # ---------- 检索模型（走 CPU，GPU 被 VLM 占满） ----------
     EMBED_MODEL: str = "BAAI/bge-m3"
@@ -109,6 +118,11 @@ class Settings(BaseSettings):
     TOPK_SPARSE: int = 30    # BM25 稀疏召回
     TOPK_RERANK: int = 6     # 重排后送进 LLM
 
+    # 图谱「队友」槽位最多展示几支队伍。奶辅类角色（守岸人）全 wiki 到处都有她，
+    # 实测 53 支 → aemeath 会 47 行原样倒出来（787 字通篇清单）。按「`+` 段数多、
+    # `/` 候选少」（越确定）排序后取前 N 支，答案才回到可读。0 = 不限（全量）。
+    TEAM_MAX_SHOWN: int = 12
+
     # ---------- 知识验证 / 重新检索（qwen3:8b verifier agent）----------
     # generate 前用 tool 模型判「检索到的资料是否真能回答问题」；判不匹配则
     # 重检索→按角色刷新重爬→仍不足走千帆联网搜索兜底（见 rag/websearch.py）。
@@ -120,10 +134,22 @@ class Settings(BaseSettings):
     REFRESH_WAIT_TIMEOUT: int = 180   # 刷新链（清库+重爬5步）同步等待上限，同自动爬取
     # 百度千帆联网搜索（v2 chat/completions + web_search，API 直连不走本地 SDK）。
     # ⚠️ API key 留空 = 联网兜底整体关闭，链路降级为「不知道」，不报配置错误。
-    QIANFAN_API_KEY: str = os.getenv('BAIDUQIANFAN_API_KEY')
+    # 2026-09-22 修：原写法 `os.getenv('BAIDUQIANFAN_API_KEY')` 有两个坑——
+    #   ① 它在**类体求值**，读的是进程环境；pydantic 的 env_file 只走自己的 source，
+    #      不会把 .env 注入 os.environ → 把 key 写进 .env 完全无效（配了也不生效）。
+    #   ② 变量不存在时默认值是 None，而字段类型是 str → pydantic 校验直接抛
+    #      ValidationError；ww_logger 第 10 行就 import 时就调 get_settings()
+    #      → **整个服务 import 阶段就崩**，与「留空 = 优雅降级」的设计正好相反（已实测）。
+    # 改用 AliasChoices：QIANFAN_API_KEY / BAIDUQIANFAN_API_KEY 两名都认，
+    # 且 .env 与进程环境都能配（爸爸现有的 BAIDUQIANFAN_API_KEY 环境变量不受影响）。
+    QIANFAN_API_KEY: str = Field(
+        "", validation_alias=AliasChoices("QIANFAN_API_KEY", "BAIDUQIANFAN_API_KEY")
+    )
     QIANFAN_CHAT_URL: str = "https://qianfan.baidubce.com/v2/chat/completions"
     QIANFAN_WEB_MODEL: str = "ernie-4.5-turbo-128k"   # 支持 web_search 的对话模型
-    QIANFAN_TIMEOUT: float = 20.0
+    # 实测（2026-09-22 真跑）：联网请求 6.1s（命中搜索缓存）~25.6s（真搜），
+    # 多数落在 21~26s。原来 20s 会随机 ReadTimeout → 表现成「联网不可用」。
+    QIANFAN_TIMEOUT: float = 45.0
 
     # ---------- 切块参数 ----------
     MIN_CHARS: int = 60

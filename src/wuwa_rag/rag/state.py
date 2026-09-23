@@ -26,3 +26,5 @@ class RagState(TypedDict, total=False):
     refreshed: bool        # 本轮是否已触发过按角色刷新（只刷一次）
     used_web: bool         # 是否走了千帆联网兜底
     web_facts: str         # 千帆联网搜索结果（生成上下文第三级资料）
+    # ---- 用户画像（2026-09-22，user_facts 表）----
+    user_context: str      # 该用户的画像事实串（「主玩角色是守岸人；萌新」），注入生成 prompt

@@ -27,6 +27,13 @@
   border: 1px solid var(--line-strong);
   color: var(--accent-2);
 }
+/* 自定义头像（设置里上传的 dataURL）撑满整个头像框 */
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
 
 .msg-main {
   display: flex;
@@ -259,4 +266,49 @@
 .markdown img {
   max-width: 100%;
   border-radius: 8px;
+}
+
+/* ---------- 引用来源折叠面板（SourcePanel） ---------- */
+/* .tag 的基础样式在 global.css；这里只覆盖「可展开」时需要的方向与换行。 */
+.tag-src {
+  flex-direction: column;
+  align-items: flex-start;
+  white-space: normal;
+  transition: border-radius 0.15s ease;
+}
+.tag-src.open {
+  border-radius: 10px;
+}
+.src-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+}
+.src-caret {
+  transition: transform 0.15s ease;
+}
+.tag-src.open .src-caret {
+  transform: rotate(180deg);
+}
+.src-list {
+  list-style: none;
+  margin: 6px 0 1px;
+  padding: 6px 0 0;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.src-list li {
+  white-space: normal;
 }
