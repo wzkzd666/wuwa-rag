@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     #      ValidationError；ww_logger 第 10 行就 import 时就调 get_settings()
     #      → **整个服务 import 阶段就崩**，与「留空 = 优雅降级」的设计正好相反（已实测）。
     # 改用 AliasChoices：QIANFAN_API_KEY / BAIDUQIANFAN_API_KEY 两名都认，
-    # 且 .env 与进程环境都能配（爸爸现有的 BAIDUQIANFAN_API_KEY 环境变量不受影响）。
+    # 且 .env 与进程环境都能配（BAIDUQIANFAN_API_KEY 环境变量不受影响）。
     QIANFAN_API_KEY: str = Field(
         "", validation_alias=AliasChoices("QIANFAN_API_KEY", "BAIDUQIANFAN_API_KEY")
     )

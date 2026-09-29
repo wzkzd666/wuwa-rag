@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "鸣潮(Wuthering Waves) 角色知识助手 - LangGraph + 混合检索 RAG"
 readme = "README.md"
 authors = [
-    { name = "wangzhikan", email = "3144007643@qq.com" }
+    { name = "wangzhikan", email = "wzkzd666@users.noreply.github.com" }
 ]
 requires-python = ">=3.13,<3.14"
 

@@ -199,7 +199,7 @@ def _inject_far_characters(
     - 改写成功时远指代词已被替换掉，sq 不再命中 → 天然 no-op；已在 chars 中也不重复。
     """
     if not summary or not known or not _FAR_REF_RE.search(sq):
-        # known 为空时空正则会在每个位置匹配出垃圾，必须挡
+        # known 为空时空正则会在每个位置匹配出无意义片段，必须挡
         return chars
     # 名字长度降序：「秧秧」是「秧秧·玄翎」的前缀，短的在前会误抢匹配
     pattern = "|".join(re.escape(n) for n in sorted(known, key=len, reverse=True) if n)
@@ -232,7 +232,7 @@ async def intent_node(state: RagState) -> dict:
     stage = detect_stage(sq)
     intent = classify(sq, slots)
 
-    # ⚠️ 2026-09-22 爸爸要求：**不走向量就必须标成 fact**，intent 不能名不副实。
+    # ⚠️ 2026-09-22 起：**不走向量就必须标成 fact**，intent 不能名不副实。
     # intent 是对外字段（`AskOut.intent` / SSE done.intent），「报 hybrid 却 docs=0」
     # 会让前端与排查都读到假信息。
     # 概括性配队（slots 恰为 ['队友'] 且未指名，见 _is_team_overview）只在图谱就能答全
@@ -301,8 +301,8 @@ def _is_named_team(slots, characters) -> bool:
 def _is_team_overview(slots, characters) -> bool:
     """**概括性**问配队：只问了配队（slots 恰为 `['队友']`），且**没有**指名一支具体队伍。
 
-    2026-09-22 爸爸要求：「**概括性询问配队不再走向量检索**，模型回答完之后可追问一句
-    『你对哪个队伍感兴趣，需要我给你详细介绍吗』」。
+    2026-09-22 起：**概括性询问配队不再走向量检索**，模型回答完之后可追问一句
+    『你对哪个队伍感兴趣，需要我给你详细介绍吗』。
 
     为什么能不走向量：图谱侧泛问给的就是含「或」的模板
     （`守岸人+吟霖/长离/散华+卡卡罗`），信息已完整；走向量只会把正文里**别的**队伍
@@ -339,9 +339,9 @@ def _should_ask_team(state: RagState) -> bool:
     return _team_overview(state) and "【可组队伍" in (state.get("graph_facts") or "")
 
 
-# 概括性配队答完后的一句追问（2026-09-22 爸爸要求）。**固定文案走确定性拼接**，
+# 概括性配队答完后的一句追问。**固定文案走确定性拼接**，
 # 不求模型生成：这类"元话语"8B 会写得千奇百怪、时有时无，而且写进提示词就有
-# negative-example 污染风险（见文件头铁律）。措辞用爸爸给的原话 + 一点点 aemeath 语气。
+# negative-example 污染风险（见文件头铁律）。措辞带一点点 aemeath 语气。
 _TEAM_FOLLOWUP = "你对哪个队伍感兴趣？需要我给你详细介绍一下吗~"
 
 
@@ -353,7 +353,7 @@ def _after_graph(state: RagState) -> str:
     于是 `_route` 走 fact 分支、这里 `state["intent"] == "hybrid"` 也不再成立，自然只走图谱。
     **不要再在这里加一条 `if _team_overview(state): return "done"`**：同一个语义挂两条判据
     迟早不同步；更要紧的是 intent 字段是对外字段，必须与实际走的路径一致
-    （爸爸 2026-09-22 原话：「这个 intent 不能例外，不走向量就应该标记为 fact」）。
+    （2026-09-22 起：这个 intent 不能例外，不走向量就应该标记为 fact）。
 
     例外一：技能类问题（slots 含「技能」）强制补一轮向量。原因：图谱的 HAS_SKILL
     每个 kind 只存了**技能名**（见 graph/extract.py::_extract_skills 取首个加粗串），
@@ -842,8 +842,7 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
     if team_focus:
         # 指名具体队伍时（见 _named_team，≥3 个角色名）：把注意力钉在那一支上。
         # ⚠️ 措辞用「围绕这一支展开」而不是「只介绍这一支」——本文件记过的教训：
-        # 「只」字会让模型把介绍性口吻整个砍掉、退化成机械罗列（用户原话「怎么变成
-        # 这种垃圾回复了…不能丢人设」）。
+        # 「只」字会让模型把介绍性口吻整个砍掉、退化成机械罗列，人设直接丢失。
         tail += ("\n用户已经点名了一支具体队伍，本轮就围绕这一支展开："
                  "成员是谁、怎么打（出手顺序 / 循环）、为什么这么配。")
     if user_context:
@@ -862,8 +861,8 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
     # 偷懒写法，才能把它按回照抄状态。
     #
     # ⚠ 2026-09-22 踩坑：不要写「只照抄那两张表」这种话。它有两个反作用——
-    #  ①「只」字会让模型把技能介绍/人设口吻整个砍掉，退化成纯数据倾倒（用户原话
-    #    「怎么变成这种垃圾回复了…不能丢人设」）；
+    #  ①「只」字会让模型把技能介绍/人设口吻整个砍掉，退化成纯数据倾倒（实测：
+    #    人设丢失、答案变成机械罗列）；
     #  ② 点名「突破材料表」会让模型以为该有材料表，于是跑去「## 参考文档」里翻材料
     #    表一起列出来——问技能却蹦出材料就是这么来的（实测）。
     # 正确写法：先保住「说人话的介绍」，再只点名**本轮真正补了的那几张表**，

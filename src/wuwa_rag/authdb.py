@@ -1,7 +1,7 @@
 """鉴权/画像共用的 PostgreSQL 连接池 + 建表 + admin 种子。
 
 为什么单独一个文件：auth（users/auth_tokens）与画像（user_facts）共用一个池子；
-API 启动时 ensure 一次 DDL（幂等 CREATE IF NOT EXISTS），爸爸就不用手工跑 002_auth.sql——
+API 启动时 ensure 一次 DDL（幂等 CREATE IF NOT EXISTS），就不必手工跑 002_auth.sql——
 那份 SQL 是给手工建库/核对结构用的，两边内容保持一致。
 
 池子参数照抄 memory.py 的经验：autocommit=True + dict_row；public schema（DSN 不带
@@ -90,7 +90,10 @@ async def ensure_schema() -> None:
             await conn.execute(stmt)
         # 清掉过期令牌（顺手机会清理，不靠定时任务）
         await conn.execute("DELETE FROM auth_tokens WHERE expires_at < now()")
-        # 种子管理员：只在不存在时插入；密码固定 admin/123456（爸爸要求）
+        # 种子管理员：只在不存在时插入。
+        # ⚠️ 安全提示：默认凭据 admin/123456 仅适用于本地开发与内网演示。
+        #    任何对外可访问的部署都必须先改掉该密码（或改为首次启动强制设置），
+        #    否则等于把管理员权限公开。
         cur = await conn.execute("SELECT 1 FROM users WHERE username = %s", ("admin",))
         if await cur.fetchone() is None:
             from .api.auth import hash_password  # 延迟导入避免环（auth → db）

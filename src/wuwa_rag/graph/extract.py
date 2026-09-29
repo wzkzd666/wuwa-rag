@@ -324,7 +324,7 @@ def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
         # `-`/`·` 的名字**全部挡掉** —— 实测图谱里 `漂泊者-男-湮灭/气动/衍射/导电`
         # 四个与 `秧秧·玄翎` **从未作为队友出现过**
         # （`MATCH (:Character)-[:SYNERGIZES_WITH]->(t:Character) RETURN DISTINCT t.name`
-        # 里没有它们），反倒是 `主输出`/`副输出`/`卡提`/`暗主` 漏进图、成了 4 个垃圾
+        # 里没有它们），反倒是 `主输出`/`副输出`/`卡提`/`暗主` 漏进图、成了 4 个无效
         # Character 节点。`normalize_character_name` 同样"不编造"（必须落回名册才算数），
         # 但认别名、括号注释、位置标签粘连与漂泊者变体，认不出来的一律丢。
         mate = normalize_character_name(mate)
