@@ -15,6 +15,15 @@ data
 logs
 .runtime
 CLAUDE.md
+
+# Editor / tooling caches
+.vscode/
+.ruff_cache/
+.uv-cache/
+.workbuddy/
+
+# Frontend caches（包管理器缓存不得入库）
+front/.npm-cache/
 .vscode/
 .ruff_cache/
 .uv-cache/
