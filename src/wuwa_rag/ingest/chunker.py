@@ -41,7 +41,7 @@ class Chunk:
     meta: dict = field(default_factory=dict)
 
 
-@lru_cache(maxsize=1)  # 懒加载、测试友好、可扩展、明确表达是可缓存的构造器
+# 该构造器为懒加载：便于测试与扩展，语义上表示结果可缓存
 def _splitter() -> MarkdownHeaderTextSplitter:
     """懒加载返回 MarkdownHeaderTextSplitter 实例"""
     return MarkdownHeaderTextSplitter(

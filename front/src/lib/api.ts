@@ -1,4 +1,7 @@
-import type { AskOut, IngestOut, IngestStatus, StreamEvent, UserFact } from '../types'
+import type {
+  AskOut, IngestOut, IngestStatus, LlmConfig, LlmConfigIn, LlmTestOut,
+  ProviderPreset, StreamEvent, TtsOut, TtsStatus, UserFact,
+} from '../types'
 
 /**
  * API 层。默认走 Vite 代理前缀 /api（开发期转发到 127.0.0.1:8000）。
@@ -105,6 +108,60 @@ export function ingest(character: string, base?: string): Promise<IngestOut> {
 /** GET /ingest/status?character=xxx —— 按角色查五步入库进度 */
 export function ingestStatus(character: string, base?: string): Promise<IngestStatus> {
   return request(`/ingest/status?character=${encodeURIComponent(character)}`, { method: 'GET' }, base)
+}
+
+// ---------- 用户自定义云端模型（2026-09-29）----------
+
+/** PUT /llm/config 返回：保存后的概要。⚠️ 不含 crypto_available 等字段，
+ *  需要完整状态请重新 GET /llm/config（保存后界面就是这么刷新的）。 */
+export interface LlmSaveOut {
+  configured: boolean
+  enabled: boolean
+  provider: string
+  base_url: string
+  model: string
+  key_hint: string
+}
+
+/** GET /llm/providers —— provider 预设列表（选完自动带出 base_url） */
+export function llmProviders(base?: string): Promise<{ providers: ProviderPreset[] }> {
+  return request('/llm/providers', { method: 'GET' }, base)
+}
+
+/** GET /llm/config —— 读自己的云端配置。后端只返回掩码，任何情况都拿不到明文 key */
+export function getLlmConfig(base?: string): Promise<LlmConfig> {
+  return request('/llm/config', { method: 'GET' }, base)
+}
+
+/** PUT /llm/config —— 保存配置（api_key 留空表示保留已存的 key） */
+export function saveLlmConfig(cfg: LlmConfigIn, base?: string): Promise<LlmSaveOut> {
+  return request('/llm/config', { method: 'PUT', body: JSON.stringify(cfg) }, base)
+}
+
+/** POST /llm/config/test —— 连通性测试 + 拉可选模型列表（模型自选）。
+ *  ⚠️ 后端不接受 query 传 key（防明文进日志/代理/浏览器历史），
+ *  key 只走 body，或留空让后端用已保存的 key 测。 */
+export function testLlmConfig(cfg: LlmConfigIn, base?: string): Promise<LlmTestOut> {
+  return request('/llm/config/test', { method: 'POST', body: JSON.stringify(cfg) }, base)
+}
+
+/** DELETE /llm/config —— 删除配置（含密文），之后回落本地默认 agent */
+export function deleteLlmConfig(base?: string): Promise<{ ok: boolean; deleted: boolean }> {
+  return request('/llm/config', { method: 'DELETE' }, base)
+}
+
+// ---------- TTS 语音合成（2026-09-29，后端默认关闭）----------
+
+/** GET /tts/status —— 三重开关是否全满足；未就绪时 reason 给可读原因 */
+export function ttsStatus(base?: string): Promise<TtsStatus> {
+  return request('/tts/status', { method: 'GET' }, base)
+}
+
+/** POST /tts —— 合成语音，返回 24h 有效的音频 URL。
+ *  ⚠️ 未开启/配置不全时后端返回 **200 + ok=false**（预留未开不是服务故障），
+ *  所以这里不能只看 HTTP 状态码，必须检查 ok 字段。 */
+export function tts(text: string, emotion: string, base?: string): Promise<TtsOut> {
+  return request('/tts', { method: 'POST', body: JSON.stringify({ text, emotion }) }, base)
 }
 
 /**

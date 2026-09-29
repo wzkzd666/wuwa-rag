@@ -91,7 +91,7 @@ async def ensure_schema() -> None:
         # 清掉过期令牌（顺手机会清理，不靠定时任务）
         await conn.execute("DELETE FROM auth_tokens WHERE expires_at < now()")
         # 种子管理员：只在不存在时插入。
-        # ⚠️ 安全提示：默认凭据 admin/123456 仅适用于本地开发与内网演示。
+        # 安全提示：默认凭据 admin/123456 仅适用于本地开发与内网演示。
         #    任何对外可访问的部署都必须先改掉该密码（或改为首次启动强制设置），
         #    否则等于把管理员权限公开。
         cur = await conn.execute("SELECT 1 FROM users WHERE username = %s", ("admin",))

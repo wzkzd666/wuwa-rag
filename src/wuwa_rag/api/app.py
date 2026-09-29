@@ -1,6 +1,6 @@
 """Step 9：FastAPI 端点。
 
-2026-09-22 加系统鉴权 + 用户画像：
+系统鉴权与用户画像：
 - 鉴权（api/auth.py + db.py）：admin 种子（admin/123456），游客 /auth/register 注册后登录；
   请求带 `Authorization: Bearer <token>`。/ask、/ask/stream 登录即可；/ingest* 管理员专属。
 - 画像（rag/profile.py）：user_facts 表落地——问答后异步抽「稳定偏好事实」入库，
@@ -18,7 +18,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..authdb import close_pool, ensure_schema
+from ..config import get_settings
+from ..rag import llmstore
 from ..rag.chain import ask, ask_stream, doc_sources
+from ..rag.emotion import EMOTION_TAGS
+from ..rag.llmstore import PROVIDER_PRESETS
 from ..rag.memory import close_checkpointer, get_checkpointer
 from ..rag.profile import (
     all_users_stats,
@@ -28,6 +32,7 @@ from ..rag.profile import (
     save_facts,
     soft_delete_fact,
 )
+from ..rag.tts import synthesize, tts_ready
 from ..worker import PIPELINE_STEPS, STEP_LABELS, build_pipeline, get_progress
 from ..ww_logger import get_logger
 from . import auth as authn
@@ -39,6 +44,7 @@ log = get_logger("app")
 async def lifespan(app: FastAPI):
     await get_checkpointer()
     await ensure_schema()   # 幂等建鉴权表 + 种子 admin/123456（见 pgsql/002_auth.sql）
+    await llmstore.ensure_schema()   # 幂等建 user_llm_configs（云端模型配置，含加密 key）
     yield
     await close_checkpointer()
     await close_pool()
@@ -74,10 +80,27 @@ class AskOut(BaseModel):
     docs: int = 0
     sources: list[str] = []   # 引用来源面包屑（角色 › 模块 › 组件），去重保序
     truncated: bool = False   # 复读兜底触发、答案被截断过
+    emotion: str = ""         # 情绪标签（TTS 用；TTS 未开启时为空串）
 
 
 class IngestIn(BaseModel):
     character: str = Field(..., description="角色中文名，如 忌炎")
+
+
+class TtsIn(BaseModel):
+    text: str = Field(..., description="待合成文本（通常是某条 AI 回答）")
+    emotion: str = Field("", description="情绪标签名；空则用默认 cheerful")
+
+
+class LlmConfigIn(BaseModel):
+    """用户自定义云端模型配置。api_key 留空表示「保留原 key 不改」。"""
+    base_url: str = Field(..., description="OpenAI 兼容 base_url，到 /v1 为止")
+    model: str = Field(..., description="模型 id，如 gpt-4o-mini / deepseek-chat")
+    api_key: str = Field("", description="API Key；留空表示保留已存的 key")
+    provider: str = Field("openai", description="预设名，仅用于前端归类，不影响调用")
+    enabled: bool = Field(True, description="停用则回落本地默认模型")
+    emotion_enabled: bool = Field(
+        False, description="是否用该模型兼任情绪判定；false 则走本地 qwen3:8b")
 
 
 class CredentialsIn(BaseModel):
@@ -165,7 +188,8 @@ def _spawn_profile_task(username: str, thread_id: str, question: str) -> None:
 @app.post("/ask", response_model=AskOut)
 async def api_ask(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_user)) -> AskOut:
     tid = body.thread_id or uuid.uuid4().hex[:12]
-    r = await ask(body.question, tid, user_context=await _user_context(user))
+    r = await ask(body.question, tid, user_context=await _user_context(user),
+                  user_id=user.id)
     log.info("ask thread=%s 意图=%s 角色=%s", tid, r.get("intent"), r.get("characters"))
     _spawn_profile_task(user.username, tid, body.question)
     return AskOut(
@@ -177,6 +201,7 @@ async def api_ask(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_
         docs=len(r.get("docs") or []),
         sources=doc_sources(r.get("docs") or []),
         truncated=bool(r.get("truncated")),
+        emotion=r.get("emotion", ""),
     )
 
 @app.post("/ask/stream")
@@ -188,7 +213,8 @@ async def api_ask_stream(body: AskIn, user: authn.AuthUser = Depends(authn.get_c
         # SSE 一旦开始流式，响应头已发出，全局异常处理器接不住这里的异常——
         # 必须就地捕获并转成 {'error'} 事件下发（前端 store 有对应处理）。
         try:
-            async for evt in ask_stream(body.question, tid, user_context=user_ctx):
+            async for evt in ask_stream(body.question, tid, user_context=user_ctx,
+                                        user_id=user.id):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
         except Exception as exc:
             rid = uuid.uuid4().hex[:8]
@@ -200,6 +226,120 @@ async def api_ask_stream(body: AskIn, user: authn.AuthUser = Depends(authn.get_c
             _spawn_profile_task(user.username, tid, body.question)
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ── 语音合成（TTS，登录即可）─────────────────────────────
+
+@app.get("/tts/status")
+async def api_tts_status(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """TTS 是否可用 + 当前模型/音色（不暴露 key）。前端据此决定是否显示播放按钮。"""
+    ready, why = tts_ready()
+    s = get_settings()
+    return {"enabled": s.TTS_ENABLED, "ready": ready, "reason": why,
+            "model": s.TTS_MODEL if ready else "", "voice": s.TTS_VOICE if ready else "",
+            "emotions": list(EMOTION_TAGS)}
+
+
+@app.post("/tts")
+async def api_tts(body: TtsIn, user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """把文本合成语音，返回音频 URL（24h 有效）。
+
+    未开启或配置不全时返回 200 + ok=false + 可读原因，而不是 503：
+    这是"功能预留"而非服务故障，前端只需隐藏按钮或提示未开启，不该弹错误。
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    s = get_settings()
+    if len(text) > s.TTS_MAX_CHARS * 2:
+        raise HTTPException(status_code=400,
+                            detail=f"文本过长（>{s.TTS_MAX_CHARS * 2} 字），请缩短后再合成")
+    r = await synthesize(text, body.emotion or None)
+    if not r.ok:
+        log.info("TTS 未合成 user=%s 原因=%s", user.username, r.error)
+        return {"ok": False, "error": r.error, "url": "", "emotion": "", "elapsed_ms": 0}
+    return {"ok": True, "url": r.url, "error": "", "emotion": r.emotion,
+            "model": r.model, "voice": r.voice, "elapsed_ms": r.elapsed_ms}
+
+
+# ── 用户自定义云端模型（登录即可，配置只属于自己）─────────────────
+
+@app.get("/llm/providers")
+async def api_llm_providers(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """provider 预设列表（含默认 base_url），前端做下拉与自动填充。"""
+    return {"providers": [
+        {"key": k, "label": v["label"], "base_url": v["base_url"]}
+        for k, v in PROVIDER_PRESETS.items()
+    ]}
+
+
+@app.get("/llm/config")
+async def api_llm_config_get(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """读自己的云端模型配置。**只返回掩码**，任何情况都不回显明文 key。"""
+    cfg = await llmstore.get_config_masked(user.id)
+    cfg["default_provider"] = get_settings().CHAT_PROVIDER_DEFAULT
+    cfg["default_model"] = get_settings().LLM_MODEL   # 本地默认 agent（回落时用）
+    return cfg
+
+
+@app.put("/llm/config")
+async def api_llm_config_put(body: LlmConfigIn,
+                             user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """保存云端模型配置（api_key 加密落库）。留空 api_key = 保留原 key。"""
+    try:
+        return await llmstore.save_config(
+            user.id, base_url=body.base_url, model=body.model,
+            api_key=body.api_key, provider=body.provider, enabled=body.enabled,
+            emotion_enabled=body.emotion_enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/llm/config/test")
+async def api_llm_config_test(body: LlmConfigIn,
+                              user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """保存前连通性测试：拉一次 /models 验证 base_url + key 是否可用。
+
+    api_key 留空时用已存的 key 测（前端"只改地址不改 key"的场景）。
+    """
+    key = (body.api_key or "").strip()
+    if not key:
+        cfg = await llmstore.get_runtime(user.id)
+        key = (cfg or {}).get("api_key", "")
+    if not key:
+        raise HTTPException(status_code=400, detail="请填写 API Key 后再测试")
+    try:
+        models = await llmstore.list_models(body.base_url, key)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "models": []}
+    return {"ok": True, "error": "", "models": models[:100]}
+
+
+@app.get("/llm/models")
+async def api_llm_models(base_url: str,
+                         user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """拉取指定 base_url 的可选模型列表（**模型自选**）。
+
+    key 取自该用户已保存的配置——不接受前端传 key，避免明文 key 出现在 URL/query
+    里被日志、代理、浏览器历史记录下来。
+    """
+    cfg = await llmstore.get_runtime(user.id)
+    if not cfg:
+        raise HTTPException(status_code=400,
+                            detail="请先保存 API Key，再拉取模型列表")
+    try:
+        models = await llmstore.list_models(base_url, cfg["api_key"])
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"models": models[:200]}
+
+
+@app.delete("/llm/config")
+async def api_llm_config_delete(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """删除自己的云端配置（含密文），之后回落本地默认 agent。"""
+    ok = await llmstore.delete_config(user.id)
+    return {"ok": ok, "deleted": ok}
 
 
 # ── 知识库入库（管理员专属） ─────────────────────────────

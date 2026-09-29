@@ -1,7 +1,8 @@
-import { memo, useState } from 'react'
-import { Bot, User, AlertTriangle, RefreshCw, Copy, Check, Target, Layers, Users, FileText, Scissors, ChevronDown } from 'lucide-react'
+import { memo, useEffect, useRef, useState } from 'react'
+import { Bot, User, AlertTriangle, RefreshCw, Copy, Check, Target, Layers, Users, FileText, Scissors, ChevronDown, Volume2, Square } from 'lucide-react'
 import type { Message } from '../types'
 import { renderMarkdown } from '../lib/markdown'
+import * as api from '../lib/api'
 import { useStore } from '../store/useStore'
 import './MessageBubble.css'
 
@@ -29,6 +30,75 @@ function CopyBtn({ text }: { text: string }) {
       }}
     >
       {ok ? <Check size={13} /> : <Copy size={13} />}
+    </button>
+  )
+}
+
+/** TTS 播放按钮：调后端 /tts 拿音频 URL 再播放。
+ *
+ * 三态：idle（播放图标）→ loading（转圈）→ playing（方块=停止）。
+ * ⚠️ 后端 TTS 默认关闭，此时返回 **200 + ok=false + 可读 reason**，
+ *    所以不能只看 HTTP 状态，必须检查 ok 字段并把 reason 弹 toast。
+ * ⚠️ 卸载/重播时必须 pause + 解绑 src，否则连续点几个气泡会叠音。
+ */
+function TtsBtn({ text, emotion }: { text: string; emotion?: string }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'playing'>('idle')
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const toast = useStore((s) => s.toast)
+  const apiBase = useStore((s) => s.settings.apiBase)
+
+  // 卸载时停止播放，避免离开页面后音频还在响
+  useEffect(() => () => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+  }, [])
+
+  const stop = () => {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    setState('idle')
+  }
+
+  const play = async () => {
+    setState('loading')
+    try {
+      const out = await api.tts(text, emotion || '', apiBase)
+      if (!out.ok || !out.url) {
+        setState('idle')
+        toast('err', out.error || '语音合成失败')
+        return
+      }
+      const audio = new Audio(out.url)
+      audioRef.current = audio
+      audio.onended = () => { audioRef.current = null; setState('idle') }
+      // 播放失败（浏览器策略/URL 过期）也要回到 idle，否则按钮卡在 playing
+      audio.onerror = () => {
+        audioRef.current = null
+        setState('idle')
+        toast('err', '音频播放失败，链接可能已过期（有效期 24 小时）')
+      }
+      await audio.play()
+      setState('playing')
+    } catch (err) {
+      setState('idle')
+      toast('err', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  return (
+    <button
+      className="msg-action"
+      title={state === 'playing' ? '停止播放' : '朗读这条回答'}
+      disabled={state === 'loading'}
+      onClick={() => (state === 'playing' ? stop() : void play())}
+    >
+      {state === 'loading' ? <RefreshCw size={13} className="spin" />
+        : state === 'playing' ? <Square size={12} />
+        : <Volume2 size={13} />}
     </button>
   )
 }
@@ -84,6 +154,8 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
   // 个性化头像：设置里上传后，气泡头像用图；空则回落默认图标
   const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const avatarUser = useStore((s) => s.settings.avatarUser)
+  // 语音开关：关闭时不渲染播放按钮（后端 TTS 默认也是关的，两边口径一致）
+  const ttsEnabled = useStore((s) => s.settings.ttsEnabled)
 
   return (
     <div className={`msg-row ${isUser ? 'msg-user' : 'msg-bot'} fade-up`}>
@@ -162,6 +234,7 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
         {!isUser && !msg.streaming && msg.content && msg.status !== 'error' && (
           <div className="msg-actions">
             <CopyBtn text={msg.content} />
+            {ttsEnabled && <TtsBtn text={msg.content} emotion={msg.meta?.emotion} />}
             {canRegenerate && onRegenerate && (
               <button className="msg-action" title="重新生成" onClick={() => onRegenerate(msg.id)}>
                 <RefreshCw size={13} />

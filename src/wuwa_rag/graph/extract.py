@@ -35,7 +35,7 @@ _ECHO_NOISE = ("主流", "推荐", "武器", "词条", "分配", "声骸", "配�
 _RE_STAGE = re.compile(r"([一二三四五六]阶突破)")
 _TEAM_SLOT_NOISE = ("奶&辅", "副输出", "主输出", "输出", "配队", "备注", "说明", "PS")
 # 注：曾有一个 `_RE_NAME = re.compile(r"[\u4e00-\u9fa5]{2,4}")` 用来过滤队友名，
-# 2026-09-22 删除 —— 它把含 `-`/`·` 的名字全挡掉（`漂泊者-男-湮灭`、`秧秧·玄翎`
+# 该正则已删除——它会把含 -/· 的名字全部过滤掉（漂泊者-男-湮灭、秧秧·玄翎
 # 从未进过图），却又让 `主输出`/`卡提`/`暗主` 漏进图。队友名过滤现在统一走
 # `rag.characters.normalize_character_name`（落回名册才算数，见其 docstring）。
 
@@ -299,7 +299,7 @@ def _extract_team_effects(chunks: list[dict], self_name: str) -> dict[str, str]:
                 continue
             if who == self_name or self_name in who or who in _TEAM_SLOT_NOISE:
                 continue
-            # ⚠️ 原来用 `_RE_NAME.fullmatch(who)`（`[\u4e00-\u9fa5]{2,4}`），
+            # 早期实现用 _RE_NAME.fullmatch(who)（[\u4e00-\u9fa5]{2,4}），
             # 会把含 `-`/`·` 的名字全挡掉 → `漂泊者-男-湮灭` 这类队友的推荐理由抽不到。
             # 换成 `normalize_character_name`：同样要求落回名册，但认别名与括号注释。
             who = normalize_character_name(who)
@@ -330,7 +330,7 @@ def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
         mate = normalize_character_name(mate)
         if not mate or mate == self_name:
             return
-        # ⚠️ 2026-09-22 修：**标题行只写「另外两个队友」，不含本角色**（清宵页的
+        # 约束：标题行只写另外两名队友，不含本角色（清宵页的
         # `#### 守岸人+尤诺` 里没有「清宵」，因为整页都是清宵的）。原样存进图的
         # `teams` 就变成不含主角的组合名，喂给模型后它会读成「守岸人和尤诺是一对」，
         # 把「队友→队伍」反查表抄成配队清单、还开始编编号（实测：5 行反查表被抄成

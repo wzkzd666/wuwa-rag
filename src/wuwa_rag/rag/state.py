@@ -6,6 +6,9 @@ from typing_extensions import TypedDict
 
 class RagState(TypedDict, total=False):
     question: str
+    user_id: int           # 当前登录用户 id，用于取该用户的云端模型配置。
+                           # 约束：state 中只放 id，明文 api_key 绝不写入——checkpointer 会把
+                           # state 持久化进 PG，放进去等于把用户密钥落盘到另一张表。
     search_query: str      # 追问改写后的自包含问句（检索/意图用它；history 存原句）
     intent: str            # fact / semantic / hybrid / chitchat
     slots: list[str]       # 命中的事实槽位
@@ -26,5 +29,7 @@ class RagState(TypedDict, total=False):
     refreshed: bool        # 本轮是否已触发过按角色刷新（只刷一次）
     used_web: bool         # 是否走了千帆联网兜底
     web_facts: str         # 千帆联网搜索结果（生成上下文第三级资料）
-    # ---- 用户画像（2026-09-22，user_facts 表）----
+    # ---- 用户画像（user_facts 表）----
     user_context: str      # 该用户的画像事实串（「主玩角色是守岸人；萌新」），注入生成 prompt
+    # ---- 情绪标签（供 TTS 使用）----
+    emotion: str           # 本轮答案的情绪标签（受限枚举，见 rag/emotion.py）

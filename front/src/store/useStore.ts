@@ -39,6 +39,9 @@ const DEFAULT_SETTINGS: Settings = {
   bgImage: '',
   bgDim: 0.45,
   bgBlur: 0,
+  // 语音默认关：后端 TTS 总开关（TTS_ENABLED）默认也是 false，两边一致才不会
+  // 出现「前端显示播放按钮、点了却报未开启」的割裂体验。
+  ttsEnabled: false,
 }
 
 interface Toast {
@@ -233,6 +236,7 @@ export const useStore = create<Store>()(
                       docs: evt.docs,
                       sources: evt.sources,
                       truncated: evt.truncated,
+                      emotion: evt.emotion,   // TTS 情绪（后端未开启时为空串）
                     }
                     // done.answer 是后端给出的权威全文：
                     // 触发复读兜底时它是「截断后」的内容，必须覆盖掉已流式渲染的复读文本，
@@ -269,6 +273,7 @@ export const useStore = create<Store>()(
                   docs: out.docs,
                   sources: out.sources,
                   truncated: out.truncated,
+                  emotion: out.emotion,
                 },
               })
             }

@@ -11,14 +11,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from datetime import timedelta, timezone
+from datetime import UTC, timedelta
 from datetime import datetime as dt
 
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from ..ww_logger import get_logger
 from ..authdb import get_pool
+from ..ww_logger import get_logger
 
 log = get_logger("auth")
 
@@ -95,7 +95,7 @@ async def login(username: str, password: str) -> dict:
 
 async def create_token(user_id: int) -> str:
     token = secrets.token_hex(32)
-    expires = dt.now(timezone.utc) + timedelta(days=TOKEN_TTL_DAYS)
+    expires = dt.now(UTC) + timedelta(days=TOKEN_TTL_DAYS)
     pool = await get_pool()
     async with pool.connection() as conn:
         await conn.execute(
@@ -120,7 +120,7 @@ async def resolve_token(token: str) -> dict | None:
         row = await cur.fetchone()
         if row is None:
             return None
-        if row["expires_at"] < dt.now(timezone.utc):
+        if row["expires_at"] < dt.now(UTC):
             await conn.execute("DELETE FROM auth_tokens WHERE token = %s", (token,))
             return None
     return {"id": row["id"], "username": row["username"], "role": row["role"]}
@@ -164,7 +164,7 @@ async def get_current_user(request: Request) -> AuthUser:
 async def require_admin(user: AuthUser = Depends(get_current_user)) -> AuthUser:
     """管理员守卫：挂在 admin 专用端点上（先过 get_current_user 再查角色）。
 
-    ⚠️ 参数必须带 `= Depends(get_current_user)`：不写的话 FastAPI 会把 AuthUser
+    依赖参数必须写成 `= Depends(get_current_user)`：省略时 FastAPI 会把 AuthUser
     当成**请求体字段**解析，端点直接 422（实测）。
     """
     if user.role != "admin":

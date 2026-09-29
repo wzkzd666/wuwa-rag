@@ -28,6 +28,8 @@ export interface AskMeta {
   sources?: string[]
   /** 后端检测到模型复读并截断了答案 */
   truncated?: boolean
+  /** 情绪标签（TTS 用）；后端 TTS 未开启时为空串 */
+  emotion?: string
 }
 
 /** 一个会话 */
@@ -53,6 +55,8 @@ export interface AskOut {
   sources?: string[]
   /** 后端复读兜底触发、答案被截断过 */
   truncated?: boolean
+  /** 情绪标签（TTS 用）；后端 TTS 未开启时为空串 */
+  emotion?: string
 }
 
 /** /ingest 返回体 */
@@ -81,6 +85,8 @@ export type StreamEvent =
       sources?: string[]
       /** 后端复读兜底触发：answer 是截断后的权威全文，前端须用它覆盖已流式渲染的内容 */
       truncated?: boolean
+      /** 情绪标签（TTS 用）；后端 TTS 未开启时为空串 */
+      emotion?: string
     }
 
 /** 一次 ingest 提交记录 */
@@ -152,4 +158,79 @@ export interface Settings {
   bgDim: number
   /** 自定义背景的模糊半径 0~16px */
   bgBlur: number
+
+  // ---------- 语音（2026-09-29 新增）----------
+  /** 前端语音开关：关闭则不显示播放按钮、不调 /tts（后端还有一道 TTS_ENABLED 总开关） */
+  ttsEnabled: boolean
+}
+
+// ---------- 用户自定义云端模型（2026-09-29）----------
+
+/** provider 预设（GET /llm/providers）：选完自动带出 base_url */
+export interface ProviderPreset {
+  key: string
+  label: string
+  base_url: string
+}
+
+/** GET /llm/config：⚠️ 只返回掩码，后端任何情况都不回显明文 key */
+export interface LlmConfig {
+  configured: boolean
+  enabled: boolean
+  provider: string
+  base_url: string
+  model: string
+  /** 形如 `sk-****abcd`，仅供用户认出是哪把 key */
+  key_hint: string
+  updated_at?: string | null
+  /** 后端未配 SECRET_KEY 时为 false：此时保存会被拒绝，界面需提示 */
+  crypto_available: boolean
+  /** 是否由该云端模型兼任情绪判定（false = 走本地 qwen3:8b） */
+  emotion_enabled: boolean
+  /** 本地默认 agent（回落时用），如 aemeath */
+  default_provider?: string
+  default_model?: string
+}
+
+/** PUT /llm/config 入参：api_key 留空表示保留原 key */
+export interface LlmConfigIn {
+  base_url: string
+  model: string
+  api_key: string
+  provider: string
+  enabled: boolean
+  /** true = 用该模型兼任情绪判定（默认 false：走本地 qwen3:8b） */
+  emotion_enabled: boolean
+}
+
+/** POST /llm/config/test：连通性测试 + 可选模型列表（模型自选） */
+export interface LlmTestOut {
+  ok: boolean
+  error: string
+  models: string[]
+}
+
+// ---------- TTS 语音合成（2026-09-29）----------
+
+/** GET /tts/status */
+export interface TtsStatus {
+  enabled: boolean
+  /** 三重开关全满足才为 true（未开启 / 缺 key / 缺 WorkspaceId 都为 false） */
+  ready: boolean
+  reason: string
+  model: string
+  voice: string
+  /** 后端支持的情绪枚举，界面提示用 */
+  emotions: string[]
+}
+
+/** POST /tts：未开启时 ok=false + 可读 error（200 而非 503，属预留未开而非故障） */
+export interface TtsOut {
+  ok: boolean
+  url: string
+  error: string
+  emotion?: string
+  model?: string
+  voice?: string
+  elapsed_ms?: number
 }

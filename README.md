@@ -60,6 +60,32 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 ⚠️ 人设约束必须拼进 `HumanMessage`——Ollama 的 `system` 参数会**覆盖** Modelfile 内置 SYSTEM，改用 `SystemMessage` 传就会把人设弄丢。
 
+### 回答输出：来源标记剥离
+
+模型在「依据资料作答」时会自创 `[1]` `[2]` 这类来源编号，还会把 COST 数值写成 `[4][3][3][1][1]`。提示词只能概率压住，最终由输出侧兜底：
+
+- 非流式走 `text.strip_ref_marks`，流式走 `text.AnswerFilter`（逐 token 扣住尾巴，避免标记在打字机流里闪现）
+- ⚠️ 两者共用同一套规则且**顺序不可调换**：先还原 COST 串（连续 ≥3 个单位数字括号、数字全属 `{1,3,4}`），再删中文标记 `[图谱]`，最后删数字标记。顺序反了会把数值表当成整串标记删掉
+- 前端引用面板走 SSE `done.sources`（`doc_sources`），**不依赖模型在正文写编号**
+
+### 用户自定义云端 LLM（可选）
+
+默认走本地 Ollama `aemeath`；也可在设置页配置自己的 OpenAI 兼容 API 用于答题：
+
+- **加密落库**：`api_key` 用 Fernet 对称加密（`SECRET_KEY` 经 PBKDF2 派生密钥），读接口只返回掩码，日志只记指纹
+- **`SECRET_KEY` 留空 = 功能整体关闭**（绝不退化成明文存储）；设定后不可再改，改动会导致旧密文解不开、按未配置处理
+- **tool 模型（抽取 / 摘要 / 校验）永远走本地 qwen3:8b**，不跟随 provider：结构化任务要稳定 JSON，也不该把个人密钥花在内部任务上
+- 云端模型不认识爱弥斯，人设由 `rag/persona.py` 以 `SystemMessage` 注入（本地路径绝不可传 system，会覆盖 Modelfile 内置人设）
+- ⚠️ 公网部署或开放注册时必须设 `CLOUD_ALLOW_PRIVATE_NET=false`，否则等于把内网探测口开放给注册用户
+
+### 语音朗读 + 情绪标签（预留接口，默认关闭）
+
+- **情绪标签**：答案生成后判定语气（cheerful / amazed / serious / empathetic / playful），映射到 Qwen-Audio-TTS 的官方控制标签；判定失败一律回落默认语气，不阻塞问答主链
+  - **判定模型的分工**：默认由本地 qwen3:8b 承担（零远程依赖、不消耗个人额度）；配了自定义云端 LLM 的用户可在设置页选择让自己的模型兼任，此时复用本轮答题的客户端，不额外建连
+- **TTS 合成**：`rag/tts.py` 用 httpx 直连 Qwen-Audio-3.0-TTS（北京地域 + 业务空间 ID），返回 24h 有效的音频 URL
+- **朗读稿清洗**：送合成前把 markdown 转成纯文本（表格分隔符转顿号、去掉标题井号 / 列表符号 / 链接语法），并再剥一次引用标记，避免把版式符号念出来
+- **三重开关**：`TTS_ENABLED`（默认 false）、`DASHSCOPE_API_KEY`、`TTS_WORKSPACE_ID`，任一缺失时 `/tts` 返回 `200 + ok=false` 与可读原因——预留未开不是服务故障，不报 5xx
+
 ### 多轮上下文：追问改写（零 LLM 锚点 + 滚动摘要）
 
 多轮对话里"她的声骸怎么配"这类指代残缺问句，检索前需补成自包含问句。三路合并输入：
@@ -261,6 +287,17 @@ NEO4J_PASSWORD=...
 S3_ACCESS_KEY=...
 S3_SECRET_KEY=...
 QIANFAN_API_KEY=...      # 留空 = 联网兜底整体关闭，优雅降级不发外部请求
+
+# 可选：用户自定义云端 LLM（API-KEY 加密落库的前提）
+SECRET_KEY=...           # 留空 = 该功能整体关闭；设定后不要再改，改动会使旧密文失效
+
+# 可选：语音朗读（当前阶段仅预留接口，保持 TTS_ENABLED=false 即可）
+TTS_ENABLED=false
+TTS_MODEL=qwen-audio-3.0-tts-flash
+TTS_VOICE=longanhuan_v3.6
+TTS_WORKSPACE_ID=...     # 阿里云百炼「业务空间」ID，拼端点必需
+DASHSCOPE_API_KEY=...    # 必须与上面同一个北京地域业务空间
+EMOTION_ENABLED=true     # 情绪标签；关闭则语音统一用默认语气
 ```
 
 ### 3. 一键启动（Windows）
@@ -308,13 +345,15 @@ uv run ruff check src                    # lint（line-length=100）
 
 ### API 端点
 
-| 端点 | 说明 |
-| --- | --- |
-| `GET /health` | 健康检查 |
-| `POST /ask` | 同步问答 |
-| `POST /ask/stream` | SSE 流式问答（含 stage 进度事件） |
-| `POST /ingest` | 触发角色摄取 `{"character":"忌炎"}` |
-| `GET /ingest/status?character=xxx` | 查询五步流水线进度 |
+| 端点 | 权限 | 说明 |
+| --- | --- | --- |
+| `POST /auth/register` `POST /auth/login` | 公开 | 注册 / 登录（Bearer token） |
+| `POST /ask` | 登录 | 同步问答 |
+| `POST /ask/stream` | 登录 | SSE 流式问答（含 stage 进度事件） |
+| `GET /tts/status` `POST /tts` | 登录 | 语音可用性 / 文本转语音（默认关闭） |
+| `GET /llm/config` `PUT /llm/config` `GET /llm/providers` | 登录 | 个人云端模型配置（只读回掩码） |
+| `POST /ingest` | 管理员 | 触发角色摄取 `{"character":"忌炎"}` |
+| `GET /ingest/status?character=xxx` | 管理员 | 查询五步流水线进度 |
 
 ---
 

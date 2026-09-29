@@ -1,12 +1,13 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Settings as SettingsIcon, Sun, Moon, Zap, Type, Server, Trash2, Activity, RefreshCw,
   Camera, Image as ImageIcon, Palette, RotateCcw, User as UserIcon, Sparkles, Eraser,
+  Cpu, Volume2, AlertTriangle, Check, Smile,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import * as api from '../lib/api'
 import { pickImageFile, fileToDataUrl, formatBytes, dataUrlBytes } from '../lib/image'
-import type { BgPreset, UserFact } from '../types'
+import type { BgPreset, LlmConfig, ProviderPreset, UserFact } from '../types'
 import './SettingsPage.css'
 
 /** 背景预设（key 对齐 types.ts 的 BgPreset 与 global.css 的 data-preset） */
@@ -18,6 +19,231 @@ const BG_PRESETS: { key: BgPreset; label: string; css: string }[] = [
   { key: 'plain', label: '纯色', css: '#070b16' },
   { key: 'custom', label: '自定义图片', css: '' },
 ]
+
+/**
+ * 模型服务：① 默认用项目自带 agent（本地 aemeath）；② 可切换到用户自己的云端大模型。
+ *
+ * 隐私：api_key 输入后只在「保存」时 POST 给后端加密落库，读回永远是掩码（key_hint），
+ * 前端不留存明文、不写 localStorage。已配置时输入框留空 = 保留原 key。
+ * ⚠️ crypto_available=false（服务端没配 SECRET_KEY）时禁止保存，明确提示——
+ *    否则用户以为存好了，实际后端会拒绝。
+ */
+function LlmSection() {
+  const toast = useStore((s) => s.toast)
+  const apiBase = useStore((s) => s.settings.apiBase)
+  const [providers, setProviders] = useState<ProviderPreset[]>([])
+  const [cfg, setCfg] = useState<LlmConfig | null>(null)
+  const [provider, setProvider] = useState('openai')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [model, setModel] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [models, setModels] = useState<string[]>([])   // 测试后拉回的可选模型
+  const [testing, setTesting] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [useCloud, setUseCloud] = useState(false)
+  // 情绪判定模型：默认本地 qwen3:8b；打开则交由上面的云端自定义模型兼任
+  const [emotionViaCloud, setEmotionViaCloud] = useState(false)
+
+  const load = async () => {
+    try {
+      const [p, c] = await Promise.all([api.llmProviders(apiBase), api.getLlmConfig(apiBase)])
+      setProviders(p.providers)
+      setCfg(c)
+      if (c.configured) {
+        setProvider(c.provider || 'openai')
+        setBaseUrl(c.base_url)
+        setModel(c.model)
+        setUseCloud(c.enabled)
+        setEmotionViaCloud(!!c.emotion_enabled)
+      }
+    } catch {
+      /* 未登录/后端未起：静默，不打扰 */
+    }
+  }
+  useEffect(() => { void load() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pickProvider = (key: string) => {
+    setProvider(key)
+    const hit = providers.find((x) => x.key === key)
+    if (hit && hit.base_url) setBaseUrl(hit.base_url)   // 选预设自动带出地址
+  }
+
+  const doTest = async () => {
+    if (!baseUrl.trim()) { toast('err', '请先填 API 地址'); return }
+    setTesting(true)
+    try {
+      const out = await api.testLlmConfig(
+        { base_url: baseUrl.trim(), model: model.trim(), api_key: apiKey,
+          provider, enabled: true, emotion_enabled: emotionViaCloud },
+        apiBase,
+      )
+      if (out.ok) {
+        setModels(out.models)
+        toast('ok', `连接成功，拉到 ${out.models.length} 个可选模型`)
+      } else {
+        toast('err', out.error || '连接失败')
+      }
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  const doSave = async () => {
+    if (cfg && !cfg.crypto_available) { toast('err', '服务端未配置 SECRET_KEY，无法安全保存密钥'); return }
+    if (!baseUrl.trim() || !model.trim()) { toast('err', 'API 地址与模型都不能为空'); return }
+    if (!apiKey.trim() && !(cfg?.configured)) { toast('err', '请填写 API Key'); return }
+    setSaving(true)
+    try {
+      await api.saveLlmConfig(
+        { base_url: baseUrl.trim(), model: model.trim(), api_key: apiKey.trim(),
+          provider, enabled: useCloud, emotion_enabled: emotionViaCloud },
+        apiBase,
+      )
+      setApiKey('')             // 保存后清空明文输入
+      toast('ok', useCloud ? '已保存并启用云端模型' : '已保存（当前仍用本地默认模型）')
+      await load()
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const doDelete = async () => {
+    try {
+      await api.deleteLlmConfig(apiBase)
+      setApiKey(''); setModels([]); setUseCloud(false); setEmotionViaCloud(false)
+      toast('info', '已删除云端配置，回到本地默认模型')
+      await load()
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  return (
+    <section className="card set-card">
+      <h3 className="set-h"><Cpu size={15} /> 模型服务</h3>
+      <div className="set-row">
+        <div className="set-row-main">
+          <label>作答模型</label>
+          <p>
+            默认用项目自带的本地 agent（{cfg?.default_model || 'aemeath'}，人设内置）。
+            也可切换到你自己的云端大模型 API —— 配置只属于你，密钥加密存储、绝不回显。
+          </p>
+        </div>
+        <div className="set-row-ctl">
+          <div className="seg">
+            <button className={`seg-btn ${!useCloud ? 'seg-on' : ''}`} onClick={() => setUseCloud(false)}>
+              <Server size={13} /> 本地默认
+            </button>
+            <button className={`seg-btn ${useCloud ? 'seg-on' : ''}`} onClick={() => setUseCloud(true)}>
+              <Cpu size={13} /> 云端自定义
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {useCloud && (
+        <>
+          {cfg && !cfg.crypto_available && (
+            <div className="set-warn">
+              <AlertTriangle size={14} /> 服务端未配置 <code>SECRET_KEY</code>，云模型功能已关闭（不会明文存密钥）。请在后端 .env 设置后再用。
+            </div>
+          )}
+          <div className="set-row">
+            <div className="set-row-main">
+              <label>服务商</label>
+              <p>选一个预设自动带出 API 地址，也可选「自定义」手填任意 OpenAI 兼容服务。</p>
+            </div>
+            <div className="set-row-ctl">
+              <select className="input api-input" value={provider} onChange={(e) => pickProvider(e.target.value)}>
+                {providers.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="set-row">
+            <div className="set-row-main">
+              <label>API 地址</label>
+              <p>到 <code>/v1</code> 为止，例如 <code>https://api.deepseek.com/v1</code>。</p>
+            </div>
+            <div className="set-row-ctl">
+              <input className="input api-input" value={baseUrl} placeholder="https://…/v1"
+                     onChange={(e) => setBaseUrl(e.target.value)} />
+            </div>
+          </div>
+          <div className="set-row">
+            <div className="set-row-main">
+              <label>API Key</label>
+              <p>
+                {cfg?.configured
+                  ? <>已保存（<code>{cfg.key_hint}</code>）。留空 = 保留原 Key 不改。</>
+                  : '仅在保存时加密上传，前端不留存、不回显明文。'}
+              </p>
+            </div>
+            <div className="set-row-ctl">
+              <input className="input api-input" type="password" value={apiKey}
+                     placeholder={cfg?.configured ? '留空保留原 Key' : 'sk-…'}
+                     onChange={(e) => setApiKey(e.target.value)} autoComplete="off" />
+            </div>
+          </div>
+          <div className="set-row">
+            <div className="set-row-main">
+              <label>模型</label>
+              <p>先点「测试连接」拉取可选模型，再从下拉选；也可直接手填模型 id。</p>
+            </div>
+            <div className="set-row-ctl model-ctl">
+              <input className="input api-input" list="llm-models" value={model}
+                     placeholder="如 deepseek-chat" onChange={(e) => setModel(e.target.value)} />
+              <datalist id="llm-models">
+                {models.map((m) => <option key={m} value={m} />)}
+              </datalist>
+              <button className="btn btn-ghost" onClick={doTest} disabled={testing}>
+                {testing ? <RefreshCw size={14} className="spin" /> : <Zap size={14} />} 测试连接
+              </button>
+            </div>
+          </div>
+          <div className="set-row">
+            <div className="set-row-main">
+              <label><Smile size={13} /> 情绪判定</label>
+              <p>
+                朗读前要判定这段话的语气。默认用本地 qwen3:8b（不额外消耗你的额度）；
+                打开则由上面的云端模型一并负责。
+              </p>
+            </div>
+            <div className="set-row-ctl">
+              <button
+                className={`switch ${emotionViaCloud ? 'switch-on' : ''}`}
+                onClick={() => setEmotionViaCloud(!emotionViaCloud)}
+                role="switch"
+                aria-checked={emotionViaCloud}
+              >
+                <span className="switch-knob" />
+              </button>
+            </div>
+          </div>
+          <div className="set-row">
+            <div className="set-row-main">
+              <label>&nbsp;</label>
+              <p>保存后立即生效；切回「本地默认」或删除配置即回落自带 agent。</p>
+            </div>
+            <div className="set-row-ctl status-ctl">
+              <button className="btn btn-primary" onClick={doSave} disabled={saving || (cfg ? !cfg.crypto_available : false)}>
+                {saving ? <RefreshCw size={14} className="spin" /> : <Check size={14} />} 保存
+              </button>
+              {cfg?.configured && (
+                <button className="btn btn-danger" onClick={doDelete}>
+                  <Trash2 size={14} /> 删除配置
+                </button>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
 
 export default function SettingsPage() {
   const settings = useStore((s) => s.settings)
@@ -31,10 +257,31 @@ export default function SettingsPage() {
 
   const [testing, setTesting] = useState(false)
   const [armed, setArmed] = useState(false)
+  // 语音合成后端可用性：null = 未拉到（后端未起/未登录），界面不显示状态提示
+  const [ttsReady, setTtsReady] = useState<boolean | null>(null)
+  const [ttsVoice, setTtsVoice] = useState('')
+  const [ttsReason, setTtsReason] = useState('')
   // 我的画像（user_facts 表，后端 /profile）
   const auth = useStore((s) => s.auth)
   const apiBase = useStore((s) => s.settings.apiBase)
   const [facts, setFacts] = useState<UserFact[] | null>(null)
+
+  // 拉一次后端语音可用性（三重开关：TTS_ENABLED / key / WorkspaceId）
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      try {
+        const s = await api.ttsStatus(apiBase)
+        if (!alive) return
+        setTtsReady(s.ready)
+        setTtsVoice(s.voice)
+        setTtsReason(s.reason)
+      } catch {
+        if (alive) setTtsReady(null)   // 未登录或后端未起：静默，不打扰
+      }
+    })()
+    return () => { alive = false }
+  }, [apiBase])
 
   const loadFacts = async () => {
     try {
@@ -138,7 +385,32 @@ export default function SettingsPage() {
             </button>
           </div>
         </div>
+        <div className="set-row">
+          <div className="set-row-main">
+            <label><Volume2 size={13} /> 语音朗读</label>
+            <p>
+              开启后每条回答下方出现朗读按钮，用爱弥斯的语气把答案念出来（带情绪标签）。
+              {ttsReady === null ? '' : ttsReady
+                ? ` 当前音色：${ttsVoice || '默认'}。`
+                : ` 后端未就绪：${ttsReason}`}
+            </p>
+          </div>
+          <div className="set-row-ctl">
+            <button
+              className={`switch ${settings.ttsEnabled ? 'switch-on' : ''}`}
+              onClick={() => setSettings({ ttsEnabled: !settings.ttsEnabled })}
+              role="switch"
+              aria-checked={settings.ttsEnabled}
+              title={ttsReady === false ? '后端 TTS 未开启，按钮点了会提示' : undefined}
+            >
+              <span className="switch-knob" />
+            </button>
+          </div>
+        </div>
       </section>
+
+      {/* 模型服务：默认本地 agent / 用户自定义云端 API（2026-09-29） */}
+      <LlmSection />
 
       {/* 外观 */}
       <section className="card set-card">

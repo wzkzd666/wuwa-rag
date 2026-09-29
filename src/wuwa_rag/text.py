@@ -59,7 +59,7 @@ def strip_icon_placeholders(text: str) -> str:
     def _sub(m: re.Match[str]) -> str:
         left = _neighbor(text, m.start() - 1, -1)
         right = _neighbor(text, m.end(), 1)
-        # ⚠️ 判空必须显式写：`"" in "%."` 恒为 True，会把「行尾的 + 串」当成数学式留下来
+        # 注意：判空必须显式判断——"" in "%." 恒为 True，会把行尾的 + 串当成数学式保留下来
         # （实测 `：++；+++` 只会清掉前半段，尾巴原样留下）。
         is_math = (left and (left.isdigit() or left == "%")) or (
             right and (right.isdigit() or right in "%.")
@@ -72,7 +72,7 @@ def strip_icon_placeholders(text: str) -> str:
 # wiki 表格里「多个配队」挤在同一格，用一长串连字符当分隔：
 #   | 队伍组成 | 清宵+达妮娅+莫宁---------------------------清宵+琳奈+莫宁 |
 # 转成文本后这串 `-` 没有语义，模型会照抄，还会误以为「后面另有一条」。
-# ⚠️ 门槛必须设 `{4,}` 而不是 `{3,}`：markdown 表格分隔行 `| --- | --- |` 正好是 3 个连字符，
+# 注意：门槛必须是 {4,} 而非 {3,}：markdown 表格分隔行 | --- | --- | 正好是 3 个连字符，
 # 全语料 `-{3,}` 有 19893 处是表格分隔行，而 `-{4,}` 只有 **60 处、100% 是配队分隔**（已实测）。
 _RE_DASH_RUN = re.compile(r"-{4,}")
 
@@ -86,7 +86,7 @@ def strip_dash_run(text: str) -> str:
 # 鸣潮配队写法 `A/B/C+D/E+F+G`：`/` 之间是同位置三选一（**或**），`+` 之间是不同位置
 # （**和**），一支队伍只有 3 个人。用户要求「同位置识别为或；问的是谁，那位就固定在场，
 # 他所在的『或』组只保留他」。
-# ⚠️ 这条规则**写进提示词不管用**：写 `_SYSTEM`（远前置）时模型照旧输出
+# 约束：该规则写进提示词无效：置于 _SYSTEM（前置位置）时模型照旧输出
 # `守岸人 / 维里奈 / 白芷`（未锁定），和 `[n]` 那次是**同一个教训**——8B 对长 system 里
 # 的规则遵守度低。所以做成**确定性字符串变换**：进 prompt 之前先把「或」组收窄成单个名字，
 # 模型只需要照抄，不需要它理解规则；天然幂等、可单测、零概率残留。
@@ -152,13 +152,80 @@ def chunk_text(d: dict) -> str:
 # 同一个 `[1]` 重复用十几次），所以输出侧再兜一道。
 # 语料正文从不含 `[n]`（游戏术语用的是中文方括号 `【】`，不受影响），删除零损失。
 _RE_REF_MARK = re.compile(r"\[\d{1,2}\]")
-# 流式下 `[1]` 可能被切成 `[` / `1` / `]` 三个 token，先扣住「可能成为标记开头」的尾巴
-_RE_REF_PENDING = re.compile(r"\[\d{0,2}$")
+# 流式扣尾：以下尾巴先扣住不下发，等看清全貌再判。
+# ① 未闭合的括号前缀 —— `[1]` 会被切成 `[` / `1` / `]`；中文标记 `[图谱]` 会被切成
+#    [图 / 谱]，仅扣数字会让它在流式输出中一闪而过。
+# ② **已闭合**的连续单位数字括号组 `[4][3][3]` —— 这是 COST 串还没写完的样子。
+#    注意：缺少这一步会产生缺陷（收敛过程中复现过三次）：
+#      第一次：完全不扣 → 每个 `[4]` 一闭合就被单独释放并按引用标记删掉，
+#              `_restore_cost_runs` 永远看不到连续 ≥3 组，`COST 组合成 [4][3][3][1][1]`
+#              在流式下被删成「COST 组合成 的」（数值丢失）。
+#      第二次：扣 `{2,}`（≥2 组）仍不够 → 单字切片时**第一组到达时只有 1 组**，
+#              照样扣不住被删。故必须 `{1,}`：单个 `[4]` 也先扣住，等看清是不是 COST。
+#      第三次：扣 `{1,}` 仍不够 → 下一个 `[` 到达时，「未闭合前缀」分支只匹配到末尾那个
+#              `[`，于是把它**前面已闭合的组**当 head 释放出去；此时 head 只有 1 组，
+#              不足 _restore_cost_runs 要求的 ≥3 组，仍会被当作引用标记删除。
+#    ⇒ 正确做法：把「已闭合的组 + 其后未闭合的 `[` 前缀」当**一个整体**扣住（见下方三分支）。
+#    代价：普通引用标记 `[1]` 会多扣几个字符再释放（后续字符到达或 flush 时），无感。
+#    只扣单位数字（`[\d]`）：COST 档位只有 1/3/4，都是个位数；`[12]` 这种两位必是引用标记，
+#    不匹配任一分支 → 立即释放删除，行为正确。
+# 三分支（按「最长优先」排列，re.search 取最左匹配）：
+#   ① 已闭合组 + 未闭合前缀：`[4][3][` —— 组可能还要长，整体扣住
+#   ② 仅已闭合组：`[4][3][3]` —— 下一个字符可能就是 `[`，仍可能长成 COST，扣住
+#   ③ 仅未闭合前缀：`[` / `[1` / `[图` / `[图谱` —— 标记或中文标记的前半截
+_RE_COST_TAIL = re.compile(r"(?:\[\d\])+\[[^\]\[]{0,4}$|(?:\[\d\])+$|\[[^\]\[]{0,4}$")
+# 扣尾长度帽：COST 是 5 件一组（`[4][3][3][1][1]` = 15 字符），32 字符足够宽裕。
+# 超过即判定「不可能是 COST」，立刻释放清洗，防止病态输入下无限缓冲。
+_REF_BUF_MAX = 32
+
+# ---- 补充两类边界情况（均在实测输出中出现过）----
+# ① 中文来源标记：模型自创的出处标注（`彻空冥雷[图谱]`），_RE_REF_MARK 只认数字，完全漏网。
+#    只收白名单词，不做「括号里是中文就删」——正文可能合法出现半角括号包裹的短词。
+_SOURCE_WORDS = ("图谱", "资料", "文档", "联网", "网络", "来源", "参考", "搜索",
+                 "wiki", "WIKI", "web", "WEB", "web_search")
+_RE_SRC_MARK = re.compile(r"\[\s*(?:" + "|".join(map(re.escape, _SOURCE_WORDS)) + r")\s*\]")
+# ② COST 数值被模型写成 `[4][3][3][1][1]`：这是**数据**不是标记，按 ① 的规则删会变成
+#    「COST 组合成 的「彻空冥雷」」——数值被吃掉。语料真实写法是裸数字（`COST 43311`），
+#    所以这种情况只摘括号、把数字还原成串。
+#    判别依据（游戏数据特征，非猜测）：鸣潮声骸 COST 只有 1/3/4 三档，5 件一组；
+#    引用标记则常出现 2/5/6… 且很少连续 ≥3 个。故「连续 ≥3 个单位数字括号且全属 {1,3,4}」
+#    判为 COST，其余按引用标记删除。
+_COST_DIGITS = frozenset("134")
+_RE_COST_RUN = re.compile(r"(?:\[\d\]){3,}")
+_RE_COST_ONE = re.compile(r"\[(\d)\]")
+
+
+def _restore_cost_runs(text: str) -> str:
+    """把 `[4][3][3][1][1]` 这类 COST 串还原成 `43311`；不像 COST 的留给引用规则删。"""
+    def repl(m: re.Match[str]) -> str:
+        digits = _RE_COST_ONE.findall(m.group(0))
+        if len(digits) >= 3 and all(d in _COST_DIGITS for d in digits):
+            return "".join(digits)
+        return m.group(0)          # 含 2/5/6 等 → 是引用标记序列，原样留给下一步删
+    return _RE_COST_RUN.sub(repl, text)
 
 
 def strip_ref_marks(text: str) -> str:
-    """删掉答案里的来源标记 `[n]`（幂等）。"""
-    return _RE_REF_MARK.sub("", text)
+    """删掉答案里的来源标记（数字 `[1]` 与中文 `[图谱]`），并还原被括号包住的 COST 数字串。
+
+    顺序有讲究：先还原 COST（否则连续数字括号会被当引用标记整串删掉，丢数据），
+    再删中文标记，最后删剩余数字标记。幂等。
+    """
+    return _strip_marks(text)[0]
+
+
+def _strip_marks(text: str) -> tuple[str, int]:
+    """清洗实现：返回 (清洗后文本, 删除的标记数)。
+
+    非流式（generate_node 收尾）与流式（AnswerFilter）共用同一套规则——两处曾经各写
+    一遍，结果流式侧漏掉中文标记 `[图谱]`（打字机里会闪现）且 COST 串被切碎误删。
+    计数口径 = 三类标记的总命中数，供日志报告清洗量。
+    """
+    text = _restore_cost_runs(text)
+    n = len(_RE_SRC_MARK.findall(text)) + len(_RE_REF_MARK.findall(text))
+    text = _RE_SRC_MARK.sub("", text)
+    text = _RE_REF_MARK.sub("", text)
+    return text, n
 
 
 # ---------- 输出侧：重复列表项 ----------
@@ -232,19 +299,22 @@ class AnswerFilter:
 
     def feed(self, token: str) -> str:
         self._ref_buf += token
-        m = _RE_REF_PENDING.search(self._ref_buf)
-        if m:
-            # 尾巴形如 `[` / `[1` / `[12`：可能是标记前半截，先扣住不下发
-            head, self._ref_buf = self._ref_buf[: m.start()], m.group(0)
-        else:
-            head, self._ref_buf = self._ref_buf, ""
-        self.removed_marks += len(_RE_REF_MARK.findall(head))
-        return self._route(_RE_REF_MARK.sub("", head))
+        # 扣尾：把「可能是 COST 串或标记前半截」的尾巴先扣住不下发（见 _RE_COST_TAIL 注释）。
+        m = _RE_COST_TAIL.search(self._ref_buf)
+        cut = m.start() if m else len(self._ref_buf)
+        # 长度帽：缓冲超过上限说明不可能是 COST（5 件一组），强制释放，防无限缓冲。
+        if cut == 0 and len(self._ref_buf) > _REF_BUF_MAX:
+            cut = len(self._ref_buf) - _REF_BUF_MAX
+        head, self._ref_buf = self._ref_buf[:cut], self._ref_buf[cut:]
+        clean, removed = _strip_marks(head)
+        self.removed_marks += removed
+        return self._route(clean)
 
     def flush(self) -> str:
         tail, self._ref_buf = self._ref_buf, ""
-        self.removed_marks += len(_RE_REF_MARK.findall(tail))
-        out = self._route(_RE_REF_MARK.sub("", tail))
+        clean, removed = _strip_marks(tail)
+        self.removed_marks += removed
+        out = self._route(clean)
         if self._cand:                  # 最后一行没有换行符
             out += self._keep_line(self._cand)
             self._cand = ""

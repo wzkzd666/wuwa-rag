@@ -1,7 +1,7 @@
 """应用层 BM25 稀疏检索（jieba 分词 + rank_bm25）。
 
 为什么不用 PG 全文检索：
-  ① 规模小（几千块），内存常驻 + pickle 落盘最省事，全量重建只要几秒
+  ① 数据规模小（数千块），采用内存常驻 + pickle 落盘，全量重建仅需数秒
   ② 中文要靠自定义词典（鸣潮术语），PG 的 tsvector 对中文基本无能为力
 """
 from __future__ import annotations

@@ -15,3 +15,7 @@ data
 logs
 .runtime
 CLAUDE.md
+.vscode/
+.ruff_cache/
+.uv-cache/
+front/.npm-cache/

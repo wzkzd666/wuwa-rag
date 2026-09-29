@@ -5,14 +5,14 @@
   web_search: {enable, search_mode, search_number, reference_number, enable_trace, ...}
   模型需 ERNIE 4.5+ 系（search_mode 仅支持 auto——ernie 不支持 required 强制搜索）。
 
-实测（2026-09-22，真跑 qianfan.baidubce.com）：
+实测数据（请求 qianfan.baidubce.com）：
   - 鉴权 = `Authorization: Bearer <千帆控制台 API Key>`（形如 bce-v3/ALTAK-…），直连 v2 即可。
   - 是否真联网看 `usage.prompt_tokens_details.search_tokens > 0`（实测 1905~3430）。
   - 延迟 6.1s（命中搜索缓存）~25.6s（真搜），多数 21~26s → QIANFAN_TIMEOUT 必须 ≥45s，
     否则随机 ReadTimeout，表现为「联网不可用」。
 
-⚠️ API key 留空 = 整体关闭：返回 (False, "")，上层降级「不知道」，不报配置错。
-⚠️ 数据出境：会把「问题+本地资料摘要(≤800字)」经 HTTPS 发百度；未配 key 不发生。
+API key 留空即整体关闭：返回 (False, "")，上层降级为「不知道」，不报配置错误。
+外部依赖：会将「问题 + 本地资料摘要（≤800 字）」经 HTTPS 发送至百度；未配置 key 时不发生。
 """
 from __future__ import annotations
 

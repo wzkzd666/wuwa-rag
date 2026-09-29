@@ -54,7 +54,7 @@ def _process_tag() -> str:
         return role.strip().lower()
     # 反斜杠要归一化：`python -m wuwa_rag.api.server` 启动时 sys.argv[0] 是模块
     # **文件路径**（实测 ...\src\wuwa_rag\api\server.py），不是模块名 —— 不归一化
-    # 就匹配不上，会掉进 main 兜底桶（2026-09-22 首轮线上实测正是如此：
+    # 就匹配不上，会落入 main 兜底分类（首次上线时即出现过该情况：
     # API 进程被记成 role=main）。start.ps1 也会显式注入 WUWA_LOG_ROLE，
     # 这里的推断只作兜底。
     argv = " ".join(sys.argv).lower().replace("\\", "/")
@@ -76,7 +76,7 @@ class _SafeTimedRotatingFileHandler(ConcurrentTimedRotatingFileHandler):
     """跨进程安全轮转 + 「轮转失败也不整天丢日志」兜底。
 
     基类用**跨进程文件锁**协调轮转，从根上解决「两个进程同时持句柄 → os.rename 抛
-    PermissionError [WinError 32]」的问题（2026-09-22 修掉的真实 bug；FastAPI 与
+    PermissionError [WinError 32] 的问题（已修复的缺陷；FastAPI 与
     Celery、以及同一 role 的父子进程都属于这种情形）。这里再叠一层兜底：万一锁或
     权限仍然出问题，doRollover 抛 OSError 时重开 stream 并把 rolloverAt 推到次日，
     只留一条 warning —— 不让该 logger 当天所有日志一条都写不进去。

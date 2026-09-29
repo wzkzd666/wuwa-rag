@@ -1,4 +1,3 @@
-import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -59,7 +58,7 @@ class Settings(BaseSettings):
     TOOL_MODEL: str = "qwen3:8b"
     VLM_MODEL: str = "qwen3-vl:8b"      # 预留：立绘视觉描述（未接入主链）
     LLM_URL: str = "http://localhost:11434"       # ChatOllama
-    LLM_API_KEY: str = "wuwa"                   # 不校验，随便填
+    # Ollama 侧不校验该字段，填任意占位串即可
     LLM_TEMPERATURE: float = 0.3
     MAX_TOKENS: int = 2048
     LLM_NUM_CTX: int = 8192
@@ -73,8 +72,38 @@ class Settings(BaseSettings):
     # 这里只留长度硬帽：超长视为模型跑偏，丢尾部并标记降级。
     SUMMARY_MAX_CHARS: int = 160
 
+    # ---------- chat 模型 provider：本地默认 / 用户自定义云端 ----------
+    # 需求：① 默认仍用项目自带 agent（Ollama aemeath）；② 允许每个用户配自己的
+    # 云大模型（OpenAI 兼容 API），便于把项目共享给别人用（别人用自己的 key）。
+    # 约束：tool 模型（抽取 / 工具 / 摘要）始终走本地 qwen3:8b，不跟随用户 provider：
+    #    结构化任务要稳定 JSON，且不该把用户的 key 花在内部任务上（省钱也防泄漏面扩大）。
+    CHAT_PROVIDER_DEFAULT: str = "ollama"     # ollama=本地 aemeath | openai=云端兼容 API
+    # 云端兜底默认值（用户没填时用它；base_url 留空则视为未配置）
+    CHAT_CLOUD_BASE_URL: str = ""
+    CHAT_CLOUD_MODEL: str = ""
+    CHAT_CLOUD_TEMPERATURE: float = 0.7   # 云端通用模型不需要压低温，人设靠 system 注入
+    CHAT_CLOUD_MAX_TOKENS: int = 2048
+    # 防复读：云端模型同样可能复读（尤其长表格），沿用实测档位。
+    # 注意：OpenAI 兼容 API 的参数名与 Ollama 不同：不存在 repeat_penalty/repeat_last_n，
+    #    对应能力是 frequency_penalty / presence_penalty（-2~2），故此处单独给默认值。
+    CHAT_CLOUD_FREQ_PENALTY: float = 0.3
+    CHAT_CLOUD_FREQ_PENALTY_STRICT: float = 0.1   # 照抄长表格的轮次再降一档（同本地 STRICT 思路）
+    CHAT_CLOUD_PRESENCE_PENALTY: float = 0.0
+
+    # ---------- 凭证加密（用户 API-KEY 落库前加密）----------
+    # 用 Fernet 对称加密，密钥由本值派生。**留空 = 禁用云模型配置功能**（安全降级，
+    # 绝不明文存 key）。生产部署务必在 .env 里设一个长随机串，并且**不要改**——
+    # 改了旧密文就解不开了（视为未配置，用户需重填 key）。
+    SECRET_KEY: str = ""
+    SECRET_KEY_SALT: str = "wuwa-rag-llm-key-v1"   # 派生盐；与 SECRET_KEY 一起决定密钥
+    # SSRF：是否允许用户把云端 base_url 填成私网/环回地址（本地 Ollama/vLLM 需要）。
+    # 默认 True（开发者自用是主流场景，预设里就有本地服务）；
+    # 约束：公网部署或开放注册时必须设为 False，否则等于给注册用户开放内网探测能力。
+    # 云元数据端点（169.254.169.254 等）无论此项如何都无条件拦截。
+    CLOUD_ALLOW_PRIVATE_NET: bool = True
+
     # ---------- 采样 / 防复读（aemeath 是 8B 角色扮演模型，容易陷入整句复读）----------
-    # ⚠️ 别再调回 1.3：实测 1.3 会让 aemeath「不敢继续写相似内容」而**提前收尾**——
+    # 约束：调回 1.3 会让模型回避相似内容而提前收尾——
     #    同一张满级数值表，1.3 下只输出前 4 行就收口（还补一句「其他参数未在该列表中
     #    出现」），问共鸣解放倍率时 7 行里稳定丢 1~3 行；连**没有补料块**的普通轮次也
     #    会丢行。降到 1.15 后同一 prompt 7 行全出，零资料/闲聊两个复读高发场景都没见
@@ -89,14 +118,14 @@ class Settings(BaseSettings):
     LLM_TOP_P: float = 0.9              # 核采样；收窄候选，减少跑偏进人设独白
     LLM_TOP_K: int = 40
     # 关闭思考模式，走 .bind(think=False)（见 llm.py）。
-    # ⚠️ 不要改回 prompt 里的 /no_think：实测对 aemeath 无效（仍 38.3s、输出带 'v'
+    # 约束：不要改用 prompt 中的 /no_think：实测对 aemeath 无效（仍 38.3s、输出带 'v'
     # 泄漏前缀，并触发 Ollama 500 peg-native format 错误）。bind 方式 1.3s 且干净。
     LLM_NO_THINK: bool = True
     LLM_SEED: int = -1                  # -1 = 随机；调试复现时可固定
     # 运行时复读兜底：命中即中断生成 + 截断尾巴（采样参数压不住时的最后一道闸）
     LLM_LOOP_MAX_REPEAT: int = 2        # 同一句子最多允许出现的次数
     LLM_LOOP_MIN_CHARS: int = 12        # 「长句」门槛：≥ 此长度才做精确重复计数
-    # ⚠️ 2026-09-22 加：光有上面的长句规则会**漏网**。实测「清宵配队」的输出把 6 行
+    # 补充说明：仅有上面的长句规则仍会漏判。实测「清宵配队」的输出把 6 行
     #    一组的目标配队循环了 5 遍，且每行带 `*1`…`*28` 计数后缀（`守岸人 + 尤诺*17`），
     #    ① 每行都短于 12 字被 MIN_CHARS 跳过；② 后缀让每行看起来都唯一，精确判重抓不到。
     #    故补「周期块循环」检测：一组行整体重复 ≥ MIN_CYCLES 遍即判退化（比较前剥掉
@@ -133,8 +162,8 @@ class Settings(BaseSettings):
     VERIFY_MAX_RETRY: int = 1         # 验证不通过→重检索的最多次数（防图内死循环）
     REFRESH_WAIT_TIMEOUT: int = 180   # 刷新链（清库+重爬5步）同步等待上限，同自动爬取
     # 百度千帆联网搜索（v2 chat/completions + web_search，API 直连不走本地 SDK）。
-    # ⚠️ API key 留空 = 联网兜底整体关闭，链路降级为「不知道」，不报配置错误。
-    # 2026-09-22 修：原写法 `os.getenv('BAIDUQIANFAN_API_KEY')` 有两个坑——
+    # 约束：API key 留空即整体关闭联网兜底，链路降级为「不知道」，不报配置错误。
+    # 早期写法 os.getenv('BAIDUQIANFAN_API_KEY') 存在两个问题，已按此修正——
     #   ① 它在**类体求值**，读的是进程环境；pydantic 的 env_file 只走自己的 source，
     #      不会把 .env 注入 os.environ → 把 key 写进 .env 完全无效（配了也不生效）。
     #   ② 变量不存在时默认值是 None，而字段类型是 str → pydantic 校验直接抛
@@ -147,9 +176,39 @@ class Settings(BaseSettings):
     )
     QIANFAN_CHAT_URL: str = "https://qianfan.baidubce.com/v2/chat/completions"
     QIANFAN_WEB_MODEL: str = "ernie-4.5-turbo-128k"   # 支持 web_search 的对话模型
-    # 实测（2026-09-22 真跑）：联网请求 6.1s（命中搜索缓存）~25.6s（真搜），
+    # 实测数据：联网请求 6.1s（命中搜索缓存）~25.6s（未命中），
     # 多数落在 21~26s。原来 20s 会随机 ReadTimeout → 表现成「联网不可用」。
     QIANFAN_TIMEOUT: float = 45.0
+
+    # ---------- 情绪标签 + TTS 语音合成（默认关闭）----------
+    # 需求：文本 LLM 生成答案时**顺带**打情绪标签，再由 TTS 用该情绪合成语音。
+    # EMOTION_ENABLED=False 时不打标签（省一次 8b 调用，问答零影响）；
+    # TTS_ENABLED=False 或 DASHSCOPE_API_KEY 为空时 /tts 直接返回「功能未开启」，
+    # 不报错、不影响问答主链。dashscope SDK 为可选依赖（extras: tts），缺失同样降级。
+    EMOTION_ENABLED: bool = True
+    TTS_ENABLED: bool = False          # 总开关：先预留，音色与计费确认后再开
+    # 与 QIANFAN_API_KEY 同一个坑同一个解法：用 AliasChoices 让 .env 与进程环境都能配。
+    DASHSCOPE_API_KEY: str = Field(
+        "", validation_alias=AliasChoices("DASHSCOPE_API_KEY", "BAILIAN_API_KEY")
+    )
+    TTS_MODEL: str = "qwen-audio-3.0-tts-flash"   # 非实时合成；plus 音质更好但音色名不同
+    # 注意：Qwen-Audio-TTS / CosyVoice 的端点不是 dashscope.aliyuncs.com，而是带
+    # WorkspaceId 的 maas 域名，且仅北京地域可用（官方文档「非实时语音合成」2026-09 版）。
+    # 端点不可与 Qwen-TTS 系列混用。WorkspaceId 在百炼控制台「业务空间」里查。
+    TTS_WORKSPACE_ID: str = Field(
+        "", validation_alias=AliasChoices("TTS_WORKSPACE_ID", "DASHSCOPE_WORKSPACE_ID")
+    )
+    TTS_URL_TEMPLATE: str = (
+        "https://{workspace_id}.cn-beijing.maas.aliyuncs.com"
+        "/api/v1/services/audio/tts/SpeechSynthesizer"
+    )
+    # 注意：音色与模型版本绑定（flash 对应 longanhuan_v3.6 一类），换模型必须同步换音色。
+    # 音色方案待定，暂取官方文档 flash 型号的示例值占位，可由 TTS_VOICE 覆盖。
+    TTS_VOICE: str = "longanhuan_v3.6"
+    TTS_FORMAT: str = "mp3"            # 前端 <audio> 直接可播；wav 体积大约 10 倍
+    TTS_SAMPLE_RATE: int = 24000       # 官方示例值
+    TTS_TIMEOUT: float = 30.0
+    TTS_MAX_CHARS: int = 500           # 单次合成文本上限（官方：Qwen-TTS 系 512 token）
 
     # ---------- 切块参数 ----------
     MIN_CHARS: int = 60

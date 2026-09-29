@@ -5,7 +5,8 @@ import asyncio
 import re
 import time
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import Runnable
 from langgraph.graph import END, START, StateGraph
 
 from ..config import ensure_dirs, get_settings
@@ -24,7 +25,9 @@ from ..worker import (
     reset_progress,
 )
 from ..ww_logger import get_logger
+from . import llmstore, persona
 from .characters import resolve_candidates
+from .emotion import detect_emotion
 from .intent import (
     classify,
     classify_topic,
@@ -42,6 +45,7 @@ from .memory import get_checkpointer
 from .retrievers import fetch_chunks
 from .state import RagState
 from .tools import graph_search_tool, vector_search_tool
+from .tts import tts_ready
 from .verify import verify_knowledge
 from .websearch import web_search
 
@@ -54,22 +58,22 @@ log = get_logger("rag")
 # 另：Ollama 的 system 参数会覆盖 Modelfile 内置 SYSTEM，所以这些约束必须拼在
 # HumanMessage 里，不能改成 SystemMessage 传，否则人设会丢。
 #
-# ⚠️⚠️ 2026-09-22 铁律：本提示词**只写正面要求，绝不写「实测反例」**（哪怕加「不要」）。
+# 硬约束：本提示词只描述正面要求，不要在示例中给出反例（哪怕是否定句式）。
 # aemeath 会把提示词里点名的反例**当成要模仿的样本照抄**——即 negative-example
 # contamination。三条实证：
 #   ① 原文写了「不要自行补充『没有提到其他/更多』」→ 输出结尾**稳定**出现
 #      「资料里没有提到其他组合啦。」（用户现场 + 本地复现各命中，字面级一致）。
 #   ② 原文写了「不许给条目编序号或计数器（如『守岸人 + 尤诺*5』）」→ 输出开始出现
-#      `[1]`~`[7]` 引用编号（用户报「数字这些噪声」）。
+#      `[1]`~`[7]` 形式的来源编号噪声。
 #   ③ 原文写了「开场就是『我呀~』」→ 该开场概率性复现。
 # 对照实验（直连 Ollama、固定 seed=42、同一资料）：
 #   · prompt 里**点名** `[1] [2]` 禁止 → 仍写 `[1]`；放在末尾时**更糟**（自编到 `[5]`）。
 #   · 改用**泛化措辞**「不要标注来源序号或引用标记」→ 完全不出现（基线组则写 `[1][2]`）。
 #   · 纯问题、不给资料的基线组**不会**写 `[n]` → 说明 `[n]` 是「有资料可依」这件事诱发的
 #     模型微调习惯，不是它天生爱写；也**不是**语料里的 `[图]` 诱发（去掉方括号照样写）。
-# 开发期的反例/踩坑记录请写在本注释里，**不要进 _SYSTEM**。
+# 反例与历史记录请写进项目文档，**不要进 _SYSTEM**。
 #
-# ⚠️ 2026-09-22 追加：「家人问的是哪位，那位所在的那个『或』组只列他」这条**不在
+# 补充：「家人问的是哪位，那位所在的那个『或』组只列他」这条**不在
 # _SYSTEM 里写**（写过，实测完全不生效：问守岸人时答案照旧输出 `守岸人 / 维里奈 / 白芷`）。
 # 它已改由 `text.lock_focus` 在**数据侧确定性落实**：图谱（retrievers.graph_search）与
 # 参考文档（chain._lock_focus）进 prompt 之前，含本次角色的「或」组就已收窄成他本人。
@@ -108,6 +112,17 @@ _STAGE_LABELS = {
     "generate": "整理答案中",
 }
 
+# 内部 LLM 调用的标签：这些调用的输出是**结构化中间结果**（摘要/审查/情绪），
+# 绝不能出现在用户答案里。它们都发生在 generate/chitchat 节点**内部**，其流式回调
+# metadata.langgraph_node 就是 'generate'，**节点名过滤挡不住**，只能靠标签丢弃。
+# 实测教训（两轮，同一类泄漏）：
+#   ① 未过滤 wwa:summary → 摘要整句被拼进答案尾巴（六轮深会话测试抓到）；
+#   ② 未过滤 wwa:emotion 时情绪 JSON 同样会拼进答案（接入情绪标签时已复现）。
+# 约束：新增任何「在生成节点内部调用 LLM」的功能，都必须打标签并加入该集合。
+# wwa:verify 不在此列：verify_node 是**独立图节点**，节点名不在放行白名单
+# （generate/chitchat），已被节点过滤挡住；但打标签无害且更稳，故一并列入。
+_INTERNAL_TAGS = frozenset({"wwa:summary", "wwa:emotion", "wwa:verify"})
+
 
 def _new_loop_guard() -> LoopGuard:
     """每次生成都要新建一个 guard：它内部有累积状态，跨请求复用会串味。"""
@@ -130,6 +145,40 @@ def _trim_loop(text: str, sentence: str | None) -> str:
         period_max=setting.LLM_LOOP_PERIOD_MAX,
         min_cycles=setting.LLM_LOOP_MIN_CYCLES,
     )
+
+
+async def _chat_client(state: RagState, strict: bool = False) -> tuple[Runnable, bool, bool]:
+    """取本轮 chat 客户端，返回 `(client, is_cloud, emotion_via_cloud)`。
+
+    需求：① 默认用项目自带 agent（本地 Ollama aemeath）；② 用户配了自己的云端
+    OpenAI 兼容 API 就走云端。判定顺序：state 里有 `user_id` → `llmstore.get_runtime`
+    取该用户配置（含解密后的 key）→ 取到走云端，取不到（未配 / 已停用 / SECRET_KEY
+    未设 / 解密失败）一律**回落本地默认**，问答不因配置问题中断。
+
+    返回值 is_cloud 决定人设注入方式，两条规则相反（判断错误会丢失作答效果）：
+      - 本地 aemeath：人设烧在 Modelfile SYSTEM，**不得**发 SystemMessage（会覆盖人设），
+        `_SYSTEM` 走 HumanMessage 前缀（现状，逐字节不变）；
+      - 云端通用模型：不认识爱弥斯，**必须**发 `SystemMessage(persona.cloud_system())`，
+        且 prompt 不再前缀 `_SYSTEM`（避免术语表/作答要求重复两遍）。
+
+    明文 key 只存在于返回的 client 实例中，不得写入 state —— checkpointer 会把
+    state 持久化进 PG，写进去等于把用户密钥落盘到另一张表。
+
+    第三个返回值 `emotion_via_cloud`：**该用户是否勾选了让自己的模型兼任情绪判定**
+    （`llmstore.emotion_enabled`，默认否）。为真时把本 client 交给 rag/emotion.py，
+    否则情绪判定走本地 tool 模型（分工说明见该模块 docstring）。
+    """
+    uid = state.get("user_id")
+    if uid:
+        try:
+            cfg = await llmstore.get_runtime(int(uid))
+        except Exception as exc:
+            log.warning("读取云端模型配置失败，回落本地默认：%s", exc)
+            cfg = None
+        if cfg:
+            return (get_chat_llm(strict=strict, cloud_cfg=cfg), True,
+                    bool(cfg.get("emotion_enabled")))
+    return get_chat_llm(strict=strict), False, False
 
 
 async def _commit_history(state: RagState, answer: str) -> dict:
@@ -232,7 +281,7 @@ async def intent_node(state: RagState) -> dict:
     stage = detect_stage(sq)
     intent = classify(sq, slots)
 
-    # ⚠️ 2026-09-22 起：**不走向量就必须标成 fact**，intent 不能名不副实。
+    # 约束：不走向量时必须标为 fact，intent 字段不得名不副实。
     # intent 是对外字段（`AskOut.intent` / SSE done.intent），「报 hybrid 却 docs=0」
     # 会让前端与排查都读到假信息。
     # 概括性配队（slots 恰为 ['队友'] 且未指名，见 _is_team_overview）只在图谱就能答全
@@ -282,14 +331,14 @@ async def graph_node(state: RagState) -> dict:
     return {"graph_facts": facts}
 
 
-# 鸣潮一队只有 3 个人 —— **凑满 3 个角色名才算「点名一支具体队伍」**。
+# 鸣潮一队只有 3 个人 —— 满 3 个角色名才算「点名一支具体队伍」。
 _TEAM_SLOTS = 3
 
 
 def _is_named_team(slots, characters) -> bool:
     """点名一支具体队伍：≥3 个角色名 + 问的是配队（队友槽位）。
 
-    ⚠️ 2026-09-22 阈值由 2 提到 3：2 个名字时用户其实还没定下队伍（图谱会列出所有
+    阈值取 3 而非 2：只有 2 个名字时用户尚未确定队伍（图谱会列出所有
     「含这两人」的队），补的向量是「这帮人相关的正文」，答非所问、还白等十几秒。
 
     为什么指名时要补向量：**队名在图谱、打法循环在正文描述里**（wiki 配队页正文
@@ -301,17 +350,17 @@ def _is_named_team(slots, characters) -> bool:
 def _is_team_overview(slots, characters) -> bool:
     """**概括性**问配队：只问了配队（slots 恰为 `['队友']`），且**没有**指名一支具体队伍。
 
-    2026-09-22 起：**概括性询问配队不再走向量检索**，模型回答完之后可追问一句
+    概括性询问配队不再走向量检索，作答结束后可追加一句
     『你对哪个队伍感兴趣，需要我给你详细介绍吗』。
 
     为什么能不走向量：图谱侧泛问给的就是含「或」的模板
     （`守岸人+吟霖/长离/散华+卡卡罗`），信息已完整；走向量只会把正文里**别的**队伍
     的打法描述召回来（答非所问），还要多等一次检索 + 重排（实测约 15~19s）。
 
-    ⚠️ 判据限定 `slots == ['队友']`：同时还有别的槽位（「守岸人配队和声骸」
+    判据限定 `slots == ['队友']`：同时命中其它槽位时（「守岸人配队和声骸」
     → `['队友','声骸']`）时那些槽位仍需要向量，别一刀切。
 
-    ⚠️ 这是**唯一真相源**（state 版包装见 _named_team / _team_overview）。两处消费它，
+    本函数是唯一的判据来源（state 版包装为 _named_team / _team_overview）。两处依赖它，
     必须口径一致：
       · `intent_node` —— 命中则把 intent 从 `hybrid` 降级为 **`fact`**（不走向量就该是 fact）；
       · `_should_ask_team` —— 命中则在答案末尾追问一句。
@@ -348,12 +397,12 @@ _TEAM_FOLLOWUP = "你对哪个队伍感兴趣？需要我给你详细介绍一�
 def _after_graph(state: RagState) -> str:
     """graph 之后：hybrid 还要补向量，其余直接进 verify。
 
-    ⚠️ 2026-09-22：**「概括性配队不走向量」这件事由 `intent` 承载，不在本函数里额外判** ——
+    「概括性配队不走向量」由 intent 字段承载，本函数不再重复判断 ——
     `intent_node` 已把这类问题的 intent 从 `hybrid` **降级为 `fact`**（见 _is_team_overview），
     于是 `_route` 走 fact 分支、这里 `state["intent"] == "hybrid"` 也不再成立，自然只走图谱。
     **不要再在这里加一条 `if _team_overview(state): return "done"`**：同一个语义挂两条判据
     迟早不同步；更要紧的是 intent 字段是对外字段，必须与实际走的路径一致
-    （2026-09-22 起：这个 intent 不能例外，不走向量就应该标记为 fact）。
+    （intent 不允许例外：未走向量检索时一律标记为 fact）。
 
     例外一：技能类问题（slots 含「技能」）强制补一轮向量。原因：图谱的 HAS_SKILL
     每个 kind 只存了**技能名**（见 graph/extract.py::_extract_skills 取首个加粗串），
@@ -782,9 +831,9 @@ def _build_context(state: RagState, extra: list[str] | None = None) -> str:
         parts.append("## 图谱事实\n" + state["graph_facts"])
     docs = state.get("docs") or []
     if docs:
-        # ⚠️ 2026-09-22 修：原来给每份资料加 `[1]` `[2]` 前缀想着引导溯源，实测 aemeath 会
+        # 变更说明：早期给每份资料加 [1] [2] 前缀以引导溯源，实测模型会把
         # 把它当引用标记**抄进正文**——「- 守岸人 + 尤诺 [1][4]」「- 莫宁 + 琳奈 [1][5]」，
-        # 用户报「还有数字这些噪声」，三轮复现稳定出现。前端引用面板走的是 SSE
+        # 答案尾部因此混入纯数字噪声（三轮复现稳定出现）。前端引用面板走的是 SSE
         # `done.sources`（`doc_sources`），**不依赖模型在正文写 `[n]`**，去掉零损失：
         # 每块自带 breadcrumb 开头，来源照样可辨。
         # 若将来真要做「正文引用徽章」，请改用 `（资料1）` 这类非方括号标记，别退回 `[n]`。
@@ -807,8 +856,8 @@ def _build_context(state: RagState, extra: list[str] | None = None) -> str:
     # 零资料信号被吞掉 → 模型收不到约束 → 退化成自由发挥（人设独白 + 复读）。
     if not (state.get("graph_facts") or docs or web_facts or extra):
         # 这里不要再写「## 资料」标题：_build_prompt 已经加了，重复标题会干扰模型
-        # 2026-09-22：光说「说明你不清楚」会被模型答成一句干巴巴的公文腔（用户报
-        # 「不知道的时候回答没有人设感」）。明确要求**用自己的口吻**说，并给一个
+        # 约束：只要求「说明你不清楚」会得到公文式干瘪回答，因此这里明确要求用自己的口吻，
+        # 「不知道」这条分支会整体丢失角色口吻。明确要求**用自己的口吻**说，并给一个
         # 口径示例，人设才在「答不出来」这条路上也保住。
         parts.append(
             "（本次没有检索到任何资料。请用你自己的口吻、一句话说明你手里没有这份记录——"
@@ -821,19 +870,32 @@ def _build_context(state: RagState, extra: list[str] | None = None) -> str:
 def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
                   characters: list[str] | None = None,
                   team_focus: bool = False,
-                  user_context: str = "") -> str:
+                  user_context: str = "",
+                  cloud: bool = False) -> str:
+    """拼最终 prompt。
+
+    参数 cloud 决定人设来源（见 persona.py 模块文档）：
+      - 本地 aemeath（cloud=False）：人设烧在 Modelfile SYSTEM 里，所以 `_SYSTEM`
+        只补「资料是存档记录、用你的口吻讲」这句衔接 + 术语对照 + 作答要求，
+        整条塞进 HumanMessage（**不能**另发 SystemMessage，会覆盖人设）。
+      - 云端通用模型（cloud=True）：模型不认识爱弥斯，人设改由调用侧
+        `SystemMessage(persona.cloud_system())` 注入，故这里**不再**前缀 `_SYSTEM`
+        （否则术语表/作答要求会重复两遍，白白吃 token 且稀释指令）。
+      两条路径的 `## 资料 / ## 问题 / tail / 输出格式` 部分完全一致。
+    """
     # 不在这里注入 /no_think：实测它对 aemeath 无效（仍 38s + 'v' 泄漏前缀 + 触发
     # Ollama 500）。思考模式由 llm.py 的 .bind(think=False) 统一关闭。
-    prompt = f"{_SYSTEM}\n\n## 资料\n{context}\n\n## 问题\n{question}"
+    prefix = "" if cloud else f"{_SYSTEM}\n\n"
+    prompt = f"{prefix}## 资料\n{context}\n\n## 问题\n{question}"
     # 人称硬要求压在 prompt **最末**（近因位）：_SYSTEM 里那条通用规则实测压不住——
-    # 同一条 prompt 换 seed 重跑，「我呀~」开场仍会**概率性**冒出来（用户报「把清宵当
-    # 自己了」）。点名具体角色 + 放末尾，比在长 _SYSTEM 里写通用规则强得多。
+    # 同一条 prompt 换 seed 重跑，第一人称开场仍会**概率性**冒出来（把被问的角色
+    # 当成了自己）。点名具体角色 + 放末尾，比在长 _SYSTEM 里写通用规则强得多。
     # 问爱弥斯自己（characters 只含「爱弥斯」）时不加，否则会把人设本身顶掉。
     others = [c for c in (characters or []) if c and c != "爱弥斯"]
     # 这两条硬要求必须压在 prompt **最末**（近因位），写进前面的 _SYSTEM 等于白写——
     # 实测：同一条「不要标注来源序号或引用标记」放在 _SYSTEM 里，配队答案照样出现
     # `[1]`~`[10]`；末尾泛化措辞则完全不出现。
-    # ⚠️ 措辞必须**泛化**：点名 `[1] [2]` 反而会诱发编号（放末尾时更糟，自编到 `[5]`）。
+    # 约束：措辞必须保持泛化，点名 [1] [2] 反而会诱发编号（置于末尾时更明显）。
     tail = ("\n\n## 表达（硬要求）\n"
             "资料没有编号，直接陈述内容即可，不要标注来源序号或引用标记。")
     if others:
@@ -841,7 +903,7 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
                  "正文里一律用角色名或「她/他」称呼，不要冒充成她。")
     if team_focus:
         # 指名具体队伍时（见 _named_team，≥3 个角色名）：把注意力钉在那一支上。
-        # ⚠️ 措辞用「围绕这一支展开」而不是「只介绍这一支」——本文件记过的教训：
+        # 约束：措辞用「围绕这一支展开」而非「只介绍这一支」，原因见本文件前述说明：
         # 「只」字会让模型把介绍性口吻整个砍掉、退化成机械罗列，人设直接丢失。
         tail += ("\n用户已经点名了一支具体队伍，本轮就围绕这一支展开："
                  "成员是谁、怎么打（出手顺序 / 循环）、为什么这么配。")
@@ -858,9 +920,9 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
         return prompt + tail
     # 指令必须压在 prompt **末尾**：_SYSTEM 里那条规则实测只能让模型「带上几个数」，
     # 面对长表仍会概括成「各需不同数量」而不逐行列（实测）。近因位置 + 点名禁止的
-    # 偷懒写法，才能把它按回照抄状态。
+    # 采用保守写法，才能让它回到逐行照抄的状态。
     #
-    # ⚠ 2026-09-22 踩坑：不要写「只照抄那两张表」这种话。它有两个反作用——
+    # 注意：不要写成「只照抄那两张表」，该措辞有两个反作用——
     #  ①「只」字会让模型把技能介绍/人设口吻整个砍掉，退化成纯数据倾倒（实测：
     #    人设丢失、答案变成机械罗列）；
     #  ② 点名「突破材料表」会让模型以为该有材料表，于是跑去「## 参考文档」里翻材料
@@ -908,10 +970,17 @@ async def generate_node(state: RagState):
     if blocks:
         log.info("补料 %d 块（%s）", len(blocks),
                  " + ".join(b.splitlines()[0].lstrip("# ") for b in blocks))
+    # provider：本地 aemeath（默认）或用户自配云端。is_cloud 决定人设注入方式（见 _chat_client）
+    client, is_cloud, emotion_via_cloud = await _chat_client(state, strict=bool(blocks))
     prompt = _build_prompt(context, state["question"], blocks=blocks,
                            characters=state.get("characters"),
                            team_focus=_named_team(state),
-                           user_context=state.get("user_context") or "")
+                           user_context=state.get("user_context") or "",
+                           cloud=is_cloud)
+    # 云端：人设走 SystemMessage（模型不认识爱弥斯，必须注入）；
+    # 本地：只发 HumanMessage（人设在 Modelfile，发 system 会覆盖）。
+    msgs = ([SystemMessage(content=persona.cloud_system()), HumanMessage(content=prompt)]
+            if is_cloud else [HumanMessage(content=prompt)])
 
     guard = _new_loop_guard()
     full: list[str] = []
@@ -920,7 +989,7 @@ async def generate_node(state: RagState):
     answer_ok = True
 
     try:
-        async for chunk in get_chat_llm(strict=bool(blocks)).astream([HumanMessage(content=prompt)]):
+        async for chunk in client.astream(msgs):
             if not chunk.content:
                 continue
             h = guard.feed(chunk.content)
@@ -956,12 +1025,21 @@ async def generate_node(state: RagState):
         answer = answer.rstrip() + "\n\n" + _TEAM_FOLLOWUP
         log.info("概括性配队：答案末尾追加追问句（图谱侧已给出队伍）")
 
+    # 情绪标签（供 TTS 使用）：仅在 TTS 可用时才判定——判定需要额外一次模型调用，
+    # TTS 默认关闭时该字段无人消费，没有理由付出这一次延迟。
+    # 判定模型：默认本地 8b；配了自定义云端模型且该用户开启兼任时才复用 chat_client。
+    emotion = ""
+    if setting.EMOTION_ENABLED and tts_ready()[0]:
+        emotion = await detect_emotion(
+            answer, chat_client=client if emotion_via_cloud else None)
+
     # 最终状态：answer/truncated/history/context_summary 是 RagState 声明字段，
     # 由 checkpointer 持久化；_commit_history 顺带压缩被挤出窗口的旧轮次（B）。
     committed = await _commit_history(state, answer)
     yield {
         "context": context,
         "answer": answer,
+        "emotion": emotion,
         "truncated": truncated,
         **committed,
     }
@@ -974,7 +1052,12 @@ _CHITCHAT_HINT = "家人在跟你闲聊，没有要查资料。自然、简短�
 
 async def chitchat_node(state: RagState):
     """闲聊分支：不挂检索，带对话历史，人设自然回应。streaming node。"""
+    client, is_cloud, emotion_via_cloud = await _chat_client(state)
     msgs: list = []
+    # 云端：人设走 SystemMessage（见 _chat_client 的两条相反规则）。
+    # 本地：不发 system —— aemeath 人设在 Modelfile，发了会覆盖。
+    if is_cloud:
+        msgs.append(SystemMessage(content=persona.cloud_system()))
     for m in (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]:
         if m["role"] == "user":
             msgs.append(HumanMessage(content=m["content"]))
@@ -988,7 +1071,7 @@ async def chitchat_node(state: RagState):
     truncated = False
     answer_ok = True
     try:
-        async for chunk in get_chat_llm().astream(msgs):
+        async for chunk in client.astream(msgs):
             if not chunk.content:
                 continue
             h = guard.feed(chunk.content)
@@ -1010,9 +1093,17 @@ async def chitchat_node(state: RagState):
     if answer_ok and truncated and hit:
         answer = _trim_loop(answer, hit)
 
+    # 情绪标签：与 generate_node 使用同一开关（仅在 TTS 可用时判定）。
+    # 闲聊是 playful/cheerful 的高发场景，情绪对语音表现力价值最大。
+    emotion = ""
+    if setting.EMOTION_ENABLED and tts_ready()[0]:
+        emotion = await detect_emotion(
+            answer, chat_client=client if emotion_via_cloud else None)
+
     committed = await _commit_history(state, answer)
     yield {
         "answer": answer,
+        "emotion": emotion,
         "truncated": truncated,
         **committed,
     }
@@ -1103,7 +1194,8 @@ async def ensure_characters(question: str) -> tuple[list[str], bool, list[str]]:
     return candidates, ok, to_crawl
 
 
-def _fresh_state(question: str, characters: list[str], user_context: str = "") -> dict:
+def _fresh_state(question: str, characters: list[str], user_context: str = "",
+                 user_id: int | None = None) -> dict:
     """每轮问答的初始状态：检索侧字段全部清零。
 
     docs/graph_facts/web_facts 等是普通字段（无 reducer），checkpointer 会把上一轮
@@ -1125,15 +1217,19 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "") -
         "refreshed": False,
         "used_web": False,
         "user_context": user_context,   # 用户画像事实串；checkpointer 会跨轮带旧值，每轮显式覆盖
+        # 约束：user_id 必须每轮显式覆盖（与 user_context 同理，但后果更严重）：
+        # checkpointer 会跨轮带旧值，若不清零，同一 thread_id 上换人提问时，
+        # _chat_client 会读到**上一个用户**的云端配置 —— 等于用别人的 API-KEY 跑自己的问题。
+        # 无登录/未配置时为 None，_chat_client 直接回落本地默认。
+        "user_id": user_id,
     }
 
 
 def _unknown_text(names: list[str]) -> str:
     """角色不在知识库、联网抓取也没找到时的兜底话术。
 
-    2026-09-22：原来是一句「不知道（知识库里没有这个角色，尝试联网抓取也没找到）。」
-    ——事实没错但**完全没有人设**（用户报「不知道的时候回答没有人设感」）。
-    改成爱弥斯的口吻，同时保留三件事实：翻了本地、联网找过、确实没有。
+    早期版本是「不知道（知识库里没有这个角色，尝试联网抓取也没找到）。」，
+     ——事实没错但整体缺乏角色口吻。改成爱弥斯的表达，同时保留三件事实：翻了本地、联网找过、确实没有。
     """
     who = "、".join(names) if names else "这个角色"
     return (
@@ -1142,7 +1238,8 @@ def _unknown_text(names: list[str]) -> str:
     )
 
 
-async def ask(question: str, thread_id: str = "default", user_context: str = "") -> dict:
+async def ask(question: str, thread_id: str = "default", user_context: str = "",
+              user_id: int | None = None) -> dict:
     candidates, ok, crawled = await ensure_characters(question)
     if candidates and not ok:
         log.info("自动爬取: 最终回「不知道」(角色=%s)", candidates)
@@ -1153,12 +1250,13 @@ async def ask(question: str, thread_id: str = "default", user_context: str = "")
     chain = await get_chain()
     injected = crawled if crawled else []
     return await chain.ainvoke(
-        _fresh_state(question, injected, user_context),
+        _fresh_state(question, injected, user_context, user_id),
         config={"configurable": {"thread_id": thread_id}},
     )
 
 
-async def ask_stream(question: str, thread_id: str = "default", user_context: str = ""):
+async def ask_stream(question: str, thread_id: str = "default", user_context: str = "",
+                     user_id: int | None = None):
     """流式问答：走 LangGraph astream_events，checkpointer 自动管理多轮记忆。
 
     yield dict：
@@ -1189,7 +1287,7 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
 
     chain = await get_chain()
     injected = crawled if crawled else []
-    input_state = _fresh_state(question, injected, user_context)
+    input_state = _fresh_state(question, injected, user_context, user_id)
     config = {"configurable": {"thread_id": thread_id}}
 
     # 从事件流抽 token + 阶段 + 最终元数据
@@ -1206,14 +1304,15 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
             emitted_stages.add(name)
             yield {"stage": name, "label": _STAGE_LABELS[name]}
 
-        # token 级事件：**必须按节点过滤**。intent_node 里的主题分类器也调 LLM，
-        # 它的流式事件同样挂在 on_chat_model_stream 上（metadata.langgraph_node='intent'），
-        # 不过滤会把 {"topic":"chitchat"} 这类分类输出当答案吐给前端（实测发生过）。
-        # 另挡 wwa:summary 标签一路：_commit_history 在 generate/chitchat 节点**内部**
-        # 调 summarize_turns，其 ainvoke 的流式回调 node='generate'，节点过滤挡不住，
-        # 实测摘要整句被拼进答案尾巴（六轮深会话测试抓到，intent 侧已打标签）。
+        # token 级事件：两道过滤，缺一不可。
+        # ① 标签过滤（_INTERNAL_TAGS）：摘要/审查/情绪这些**结构化中间结果**都产生于
+        #    generate/chitchat 节点**内部**，其 ainvoke 流式回调 node 就是 'generate'，
+        #    下面的节点白名单挡不住 —— 只能靠标签丢弃。实测两轮同类泄漏：
+        #    未挡 wwa:summary 时摘要整句被拼进答案尾巴；接情绪标签时预判到 wwa:emotion 同样。
+        # ② 节点过滤：intent_node 里的主题分类器也调 LLM，事件同样挂 on_chat_model_stream
+        #    （node='intent'），不过滤会把 {"topic":"chitchat"} 当答案吐给前端（实测发生过）。
         elif kind == "on_chat_model_stream":
-            if "wwa:summary" in (event.get("tags") or []):
+            if _INTERNAL_TAGS & set(event.get("tags") or []):
                 continue
             node = event.get("metadata", {}).get("langgraph_node", "")
             if node not in ("generate", "chitchat"):
@@ -1271,6 +1370,7 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         "docs": len(final_state.get("docs") or []),
         "sources": doc_sources(final_state.get("docs") or []),
         "truncated": bool(final_state.get("truncated")),
+        "emotion": final_state.get("emotion", ""),   # TTS 情绪（未开启时为空串）
     }
 
 
