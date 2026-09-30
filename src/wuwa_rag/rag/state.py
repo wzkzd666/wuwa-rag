@@ -10,7 +10,11 @@ class RagState(TypedDict, total=False):
                            # 约束：state 中只放 id，明文 api_key 绝不写入——checkpointer 会把
                            # state 持久化进 PG，放进去等于把用户密钥落盘到另一张表。
     search_query: str      # 追问改写后的自包含问句（检索/意图用它；history 存原句）
-    intent: str            # fact / semantic / hybrid / chitchat
+    intent: str            # fact / semantic / hybrid / chitchat / time
+    need_time: bool        # 本轮是否要用到服务端真值时间。纯时间问题（intent=time）走
+                           # time_node；「顺带问了时间」的混合问句（intent 仍是
+                           # fact/semantic/hybrid/chitchat）由 chain 在本节点里额外注入
+                           # 真值（见 intent.mentions_time）。
     slots: list[str]       # 命中的事实槽位
     characters: list[str]         # 识别出的角色名列表
     graph_facts: str       # 图谱事实（已格式化）

@@ -5,6 +5,14 @@
 - token 是 secrets.token_hex(32)（256bit），存 auth_tokens 表、30 天过期——
   服务重启不丢登录态（内存 dict 方案重启全员掉线，pass）；
 - 请求带 `Authorization: Bearer <token>`，FastAPI 依赖里解析。
+
+与 rag/llmstore.py 的协作（用户云端 API-KEY 的加密存储）：
+- **登录即自动解锁**：登录请求带明文密码，这里顺手派生 KEK 解开该用户的 DEK
+  放进内存，下次登录云端模型直接生效（用户无需额外输入任何口令）。
+- **改密码必须重绑**：DEK 的密码通道由密码派生，改密码后旧密文立即失效，
+  `change_password` 因此**先用旧密码重绑、再更新 pw_hash**（顺序颠倒会让用户
+  把自己的 Key 永久锁死）。
+- 两者都只做"尽力而为"：解锁/重绑失败只记日志，**绝不影响登录本身**。
 """
 from __future__ import annotations
 
@@ -18,6 +26,7 @@ from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from ..authdb import get_pool
+from ..rag.llmstore import rebind_password, unlock_with_password
 from ..ww_logger import get_logger
 
 log = get_logger("auth")
@@ -89,8 +98,41 @@ async def login(username: str, password: str) -> dict:
         row = await cur.fetchone()
         if row is None or not verify_password(password, row["pw_hash"]):
             raise AuthError(status_code=401, detail="用户名或密码错误")
+
+    # 登录即解锁该用户的云端模型密钥（DEK），实现"下次登录自动连接"。
+    # 失败只记日志：尚未配置云模型 / 只用加密口令通道 / 密码与建密钥时不一致，
+    # 都不是登录失败的理由。
+    try:
+        await unlock_with_password(row["id"], password)
+    except Exception as exc:
+        log.warning("user=%s 登录时自动解锁云端密钥失败（忽略）：%s", row["id"], exc)
     return {"id": row["id"], "username": row["username"], "role": row["role"],
             "token": await create_token(row["id"])}
+
+
+async def change_password(user_id: int, old: str, new: str) -> None:
+    """改密码。**顺序敏感**：先用旧密码重绑云端密钥，再更新 pw_hash。
+
+    重绑失败不中断改密码（用户还能用加密口令通道解锁），但要留日志——
+    否则用户会困惑"为什么改完密码云端模型不生效了"。
+    """
+    if len(new) < 6:
+        raise AuthError(status_code=400, detail="新密码至少 6 位")
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT pw_hash FROM users WHERE id = %s", (user_id,))
+        row = await cur.fetchone()
+        if row is None or not verify_password(old, row["pw_hash"]):
+            raise AuthError(status_code=400, detail="原密码不正确")
+        try:
+            await rebind_password(user_id, old, new)
+        except Exception as exc:
+            log.warning("user=%s 改密码时重绑云端密钥失败（改用加密口令解锁即可）：%s",
+                        user_id, exc)
+        await conn.execute(
+            "UPDATE users SET pw_hash = %s WHERE id = %s", (hash_password(new), user_id)
+        )
+    log.info("user=%s 已修改密码", user_id)
 
 
 async def create_token(user_id: int) -> str:

@@ -28,7 +28,15 @@ class Settings(BaseSettings):
     # ---------- 日志设置 ----------
     LOG_LEVEL:str = "INFO"
     DEBUG:bool =True
-    
+
+    # ---------- 时区（时间工具 current_time 用） ----------
+    # 为什么单独配置：时间回答必须与服务端真实时钟一致，而容器/云主机的系统时区
+    # 常是 UTC——直接读系统本地时区会让「现在几点」答错 8 小时，且错得很自信。
+    # 取值是 IANA 名（zoneinfo 用）。Linux/Docker 有系统 tz 数据库；Windows 靠
+    # tzdata 包（uv.lock 里已随依赖装好）。取不到时 tools._local_now 回落系统本地
+    # 时区并在日志里告警，问答不中断。中国不实行夏令时，UTC+8 全年恒定。
+    TZ_NAME: str = "Asia/Shanghai"
+
     # ---------- PostgreSQL（唯一真源） ----------
     PG_HOST: str = "localhost"
     PG_PORT: int = 5432
@@ -91,11 +99,11 @@ class Settings(BaseSettings):
     CHAT_CLOUD_PRESENCE_PENALTY: float = 0.0
 
     # ---------- 凭证加密（用户 API-KEY 落库前加密）----------
-    # 用 Fernet 对称加密，密钥由本值派生。**留空 = 禁用云模型配置功能**（安全降级，
-    # 绝不明文存 key）。生产部署务必在 .env 里设一个长随机串，并且**不要改**——
-    # 改了旧密文就解不开了（视为未配置，用户需重填 key）。
-    SECRET_KEY: str = ""
-    SECRET_KEY_SALT: str = "wuwa-rag-llm-key-v1"   # 派生盐；与 SECRET_KEY 一起决定密钥
+    # **本服务不持有任何主密钥**：加密密钥由每个用户自己输入的「加密口令」+ 该用户
+    # 专属随机盐派生，派生结果只存在进程内存里（见 rag/llmstore.py）。
+    # → 因此这里没有任何环境变量要配；未解锁时云模型自动回落本地默认模型，
+    #   口令遗忘不可逆（只能删除配置重填 key），这是"服务端不持主密钥"的代价。
+    # 唯一依赖是可选包 `cryptography`，缺失时该功能整体降级（绝不明文存 key）。
     # SSRF：是否允许用户把云端 base_url 填成私网/环回地址（本地 Ollama/vLLM 需要）。
     # 默认 True（开发者自用是主流场景，预设里就有本地服务）；
     # 约束：公网部署或开放注册时必须设为 False，否则等于给注册用户开放内网探测能力。
@@ -180,18 +188,20 @@ class Settings(BaseSettings):
     # 多数落在 21~26s。原来 20s 会随机 ReadTimeout → 表现成「联网不可用」。
     QIANFAN_TIMEOUT: float = 45.0
 
-    # ---------- 情绪标签 + TTS 语音合成（默认关闭）----------
+    # ---------- 情绪标签 + TTS 语音合成 ----------
     # 需求：文本 LLM 生成答案时**顺带**打情绪标签，再由 TTS 用该情绪合成语音。
     # EMOTION_ENABLED=False 时不打标签（省一次 8b 调用，问答零影响）；
     # TTS_ENABLED=False 或 DASHSCOPE_API_KEY 为空时 /tts 直接返回「功能未开启」，
     # 不报错、不影响问答主链。dashscope SDK 为可选依赖（extras: tts），缺失同样降级。
     EMOTION_ENABLED: bool = True
-    TTS_ENABLED: bool = False          # 总开关：先预留，音色与计费确认后再开
+    TTS_ENABLED: bool = True           # 2026-09-30 开启；未配 key/WorkspaceId 时自动降级
     # 与 QIANFAN_API_KEY 同一个坑同一个解法：用 AliasChoices 让 .env 与进程环境都能配。
     DASHSCOPE_API_KEY: str = Field(
         "", validation_alias=AliasChoices("DASHSCOPE_API_KEY", "BAILIAN_API_KEY")
     )
-    TTS_MODEL: str = "qwen-audio-3.0-tts-flash"   # 非实时合成；plus 音质更好但音色名不同
+    # 非实时合成（HTTP），qwen-audio-3.1-tts-flash：2026-09-19 发布，支持指令控制
+    # 与情感/富语言标签，单价 输入 1.5 元 + 输出 12 元 / 百万 token。
+    TTS_MODEL: str = "qwen-audio-3.1-tts-flash"
     # 注意：Qwen-Audio-TTS / CosyVoice 的端点不是 dashscope.aliyuncs.com，而是带
     # WorkspaceId 的 maas 域名，且仅北京地域可用（官方文档「非实时语音合成」2026-09 版）。
     # 端点不可与 Qwen-TTS 系列混用。WorkspaceId 在百炼控制台「业务空间」里查。
@@ -202,9 +212,26 @@ class Settings(BaseSettings):
         "https://{workspace_id}.cn-beijing.maas.aliyuncs.com"
         "/api/v1/services/audio/tts/SpeechSynthesizer"
     )
-    # 注意：音色与模型版本绑定（flash 对应 longanhuan_v3.6 一类），换模型必须同步换音色。
-    # 音色方案待定，暂取官方文档 flash 型号的示例值占位，可由 TTS_VOICE 覆盖。
-    TTS_VOICE: str = "longanhuan_v3.6"
+    # ⚠️ 音色与模型版本**强绑定**，跨模型混用返回 InvalidParameter（如
+    # `[cosyvoice:]Engine error: TTS speak operation failed`）。3.1 这一代音色一律带
+    # `_v3.1` 后缀；3.0 的 `longanhuan_v3.6` 之类填进来会直接失败。
+    # 默认取「龙安灵希_v3.1」：官方标注「可爱甜美音 · 社交陪伴（精品中文）」，
+    # 与爱弥斯「爱笑、话多、活泼亲切的少女」人设最对口。
+    # 备选（同属 3.1 且更贴少女感，改这一个值即可试听对比）：
+    #   longhua_v3.1        龙华      元气甜美 · 社交陪伴
+    #   qiaoxiaojiao_v3.1   乔小娇    俏丽可爱
+    #   xiaxiaochen_v3.1    夏小晨    元气明亮
+    #   xuxiaoqiao_v3.1     徐小俏    自然俏皮
+    #   yuxiaoyun_v3.1      于小云    元气亲切自然
+    TTS_VOICE: str = "longanlingxi_v3.1"
+    # 指令控制：官方「用自然语言控制音调/语速/情感/音色特点」，系统音色可传任意指令。
+    # 长度上限 **100 字符**（汉字按 2 字符计！故实际约 50 个汉字），超长会被服务端拒绝。
+    # 铁律：**只描述声音特质，不写「模仿某某」** —— 官方明确说明模型不支持模仿特定
+    # 人物，且真人/角色配音的模仿可能涉及版权风险。故这里描述的是「活泼爱笑的少女感」
+    #（爱弥斯人设的听感），而非指向任何具体作品角色。
+    TTS_INSTRUCTION: str = (
+        "用活泼开朗、带笑意的少女语气，语速偏快、语调轻快上扬，像个爱笑爱聊天的女孩。"
+    )
     TTS_FORMAT: str = "mp3"            # 前端 <audio> 直接可播；wav 体积大约 10 倍
     TTS_SAMPLE_RATE: int = 24000       # 官方示例值
     TTS_TIMEOUT: float = 30.0

@@ -8,7 +8,8 @@
 }
 
 .auth-card {
-  width: min(380px, 92vw);
+  /* 同 Layout.css：zoom 不缩放 vw，两边都除以 --ui-zoom 保持视觉宽度不变 */
+  width: min(380px, calc(92vw / var(--ui-zoom, 1)));
   padding: 34px 32px 26px;
   border-radius: var(--radius-lg);
   display: flex;

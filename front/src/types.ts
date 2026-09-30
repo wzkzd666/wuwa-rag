@@ -28,19 +28,44 @@ export interface AskMeta {
   sources?: string[]
   /** 后端检测到模型复读并截断了答案 */
   truncated?: boolean
-  /** 情绪标签（TTS 用）；后端 TTS 未开启时为空串 */
+  /** 情绪标签（TTS 用）；语音服务不可用（未配置密钥/业务空间）时为空串 */
   emotion?: string
 }
 
-/** 一个会话 */
-export interface Conversation {
-  id: string
-  /** 与后端对应的 thread_id */
-  threadId: string
+/**
+ * 一个会话的**摘要**（GET /conversations 返回）。
+ *
+ * 会话历史自 2026-09-30 起存在服务端 PG（见后端 conversations.py），按登录用户隔离，
+ * 所以前端不再保存会话正文，只保存这份摘要 + 当前打开的那个会话的消息。
+ * `thread_id` 同时也是 LangGraph 的多轮记忆键——服务端会加 `u<user_id>:` 前缀再落库，
+ * 前端拿到/回传的永远是这里的短 id。
+ */
+export interface ConversationMeta {
+  thread_id: string
   title: string
-  messages: Message[]
-  createdAt: number
-  updatedAt: number
+  message_count: number
+  created_at: string
+  updated_at: string
+  /** 最后一条消息的角色（'' 表示空会话），供列表做预览文案 */
+  last_role: string
+  last_content: string
+}
+
+/** GET /conversations/{tid} 里的一条消息（服务端 id 是数字，本地流式期间用 uid 字符串） */
+export interface StoredMessage {
+  id: number
+  role: 'user' | 'assistant'
+  content: string
+  meta: AskMeta
+  created_at: string
+}
+
+/** GET /conversations/{tid} 返回体 */
+export interface ConversationDetail {
+  thread_id: string
+  title: string
+  created_at: string
+  messages: StoredMessage[]
 }
 
 /** /ask 非流式返回体 */
@@ -55,7 +80,7 @@ export interface AskOut {
   sources?: string[]
   /** 后端复读兜底触发、答案被截断过 */
   truncated?: boolean
-  /** 情绪标签（TTS 用）；后端 TTS 未开启时为空串 */
+  /** 情绪标签（TTS 用）；语音服务不可用（未配置密钥/业务空间）时为空串 */
   emotion?: string
 }
 
@@ -85,8 +110,16 @@ export type StreamEvent =
       sources?: string[]
       /** 后端复读兜底触发：answer 是截断后的权威全文，前端须用它覆盖已流式渲染的内容 */
       truncated?: boolean
-      /** 情绪标签（TTS 用）；后端 TTS 未开启时为空串 */
+      /** 情绪标签（TTS 用）；语音服务不可用（未配置密钥/业务空间）时为空串 */
       emotion?: string
+      /**
+       * 本轮所属的会话 id。
+       *
+       * 会话现在由**服务端**创建：草稿态（还没绑定会话）提问时前端传 thread_id=null，
+       * 后端建好会话并把 id 放在 done 事件里回传，前端靠它认领——所以这个字段必须有，
+       * 否则「新建对话」后的第一句问答，前端永远不知道自己属于哪个会话。
+       */
+      thread_id?: string
     }
 
 /** 一次 ingest 提交记录 */
@@ -159,8 +192,8 @@ export interface Settings {
   /** 自定义背景的模糊半径 0~16px */
   bgBlur: number
 
-  // ---------- 语音（2026-09-29 新增）----------
-  /** 前端语音开关：关闭则不显示播放按钮、不调 /tts（后端还有一道 TTS_ENABLED 总开关） */
+  // ---------- 语音朗读（Qwen-Audio-3.1-TTS-Flash）----------
+  /** 前端语音开关：关闭则不显示朗读按钮、不调 /tts（后端另有一道 TTS_ENABLED 总开关） */
   ttsEnabled: boolean
 }
 
@@ -183,8 +216,14 @@ export interface LlmConfig {
   /** 形如 `sk-****abcd`，仅供用户认出是哪把 key */
   key_hint: string
   updated_at?: string | null
-  /** 后端未配 SECRET_KEY 时为 false：此时保存会被拒绝，界面需提示 */
-  crypto_available: boolean
+  /** 后端加密库（cryptography）是否可用；false 时保存会被拒绝，界面需提示 */
+  crypto_ready: boolean
+  /** 本会话是否已解锁。false = 云端模型不生效，自动回落本地默认 agent */
+  unlocked: boolean
+  /** 是否已绑定登录密码通道：true = 下次登录自动解密，无需任何额外输入 */
+  auto_unlock: boolean
+  /** 是否已绑定加密口令通道（独立于登录密码的兜底通道） */
+  pp_bound: boolean
   /** 是否由该云端模型兼任情绪判定（false = 走本地 qwen3:8b） */
   emotion_enabled: boolean
   /** 本地默认 agent（回落时用），如 aemeath */
@@ -201,6 +240,10 @@ export interface LlmConfigIn {
   enabled: boolean
   /** true = 用该模型兼任情绪判定（默认 false：走本地 qwen3:8b） */
   emotion_enabled: boolean
+  /** 登录密码：未解锁时用它解锁；已解锁时传它会补建「登录自动解锁」通道 */
+  password: string
+  /** 加密口令（兜底通道）：首次保存时可一并设置，服务端不保存 */
+  passphrase: string
 }
 
 /** POST /llm/config/test：连通性测试 + 可选模型列表（模型自选） */
@@ -210,18 +253,73 @@ export interface LlmTestOut {
   models: string[]
 }
 
-// ---------- TTS 语音合成（2026-09-29）----------
+// ---------- TTS 语音合成（2026-09-30：密钥改为用户自持）----------
+
+/** 生效来源：user=用户自持凭据 / global=部署者 .env 兜底 / none=都没配 */
+export type TtsSource = "user" | "global" | "none"
 
 /** GET /tts/status */
 export interface TtsStatus {
   enabled: boolean
-  /** 三重开关全满足才为 true（未开启 / 缺 key / 缺 WorkspaceId 都为 false） */
+  /** 当前用户此刻能否合成（凭据齐全 + 已解锁 + 未被停用） */
   ready: boolean
+  /** 未就绪时的可读原因（直接展示给用户，含「缺什么 / 该做什么」） */
   reason: string
+  /** 生效来源 */
+  source: TtsSource
+  /** 当前**实际生效**的模型 id */
   model: string
+  /** 模型中文展示名，如 Qwen-Audio-3.1-TTS-Flash */
+  model_label: string
+  /** 当前**实际生效**的音色 id（内部值，如 longanlingxi_v3.1） */
   voice: string
+  /** 音色中文展示名，如「龙安灵希 · 可爱甜美（社交陪伴）」 */
+  voice_label: string
   /** 后端支持的情绪枚举，界面提示用 */
   emotions: string[]
+  /** 该用户是否已保存过自己的凭据 */
+  configured: boolean
+  /** 本会话是否已解锁（进程重启后需重新登录/输入口令） */
+  unlocked: boolean
+  /** 可选音色（3.1 音色与模型强绑定，填错版本会 400） */
+  voices: { id: string; label: string }[]
+  /** 代码默认值：输入框用 placeholder 提示「留空则用默认」 */
+  defaults: {
+    model: string
+    voice: string
+    voice_label: string
+    instruction: string
+  }
+}
+
+/** GET /tts/config：用户自持凭据（**只回掩码**，任何情况都不回显明文 key） */
+export interface TtsConfigOut {
+  configured: boolean
+  /** 掩码 key，如 sk-****wxyz */
+  key_hint: string
+  workspace_id: string
+  model: string
+  voice: string
+  instruction: string
+  crypto_ready: boolean
+  unlocked: boolean
+  auto_unlock: boolean
+  pp_bound: boolean
+}
+
+/** PUT /tts/config 入参：api_key 留空表示保留原 key。
+ *  其余字段是**整体替换**语义，留空即回落代码默认值。 */
+export interface TtsConfigIn {
+  api_key: string
+  workspace_id: string
+  model: string
+  voice: string
+  /** 指令控制（音色性格/语速基调），留空则用默认值 */
+  instruction: string
+  /** 登录密码：未解锁时用它解锁；已解锁时传它会补建「登录自动解锁」通道 */
+  password: string
+  /** 加密口令（兜底通道）：首次保存时可一并设置，服务端不保存 */
+  passphrase: string
 }
 
 /** POST /tts：未开启时 ok=false + 可读 error（200 而非 503，属预留未开而非故障） */

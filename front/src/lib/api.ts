@@ -1,6 +1,6 @@
 import type {
-  AskOut, IngestOut, IngestStatus, LlmConfig, LlmConfigIn, LlmTestOut,
-  ProviderPreset, StreamEvent, TtsOut, TtsStatus, UserFact,
+  AskOut, ConversationDetail, ConversationMeta, IngestOut, IngestStatus, LlmConfig, LlmConfigIn,
+  LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus, UserFact,
 } from '../types'
 
 /**
@@ -111,8 +111,10 @@ export function ingestStatus(character: string, base?: string): Promise<IngestSt
 }
 
 // ---------- 用户自定义云端模型（2026-09-29）----------
+// 密钥体系：加密密钥由**用户自持的加密口令**派生，只活在服务端进程内存里。
+// 进程重启 = 上锁 → 需重新 unlock；未解锁期间云端模型自动回落本地默认 agent。
 
-/** PUT /llm/config 返回：保存后的概要。⚠️ 不含 crypto_available 等字段，
+/** PUT /llm/config 返回：保存后的概要。⚠️ 不含 unlocked 等完整状态字段，
  *  需要完整状态请重新 GET /llm/config（保存后界面就是这么刷新的）。 */
 export interface LlmSaveOut {
   configured: boolean
@@ -121,6 +123,33 @@ export interface LlmSaveOut {
   base_url: string
   model: string
   key_hint: string
+  unlocked?: boolean
+}
+
+/** POST /llm/unlock —— 解锁本次会话的密钥。两条通道任选：
+ *  password（登录密码，自动解锁通道）或 passphrase（加密口令，兜底通道）。
+ *  正常登录时后端已自动解锁；只有进程重启后仍持旧 token、或当初只用口令建密钥时才需手调。 */
+export function unlockLlm(cred: { password?: string; passphrase?: string }, base?: string):
+  Promise<{ ok: boolean; unlocked: boolean }> {
+  return request('/llm/unlock', { method: 'POST', body: JSON.stringify(cred) }, base)
+}
+
+/** POST /llm/lock —— 丢弃内存里的派生密钥，之后回落本地默认 agent */
+export function lockLlm(base?: string): Promise<{ ok: boolean; unlocked: boolean }> {
+  return request('/llm/lock', { method: 'POST' }, base)
+}
+
+/** POST /llm/passphrase —— 更换加密口令（必须提供原口令，服务端不持有主密钥） */
+export function changeLlmPassphrase(oldPp: string, newPp: string, base?: string):
+  Promise<{ ok: boolean; unlocked: boolean }> {
+  return request('/llm/passphrase', { method: 'POST', body: JSON.stringify({ old: oldPp, new: newPp }) }, base)
+}
+
+/** POST /auth/password —— 改登录密码。后端会先用旧密码重绑云端密钥再更新哈希，
+ *  所以改完密码已存的 API Key 依然能自动解开。 */
+export function changePassword(oldPw: string, newPw: string, base?: string):
+  Promise<{ ok: boolean }> {
+  return request('/auth/password', { method: 'POST', body: JSON.stringify({ old: oldPw, new: newPw }) }, base)
 }
 
 /** GET /llm/providers —— provider 预设列表（选完自动带出 base_url） */
@@ -133,7 +162,8 @@ export function getLlmConfig(base?: string): Promise<LlmConfig> {
   return request('/llm/config', { method: 'GET' }, base)
 }
 
-/** PUT /llm/config —— 保存配置（api_key 留空表示保留已存的 key） */
+/** PUT /llm/config —— 保存配置（api_key 留空表示保留已存的 key）。
+ *  passphrase：会话尚未解锁时必填（首次建立口令 / 之后解锁）。 */
 export function saveLlmConfig(cfg: LlmConfigIn, base?: string): Promise<LlmSaveOut> {
   return request('/llm/config', { method: 'PUT', body: JSON.stringify(cfg) }, base)
 }
@@ -145,45 +175,121 @@ export function testLlmConfig(cfg: LlmConfigIn, base?: string): Promise<LlmTestO
   return request('/llm/config/test', { method: 'POST', body: JSON.stringify(cfg) }, base)
 }
 
+/** POST /llm/enabled —— 只切换「本地默认 / 云端自定义」，凭据原样保留。
+ *  这是「切回本地」唯一能落库的入口：不走保存表单（凭据不需要重填），
+ *  也不需要口令/解锁。返回启用后的真实状态，`configured=false` 表示没配置过。 */
+export function setLlmEnabled(
+  enabled: boolean, base?: string,
+): Promise<{ ok: boolean; enabled: boolean; configured: boolean; unlocked: boolean }> {
+  return request('/llm/enabled', { method: 'POST', body: JSON.stringify({ enabled }) }, base)
+}
+
 /** DELETE /llm/config —— 删除配置（含密文），之后回落本地默认 agent */
 export function deleteLlmConfig(base?: string): Promise<{ ok: boolean; deleted: boolean }> {
   return request('/llm/config', { method: 'DELETE' }, base)
 }
 
-// ---------- TTS 语音合成（2026-09-29，后端默认关闭）----------
+// ---------- TTS 语音合成（Qwen-Audio-3.1-TTS-Flash，密钥由用户自持）----------
 
-/** GET /tts/status —— 三重开关是否全满足；未就绪时 reason 给可读原因 */
+/** GET /tts/status —— 当前用户能否朗读、不可用原因、生效模型/音色与默认值 */
 export function ttsStatus(base?: string): Promise<TtsStatus> {
   return request('/tts/status', { method: 'GET' }, base)
 }
 
 /** POST /tts —— 合成语音，返回 24h 有效的音频 URL。
- *  ⚠️ 未开启/配置不全时后端返回 **200 + ok=false**（预留未开不是服务故障），
- *  所以这里不能只看 HTTP 状态码，必须检查 ok 字段。 */
+ *  ⚠️ 服务未配置时后端返回 **200 + ok=false**（配置缺失不是服务故障），
+ *  所以这里不能只看 HTTP 状态码，必须检查 ok 字段并把 error 提示给用户。 */
 export function tts(text: string, emotion: string, base?: string): Promise<TtsOut> {
   return request('/tts', { method: 'POST', body: JSON.stringify({ text, emotion }) }, base)
 }
 
+/** GET /tts/config —— 读自己的语音凭据。后端只返回掩码，任何情况都拿不到明文 key */
+export function getTtsConfig(base?: string): Promise<TtsConfigOut> {
+  return request('/tts/config', { method: 'GET' }, base)
+}
+
+/** PUT /tts/config —— 保存语音凭据（api_key 加密落库）。
+ *  api_key 留空表示保留已存的 key；未解锁时 password / passphrase 至少给一个。 */
+export function saveTtsConfig(cfg: TtsConfigIn, base?: string): Promise<TtsConfigOut> {
+  return request('/tts/config', { method: 'PUT', body: JSON.stringify(cfg) }, base)
+}
+
+/** DELETE /tts/config —— 删除自己的语音凭据（含密文），之后回落全局兜底或不可用 */
+export function deleteTtsConfig(base?: string): Promise<{ ok: boolean; deleted: boolean }> {
+  return request('/tts/config', { method: 'DELETE' }, base)
+}
+
+// ---------- 会话历史（服务端存，按登录用户隔离）----------
+// 会话与消息的服务端真源见后端 conversations.py；前端不再把会话存 localStorage
+// （那正是「换个账号登录就看到上一个人的历史」的根因）。
+
+/** GET /conversations —— 当前用户的会话列表（不含正文，只带最后一条预览）。
+ *  q 非空时按标题**或任意一条消息正文**模糊搜索（转录在服务端，只能在那搜）。 */
+export function listConversations(q = '', base?: string): Promise<{ conversations: ConversationMeta[] }> {
+  const qs = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''
+  return request(`/conversations${qs}`, { method: 'GET' }, base)
+}
+
+/** GET /conversations/{tid} —— 单个会话 + 全部消息。别人的会话一律 404 */
+export function getConversation(threadId: string, base?: string): Promise<ConversationDetail> {
+  return request(`/conversations/${encodeURIComponent(threadId)}`, { method: 'GET' }, base)
+}
+
+/** PATCH /conversations/{tid} —— 重命名 */
+export function renameConversation(threadId: string, title: string, base?: string):
+  Promise<{ ok: boolean }> {
+  return request(
+    `/conversations/${encodeURIComponent(threadId)}`,
+    { method: 'PATCH', body: JSON.stringify({ title }) },
+    base,
+  )
+}
+
+/** DELETE /conversations/{tid} —— 删除会话（连带 LangGraph 里该 thread 的记忆） */
+export function deleteConversation(threadId: string, base?: string): Promise<{ ok: boolean }> {
+  return request(`/conversations/${encodeURIComponent(threadId)}`, { method: 'DELETE' }, base)
+}
+
+/** DELETE /conversations —— 清空当前用户全部会话 */
+export function clearConversations(base?: string): Promise<{ ok: boolean; deleted: number }> {
+  return request('/conversations', { method: 'DELETE' }, base)
+}
+
 /**
- * POST /ask/stream —— 服务端发送事件（SSE）。
- * 后端逐行发 `data: {json}\n\n`。这里用 fetch + ReadableStream 手动解析，
- * 因为原生 EventSource 不支持 POST 与自定义 body。
+ * POST /conversations/{tid}/regenerate —— 重新生成最后一条回答（SSE）。
  *
- * onEvent 每收到一个事件回调一次；返回一个可用于中断的 AbortController。
+ * 注意：这里**不传**要重答哪一条。服务端一律重答最后一句用户提问，而界面上
+ * 只在最后一条助手消息上给出「重新生成」按钮，两者天然一致。
+ * 服务端会先删掉「最后一句问 + 它的答」的转录、并把模型侧记忆回放成删完之后的窗口，
+ * 否则模型记得自己刚被删掉的那个回答，重新生成大概率吐出同一段话。
  */
-export function askStream(
-  question: string,
-  threadId: string | null,
+export function regenerateStream(
+  threadId: string,
+  onEvent: (evt: StreamEvent) => void,
+  base?: string,
+): { controller: AbortController; done: Promise<void> } {
+  return sseStream(`/conversations/${encodeURIComponent(threadId)}/regenerate`, null, onEvent, base)
+}
+
+/**
+ * 把一次 SSE 请求包成「逐事件回调 + 可中断」。
+ *
+ * 用 fetch + ReadableStream 手动解析（原生 EventSource 不支持 POST 与自定义 body），
+ * 后端逐行发 `data: {json}\n\n`。
+ */
+function sseStream(
+  path: string,
+  body: unknown,
   onEvent: (evt: StreamEvent) => void,
   base?: string,
 ): { controller: AbortController; done: Promise<void> } {
   const controller = new AbortController()
 
   const done = (async () => {
-    const res = await fetch(`${resolveBase(base)}/ask/stream`, {
+    const res = await fetch(`${resolveBase(base)}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...authHeaders() },
-      body: JSON.stringify({ question, thread_id: threadId }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     })
     if (res.status === 401) throw new UnauthorizedError()
@@ -225,4 +331,19 @@ export function askStream(
   })()
 
   return { controller, done }
+}
+
+/**
+ * POST /ask/stream —— 流式问答。
+ *
+ * threadId 传 null = 「这是个还没有会话的新问题」：服务端会建好会话，并把 id 放在
+ * done 事件里回传（见 StreamEvent 的 thread_id），前端据此认领。
+ */
+export function askStream(
+  question: string,
+  threadId: string | null,
+  onEvent: (evt: StreamEvent) => void,
+  base?: string,
+): { controller: AbortController; done: Promise<void> } {
+  return sseStream('/ask/stream', { question, thread_id: threadId }, onEvent, base)
 }

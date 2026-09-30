@@ -165,7 +165,7 @@
 .chat-welcome {
   max-width: 720px;
   margin: 0 auto;
-  padding: 8vh 24px 24px;
+  padding: calc(8vh / var(--ui-zoom, 1)) 24px 24px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -183,6 +183,25 @@
   margin-bottom: 18px;
   overflow: hidden;
   animation: fade-up 0.5s ease both;
+}
+
+/* 标题块的底色面板。
+   为什么必须包一层：自定义背景图下，气泡以外的文字**没有底色**，浅灰色副标题
+   压在照片上基本读不出来（用户反馈「白框外的字不清晰」）。整块收进带底色的
+   面板里，与气泡同一套 token，切换主题/换背景都不需要再调。 */
+.welcome-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 560px;      /* 与下方 .example-grid 同宽，视觉上对齐成一列 */
+  padding: 26px 30px 24px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--bg-surface);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-1);
+  animation: fade-up 0.45s ease both;
 }
 .welcome-logo img {
   width: 100%;
@@ -270,7 +289,7 @@
     display: none;
   }
   .chat-welcome {
-    padding-top: 5vh;
+    padding-top: calc(5vh / var(--ui-zoom, 1));
   }
   .chat-welcome h1 {
     font-size: 22px;

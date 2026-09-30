@@ -72,19 +72,34 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 默认走本地 Ollama `aemeath`；也可在设置页配置自己的 OpenAI 兼容 API 用于答题：
 
-- **加密落库**：`api_key` 用 Fernet 对称加密（`SECRET_KEY` 经 PBKDF2 派生密钥），读接口只返回掩码，日志只记指纹
-- **`SECRET_KEY` 留空 = 功能整体关闭**（绝不退化成明文存储）；设定后不可再改，改动会导致旧密文解不开、按未配置处理
+- **加密落盘 + 登录自动解锁（双层密钥 DEK/KEK）**：API-KEY 由随机 DEK 加密落库，DEK 再分别用「登录密码」与「加密口令」派生出的两把 KEK 各加密一份 —— 既能**下次登录自动连上**（用户零额外输入），又保证服务端不持有任何主密钥
+
+  ```
+  api_key ──DEK─────> api_key_enc     （DEK = 随机数据密钥，只加密数据）
+  DEK     ──KEK_pwd─> dek_by_pwd      （KEK_pwd = 登录密码派生 → 登录即自动解锁）
+  DEK     ──KEK_pp──> dek_by_pp       （KEK_pp  = 加密口令派生 → 独立兜底通道）
+  ```
+  - **不泄密**：库里只有密文与 scrypt 单向哈希，既没有登录密码也没有加密口令；解出的 DEK 只在进程内存里，不落库、不写日志、不进 LangGraph state（checkpointer 会把它写进 PG，进 state 等于落库）。`.env` 无需任何密钥配置，开源 clone 即用
+  - **改密码自动重绑**：`POST /auth/password` 会先用旧密码解出 DEK、再用新密码重新加密，改完已存的 Key 依然能自动解开（顺序颠倒会把 Key 永久锁死）
+  - **解不开即回落本地**：未解锁时静默走本地默认 agent，绝不退化成明文存储，也不阻塞问答
+  - 唯一依赖是可选包 `cryptography`，缺失时该功能整体降级
+- 读接口只返回掩码，日志只记指纹，任何情况下都不回显明文 key
 - **tool 模型（抽取 / 摘要 / 校验）永远走本地 qwen3:8b**，不跟随 provider：结构化任务要稳定 JSON，也不该把个人密钥花在内部任务上
 - 云端模型不认识爱弥斯，人设由 `rag/persona.py` 以 `SystemMessage` 注入（本地路径绝不可传 system，会覆盖 Modelfile 内置人设）
 - ⚠️ 公网部署或开放注册时必须设 `CLOUD_ALLOW_PRIVATE_NET=false`，否则等于把内网探测口开放给注册用户
 
-### 语音朗读 + 情绪标签（预留接口，默认关闭）
+### 语音朗读 + 情绪标签
 
 - **情绪标签**：答案生成后判定语气（cheerful / amazed / serious / empathetic / playful），映射到 Qwen-Audio-TTS 的官方控制标签；判定失败一律回落默认语气，不阻塞问答主链
   - **判定模型的分工**：默认由本地 qwen3:8b 承担（零远程依赖、不消耗个人额度）；配了自定义云端 LLM 的用户可在设置页选择让自己的模型兼任，此时复用本轮答题的客户端，不额外建连
-- **TTS 合成**：`rag/tts.py` 用 httpx 直连 Qwen-Audio-3.0-TTS（北京地域 + 业务空间 ID），返回 24h 有效的音频 URL
+- **TTS 合成**：`rag/tts.py` 用 httpx 直连 **Qwen-Audio-3.1-TTS-Flash**（北京地域 + 业务空间 ID），返回 24h 有效的音频 URL
+  - **指令控制**：以 `instruction` 参数描述音色性格与语速基调（如「活泼开朗、带笑意的少女语气」），官方上限 100 字符且**汉字按 2 字计**，超长在本地截断后再发送
+  - **音色适配**：默认 `longanlingxi_v3.1`（龙安灵希 · 可爱甜美 · 社交陪伴），贴合爱弥斯爱笑、话多的少女感。⚠️ 音色与模型**强绑定**，3.1 只认带 `_v3.1` 后缀的音色，填旧版音色名会返回 `InvalidParameter`
 - **朗读稿清洗**：送合成前把 markdown 转成纯文本（表格分隔符转顿号、去掉标题井号 / 列表符号 / 链接语法），并再剥一次引用标记，避免把版式符号念出来
-- **三重开关**：`TTS_ENABLED`（默认 false）、`DASHSCOPE_API_KEY`、`TTS_WORKSPACE_ID`，任一缺失时 `/tts` 返回 `200 + ok=false` 与可读原因——预留未开不是服务故障，不报 5xx
+- **密钥由用户自持**（开源分发的关键设计）：部署者**不需要**替所有用户垫额度。每个用户在设置页填自己的百炼 API Key + 业务空间 ID，密文入库、只回掩码 —— 与「云端自定义模型」共用同一套 DEK/KEK 加密体系，因此**登录自动解锁 / 改密码自动重绑 / 加密口令兜底**三条能力直接继承，用户只需维护一套口令
+  - 生效优先级：**用户自持凭据 > 部署者 `.env` 兜底**。自部署者想统一配一份给所有人用时，才填下面那几个 `TTS_*` 环境变量
+  - `TTS_ENABLED=false` 是**全功能总闸**，关掉后连用户自持的凭据也不生效（部署者仍掌握「这个功能到底开不开」）
+- **可用性状态**：未配置或凭据异常时，`/tts` 返回 `200 + ok=false` 与可读原因（说明缺什么、该做什么，如「重新登录即可自动恢复」）——配置缺失不是服务故障，不报 5xx；设置页「语音合成」卡以「已就绪 / 未就绪」徽章展示当前生效来源、音色与合成模型
 
 ### 多轮上下文：追问改写（零 LLM 锚点 + 滚动摘要）
 
@@ -288,16 +303,19 @@ S3_ACCESS_KEY=...
 S3_SECRET_KEY=...
 QIANFAN_API_KEY=...      # 留空 = 联网兜底整体关闭，优雅降级不发外部请求
 
-# 可选：用户自定义云端 LLM（API-KEY 加密落库的前提）
-SECRET_KEY=...           # 留空 = 该功能整体关闭；设定后不要再改，改动会使旧密文失效
+# 可选：用户自定义云端 LLM
+# 无需任何密钥配置 —— 加密密钥由用户的登录密码/加密口令派生，服务端不保存
+CLOUD_ALLOW_PRIVATE_NET=true   # 公网部署/开放注册时必须设为 false（防内网探测）
 
-# 可选：语音朗读（当前阶段仅预留接口，保持 TTS_ENABLED=false 即可）
-TTS_ENABLED=false
-TTS_MODEL=qwen-audio-3.0-tts-flash
-TTS_VOICE=longanhuan_v3.6
-TTS_WORKSPACE_ID=...     # 阿里云百炼「业务空间」ID，拼端点必需
-DASHSCOPE_API_KEY=...    # 必须与上面同一个北京地域业务空间
-EMOTION_ENABLED=true     # 情绪标签；关闭则语音统一用默认语气
+# 可选：语音朗读（Qwen-Audio-3.1-TTS-Flash，北京地域）
+# 密钥由**用户自持**：留空下面两项时，用户在设置页填自己的凭据即可，问答不受影响。
+# 这两项只作「部署者统一配一份给所有人用」的兜底 —— 用户自持的凭据永远优先。
+TTS_ENABLED=true              # 全功能总闸；false 则连用户自持的凭据也不生效
+TTS_MODEL=qwen-audio-3.1-tts-flash
+TTS_VOICE=longanlingxi_v3.1   # 龙安灵希·可爱甜美；⚠️ 3.1 只认 _v3.1 后缀音色
+TTS_WORKSPACE_ID=             # 百炼「业务空间」ID，拼端点必需（可留空，由用户自填）
+DASHSCOPE_API_KEY=            # 必须与上面同一个北京地域业务空间（可留空，由用户自填）
+EMOTION_ENABLED=true          # 情绪标签；关闭则语音统一用默认语气
 ```
 
 ### 3. 一键启动（Windows）
@@ -350,8 +368,11 @@ uv run ruff check src                    # lint（line-length=100）
 | `POST /auth/register` `POST /auth/login` | 公开 | 注册 / 登录（Bearer token） |
 | `POST /ask` | 登录 | 同步问答 |
 | `POST /ask/stream` | 登录 | SSE 流式问答（含 stage 进度事件） |
-| `GET /tts/status` `POST /tts` | 登录 | 语音可用性 / 文本转语音（默认关闭） |
+| `GET /tts/status` `POST /tts` | 登录 | 语音可用性与合成（含生效来源、模型/音色展示名） |
+| `GET/PUT/DELETE /tts/config` | 登录 | **用户自持的语音凭据**（只读回掩码；与云端模型共用一套解锁口令） |
 | `GET /llm/config` `PUT /llm/config` `GET /llm/providers` | 登录 | 个人云端模型配置（只读回掩码） |
+| `POST /llm/unlock` `POST /llm/lock` `POST /llm/passphrase` | 登录 | 云端密钥：解锁（密码/口令）/ 锁定 / 换口令 |
+| `POST /auth/password` | 登录 | 改登录密码（自动重绑云端密钥） |
 | `POST /ingest` | 管理员 | 触发角色摄取 `{"character":"忌炎"}` |
 | `GET /ingest/status?character=xxx` | 管理员 | 查询五步流水线进度 |
 

@@ -22,6 +22,93 @@
   color: var(--accent-2);
 }
 
+/* ---------- 可折叠区块（Fold / InlineFold） ----------
+   目的：设置项越堆越长，高频区块要留在第一屏。标题整行可点，
+   收起后右侧状态标签（如「未就绪」）仍留在标题行，避免「藏起来就得逐个点开找」。 */
+.set-head-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.set-head-row > :last-child {
+  margin-left: auto;      /* aside 状态标签（可选）贴右 */
+}
+.set-h-btn {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.set-h-btn:hover {
+  color: var(--accent);
+}
+/* 无 aside 时按钮独占一行，此时右对齐的箭头才靠得住 */
+.set-h-btn .set-caret {
+  margin-left: auto;
+}
+.set-caret {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.set-caret-open {
+  transform: rotate(180deg);
+}
+/* 收起态：标题那行的下边距收掉，卡片更紧凑 */
+.set-folded {
+  padding-bottom: 16px;
+}
+.set-folded .set-h-btn {
+  margin-bottom: 0;
+}
+.set-fold-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.55;
+  margin-top: 6px;
+}
+/* 当前生效状态：比说明文字高一档，用于「作答模型」这类要看结果的项 */
+.set-status {
+  color: var(--text-secondary) !important;
+}
+
+.set-inline-fold {
+  margin: 10px 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  padding: 2px 12px;
+}
+.set-inline-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+.set-inline-btn:hover {
+  color: var(--text-primary);
+}
+/* 折叠体内部的行去掉最后一条分隔线：外层已经有边框了，再画一条会显脏 */
+.set-inline-body > .set-row:last-child {
+  border-bottom: none;
+  padding-bottom: 8px;
+}
+
 .set-row {
   display: flex;
   align-items: center;

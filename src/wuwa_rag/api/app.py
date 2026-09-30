@@ -5,11 +5,16 @@
   请求带 `Authorization: Bearer <token>`。/ask、/ask/stream 登录即可；/ingest* 管理员专属。
 - 画像（rag/profile.py）：user_facts 表落地——问答后异步抽「稳定偏好事实」入库，
   下次提问取活跃事实注入生成 prompt（个性化）；/profile 查自己的、可软删单条。
+- 会话历史（conversations.py + /conversations*）：转录落 PG，**按用户隔离**。
+  thread_id 是客户端传的，落到 checkpointer 前一律加 `u<user_id>:` 前缀——checkpointer
+  只按 thread_id 建键、没有用户维度，不加前缀就等于「谁猜到别人的会话 id
+  就能读到别人的多轮记忆」。
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
 
@@ -17,6 +22,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from .. import conversations as conv
 from ..authdb import close_pool, ensure_schema
 from ..config import get_settings
 from ..rag import llmstore
@@ -32,7 +38,8 @@ from ..rag.profile import (
     save_facts,
     soft_delete_fact,
 )
-from ..rag.tts import synthesize, tts_ready
+from ..rag.tts import MODEL_LABEL, VOICE_LABELS, synthesize, voice_label
+from ..rag.tts import resolve as tts_resolve
 from ..worker import PIPELINE_STEPS, STEP_LABELS, build_pipeline, get_progress
 from ..ww_logger import get_logger
 from . import auth as authn
@@ -44,6 +51,7 @@ log = get_logger("app")
 async def lifespan(app: FastAPI):
     await get_checkpointer()
     await ensure_schema()   # 幂等建鉴权表 + 种子 admin/123456（见 pgsql/002_auth.sql）
+    await conv.ensure_schema()       # 幂等建会话转录表（见 pgsql/003_conversation_scope.sql）
     await llmstore.ensure_schema()   # 幂等建 user_llm_configs（云端模型配置，含加密 key）
     yield
     await close_checkpointer()
@@ -80,11 +88,16 @@ class AskOut(BaseModel):
     docs: int = 0
     sources: list[str] = []   # 引用来源面包屑（角色 › 模块 › 组件），去重保序
     truncated: bool = False   # 复读兜底触发、答案被截断过
-    emotion: str = ""         # 情绪标签（TTS 用；TTS 未开启时为空串）
+    emotion: str = ""         # 情绪标签（TTS 用；语音服务不可用时为空串）
 
 
 class IngestIn(BaseModel):
     character: str = Field(..., description="角色中文名，如 忌炎")
+
+
+class TitleIn(BaseModel):
+    """会话重命名。长度与 conversations.MAX_TITLE_CHARS 同量级，前端已截断。"""
+    title: str = Field(..., max_length=60, description="新标题")
 
 
 class TtsIn(BaseModel):
@@ -92,8 +105,31 @@ class TtsIn(BaseModel):
     emotion: str = Field("", description="情绪标签名；空则用默认 cheerful")
 
 
+class TtsConfigIn(BaseModel):
+    """用户自持的语音合成凭据（阿里云百炼 · 北京地域）。
+
+    与云端模型配置同一套加密体系（同一个 DEK）：`passphrase` 是用户自持的加密口令，
+    本会话尚未解锁时必填（首次用于建立口令，之后用于解锁）。服务端只在内存里派生密钥，
+    不保存、不写日志。
+
+    `api_key` 留空表示「保留原 key 不改」——避免用户只改音色时被迫重贴密钥。
+    """
+
+    api_key: str = Field("", description="百炼 API Key（北京地域）；留空表示保留已存的 key")
+    workspace_id: str = Field(..., description="百炼业务空间 ID，端点域名的一部分")
+    model: str = Field("", description="模型 id；空则用默认 qwen-audio-3.1-tts-flash")
+    voice: str = Field("", description="音色 id；3.1 只认 `_v3.1` 后缀音色")
+    instruction: str = Field("", description="指令控制文本（音色性格/语速基调），≤100 字符口径")
+    passphrase: str = Field("", description="加密口令（兜底解锁通道）")
+    password: str = Field("", description="登录密码（自动解锁通道，会绑定到账号）")
+
+
 class LlmConfigIn(BaseModel):
-    """用户自定义云端模型配置。api_key 留空表示「保留原 key 不改」。"""
+    """用户自定义云端模型配置。api_key 留空表示「保留原 key 不改」。
+
+    `passphrase` 是用户自持的加密口令：本会话尚未解锁时必填（首次用于建立口令，
+    之后用于解锁）。服务端只在内存里用它派生密钥，不保存、不写日志。
+    """
     base_url: str = Field(..., description="OpenAI 兼容 base_url，到 /v1 为止")
     model: str = Field(..., description="模型 id，如 gpt-4o-mini / deepseek-chat")
     api_key: str = Field("", description="API Key；留空表示保留已存的 key")
@@ -101,6 +137,41 @@ class LlmConfigIn(BaseModel):
     enabled: bool = Field(True, description="停用则回落本地默认模型")
     emotion_enabled: bool = Field(
         False, description="是否用该模型兼任情绪判定；false 则走本地 qwen3:8b")
+    password: str = Field("", description="登录密码；已解锁时可留空，传了则补建自动解锁通道")
+    passphrase: str = Field("", description="加密口令；已解锁时可留空")
+
+
+class PassphraseIn(BaseModel):
+    passphrase: str = Field(..., description="用户自持的加密口令；服务端不保存")
+
+
+class UnlockIn(BaseModel):
+    """解锁云端密钥：两条通道任选（服务端不保存任何一个）。"""
+    password: str = Field("", description="登录密码（自动解锁通道，登录时已自动尝试）")
+    passphrase: str = Field("", description="加密口令（兜底通道）")
+
+
+class ChangePassphraseIn(BaseModel):
+    old: str = Field(..., description="原加密口令")
+    new: str = Field(..., description="新加密口令（至少 8 位）")
+
+
+class LlmEnabledIn(BaseModel):
+    """只切换「用本地默认 / 用云端自定义」，**不触碰任何凭据**。
+
+    存在的意义：这是唯一能把「本地默认」这个选择**落库**的入口。
+    原先前端只有「保存」会把 enabled 写进库，而保存按钮长在云端配置表单里——
+    切到本地后表单收起，用户就再没有任何途径持久化这个选择；刷新页面时
+    GET /llm/config 读回 enabled=true，界面又跳回「云端自定义」（实测表现：
+    「切回本地模型后会自动跳回云端配置」）。而当时唯一的持久化办法是「删除配置」，
+    那会把 api_key 密文一起抹掉（该行还同时承载语音凭据，连 TTS 也一起没了）。
+    """
+    enabled: bool = Field(..., description="True=用云端自定义模型；False=回落本地默认")
+
+
+class ChangePasswordIn(BaseModel):
+    old: str = Field(..., description="原登录密码")
+    new: str = Field(..., description="新登录密码（至少 6 位）")
 
 
 class CredentialsIn(BaseModel):
@@ -133,7 +204,21 @@ async def api_me(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict
 
 @app.post("/auth/logout")
 async def api_logout(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """登出：吊销 token，并丢弃内存里该用户的云端密钥（DEK）。"""
     await authn.revoke_token(user.token)
+    llmstore.lock(user.id)
+    return {"ok": True}
+
+
+@app.post("/auth/password")
+async def api_change_password(body: ChangePasswordIn,
+                              user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """改登录密码。后端会**先用旧密码重绑**云端密钥，再更新密码哈希，
+    否则改完密码就再也解不开已存的 API Key（只能删配置重填）。"""
+    try:
+        await authn.change_password(user.id, body.old, body.new)
+    except authn.AuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return {"ok": True}
 
 
@@ -173,27 +258,142 @@ async def _user_context(user: authn.AuthUser) -> str:
         return ""
 
 
-def _spawn_profile_task(username: str, thread_id: str, question: str) -> None:
-    """问答后异步抽画像事实（fire-and-forget，不阻塞响应）。"""
+# 后台画像任务必须**持引用**：asyncio 官方文档明确要求「保存 create_task 的返回值，
+# 否则任务可能在运行途中被 GC 回收、静默不执行」。这里全是 fire-and-forget，一旦被回收，
+# 表现就是「聊了半天画像也长不出来，而且日志里什么都没有」—— 静默失败最难查，
+# 所以宁可多留一个 set。done_callback 里 discard，集合不会无限增长。
+_PROFILE_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_profile_task(username: str, session_id: str, question: str) -> None:
+    """问答后异步抽画像事实（fire-and-forget，不阻塞响应）。
+
+    `session_id` 传的是**规范 key**（`u<id>:<短 id>`，见 conversations.thread_key），
+    与转录里的 session_id 对齐，方便按会话回溯画像来源。
+    """
     async def job():
         try:
             facts = await extract_facts_safe(question)
             if facts:
-                await save_facts(username, thread_id, facts)
+                await save_facts(username, session_id, facts)
         except Exception:
             log.exception("画像任务异常（忽略）")
-    asyncio.create_task(job())
+
+    task = asyncio.create_task(job())
+    _PROFILE_TASKS.add(task)
+    task.add_done_callback(_PROFILE_TASKS.discard)
+
+
+# ── 会话隔离 + 转录落库（本轮新增）─────────────────────────────
+
+# thread_id 是**客户端传来的字符串**，会进 PG 主键、进日志、进 checkpointer 的键，
+# 必须在入口收口。前端生成的是 8 位 base36（Math.random().toString(36).slice(2,10)），
+# 天然满足；限长是为了防「超长随机串把索引撑爆」。
+_THREAD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _client_thread_id(raw: str | None) -> str:
+    """校验并归一化客户端的 thread_id；为空则新生成一个。"""
+    tid = (raw or "").strip() or uuid.uuid4().hex[:12]
+    if not _THREAD_RE.match(tid):
+        raise HTTPException(
+            status_code=400,
+            detail="thread_id 只允许字母/数字/下划线/连字符，最长 64 字符",
+        )
+    return tid
+
+
+def _meta_of(evt: dict) -> dict:
+    """done 事件 → messages.meta。历史回看时要能复原「引用了几条、来自哪。"""
+    return {
+        "intent": evt.get("intent", ""),
+        "slots": evt.get("slots") or [],
+        "characters": evt.get("characters") or [],
+        "docs": evt.get("docs", 0),
+        "sources": evt.get("sources") or [],
+        "truncated": bool(evt.get("truncated")),
+        "emotion": evt.get("emotion", ""),
+    }
+
+
+async def _drop_memory(key: str) -> None:
+    """删掉 LangGraph 里该 thread 的记忆（lg.checkpoints / checkpoint_writes）。
+
+    删会话必须连记忆一起删：checkpointer 的表**不参与** /conversations 的查询，
+    只删转录的话，一旦同一个 thread_id 再被复用（前端本地 id 撞车、或用户手填），
+    旧记忆会原地复活。清理失败只告警——不能因为清记忆失败就让用户删不掉会话。
+    """
+    try:
+        saver = await get_checkpointer()
+        await saver.adelete_thread(key)
+    except Exception as exc:
+        log.warning("清理会话记忆失败（忽略）：%s", exc)
+
+
+async def _sse(events):
+    """把事件字典编成 SSE 帧。"""
+    async for evt in events:
+        yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+
+
+async def _stream_answer(user: authn.AuthUser, tid: str, question: str,
+                         history: list[dict] | None = None):
+    """一次问答的 SSE 事件流：落库用户消息 → 流式生成 → 落库助手消息。
+
+    `/ask/stream` 与 `/conversations/{tid}/regenerate` 共用这一条路径 ——
+    两条入口各写一遍落库逻辑，迟早会走偏（比如只有一边补了 meta）。
+    """
+    key = conv.thread_key(user.id, tid)
+    user_ctx = await _user_context(user)
+    await conv.ensure_conversation(user.id, tid, question)
+    await conv.append_message(user.id, tid, "user", question)
+
+    try:
+        async for evt in ask_stream(question, key, user_context=user_ctx,
+                                    user_id=user.id, history=history):
+            if evt.get("done"):
+                # 必须在把 done 交给前端**之前**写完库：前端收到 done 会立刻重拉会话
+                # 列表，晚一步就是「刚聊完一刷新答案没了」的竞态。
+                answer = evt.get("answer") or ""
+                if answer:
+                    await conv.append_message(user.id, tid, "assistant", answer, _meta_of(evt))
+                # 回给前端的必须是**短 id**（它只认自己的 id，不认 u<id>: 前缀）
+                evt["thread_id"] = tid
+            yield evt
+    except Exception as exc:
+        # SSE 一旦开始流式，响应头已发出，全局异常处理器接不住这里的异常——
+        # 必须就地捕获并转成 {'error'} 事件下发（前端 store 有对应处理）。
+        rid = uuid.uuid4().hex[:8]
+        log.exception("[%s] SSE 流中途异常 thread=%s", rid, key)
+        yield {"error": f"生成中断（编号 {rid}）", "detail": str(exc)[:300]}
+    finally:
+        # 流结束后再抽画像：不与生成抢 LLM（OLLAMA_NUM_PARALLEL=1）
+        _spawn_profile_task(user.username, key, question)
 
 
 @app.post("/ask", response_model=AskOut)
 async def api_ask(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_user)) -> AskOut:
-    tid = body.thread_id or uuid.uuid4().hex[:12]
-    r = await ask(body.question, tid, user_context=await _user_context(user),
-                  user_id=user.id)
-    log.info("ask thread=%s 意图=%s 角色=%s", tid, r.get("intent"), r.get("characters"))
-    _spawn_profile_task(user.username, tid, body.question)
+    tid = _client_thread_id(body.thread_id)
+    key = conv.thread_key(user.id, tid)
+    await conv.ensure_conversation(user.id, tid, body.question)
+    await conv.append_message(user.id, tid, "user", body.question)
+
+    r = await ask(body.question, key, user_context=await _user_context(user), user_id=user.id)
+    log.info("ask thread=%s 意图=%s 角色=%s", key, r.get("intent"), r.get("characters"))
+    answer = r.get("answer") or ""
+    if answer:
+        await conv.append_message(user.id, tid, "assistant", answer, {
+            "intent": r.get("intent", ""),
+            "slots": r.get("slots") or [],
+            "characters": r.get("characters") or [],
+            "docs": len(r.get("docs") or []),
+            "sources": doc_sources(r.get("docs") or []),
+            "truncated": bool(r.get("truncated")),
+            "emotion": r.get("emotion", ""),
+        })
+    _spawn_profile_task(user.username, key, body.question)
     return AskOut(
-        answer=r.get("answer") or "",
+        answer=answer,
         thread_id=tid,
         intent=r.get("intent", ""),
         slots=r.get("slots") or [],
@@ -204,40 +404,169 @@ async def api_ask(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_
         emotion=r.get("emotion", ""),
     )
 
+
 @app.post("/ask/stream")
 async def api_ask_stream(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_user)):
-    tid = body.thread_id or uuid.uuid4().hex[:12]
-    user_ctx = await _user_context(user)
-
-    async def event_gen():
-        # SSE 一旦开始流式，响应头已发出，全局异常处理器接不住这里的异常——
-        # 必须就地捕获并转成 {'error'} 事件下发（前端 store 有对应处理）。
-        try:
-            async for evt in ask_stream(body.question, tid, user_context=user_ctx,
-                                        user_id=user.id):
-                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            rid = uuid.uuid4().hex[:8]
-            log.exception("[%s] SSE 流中途异常 thread=%s", rid, tid)
-            payload = {"error": f"生成中断（编号 {rid}）", "detail": str(exc)[:300]}
-            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-        finally:
-            # 流结束后再抽画像：不与生成抢 LLM（OLLAMA_NUM_PARALLEL=1）
-            _spawn_profile_task(user.username, tid, body.question)
-
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    tid = _client_thread_id(body.thread_id)
+    return StreamingResponse(
+        _sse(_stream_answer(user, tid, body.question)),
+        media_type="text/event-stream",
+    )
 
 
-# ── 语音合成（TTS，登录即可）─────────────────────────────
+# ── 会话历史（登录即可；一律按登录用户过滤）─────────────────────
+# 别人的会话一律按「不存在」处理（404），不回 403 —— 403 等于告诉对方「这个 id 真有」。
+
+def _conv_out(row: dict) -> dict:
+    """会话行 → 前端结构（thread_id 回**短 id**，不带 u<id>: 前缀）。"""
+    return {
+        "thread_id": conv.client_thread_id(row["session_id"]),
+        "title": row["title"],
+        "message_count": row["message_count"],
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "last_role": row["last_role"],
+        "last_content": row["last_content"],
+    }
+
+
+@app.get("/conversations")
+async def api_conversations(q: str = "",
+                            user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """当前用户的会话列表（新的在前，不含正文，只带最后一条预览）。
+
+    `q` 非空时按标题或任意一条消息正文模糊搜索（转录在服务端，只能在这边搜）。
+    """
+    rows = await conv.list_conversations(user.id, query=q.strip()[:100])
+    return {"conversations": [_conv_out(r) for r in rows]}
+
+
+@app.get("/conversations/{thread_id}")
+async def api_conversation(thread_id: str,
+                           user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """单个会话 + 全部消息。"""
+    tid = _client_thread_id(thread_id)
+    row = await conv.get_conversation(user.id, tid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {
+        "thread_id": tid,
+        "title": row["title"],
+        "created_at": row["created_at"].isoformat(),
+        "messages": [
+            {
+                "id": m["id"],
+                "role": m["role"],
+                "content": m["content"],
+                "meta": m["meta"] or {},
+                "created_at": m["created_at"].isoformat(),
+            }
+            for m in row["messages"]
+        ],
+    }
+
+
+@app.patch("/conversations/{thread_id}")
+async def api_conversation_rename(body: TitleIn, thread_id: str,
+                                  user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    tid = _client_thread_id(thread_id)
+    if not await conv.rename_conversation(user.id, tid, body.title):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"ok": True}
+
+
+@app.delete("/conversations/{thread_id}")
+async def api_conversation_delete(thread_id: str,
+                                  user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """删除会话：转录 + 模型侧记忆一起清（见 _drop_memory 的说明）。"""
+    tid = _client_thread_id(thread_id)
+    if not await conv.delete_conversation(user.id, tid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    await _drop_memory(conv.thread_key(user.id, tid))
+    return {"ok": True}
+
+
+@app.delete("/conversations")
+async def api_conversations_clear(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """清空当前用户全部会话（连带各自的 LangGraph 记忆）。"""
+    keys = [conv.thread_key(user.id, conv.client_thread_id(r["session_id"]))
+            for r in await conv.list_conversations(user.id, limit=1000)]
+    n = await conv.clear_conversations(user.id)
+    for k in keys:
+        await _drop_memory(k)
+    return {"ok": True, "deleted": n}
+
+
+@app.post("/conversations/{thread_id}/regenerate")
+async def api_conversation_regenerate(thread_id: str,
+                                      user: authn.AuthUser = Depends(authn.get_current_user)):
+    """重新生成最后一条回答。
+
+    必须做三件事，少一件都会出现「重新生成但还是同一段话」：
+      ① 把「最后一句问 + 它的答」从转录里删掉（truncate_from）；
+      ② 把模型侧记忆**替换**成删完之后的窗口（history 回放）——
+         checkpointer 里的 history 不会因为我们删了转录就自动变；
+      ③ 清掉该 thread 的 checkpoint（否则 context_summary 等旧字段会残留）。
+    """
+    tid = _client_thread_id(thread_id)
+    last = await conv.last_user_message(user.id, tid)
+    if last is None:
+        raise HTTPException(status_code=404, detail="这个会话还没有可以重新生成的问题")
+
+    key = conv.thread_key(user.id, tid)
+    await conv.truncate_from(user.id, tid, last["id"])
+    history = await conv.get_history(user.id, tid,
+                                     limit=get_settings().MAX_HISTORY_TURNS * 2)
+    await _drop_memory(key)
+    return StreamingResponse(
+        _sse(_stream_answer(user, tid, last["content"], history=history)),
+        media_type="text/event-stream",
+    )
+
+
+# ── 语音合成（TTS，登录即可；密钥由用户自持）─────────────────
+# 与云端模型同构：密钥加密落库、同一把 DEK、同一套解锁通道。
+# 优先级「用户自持凭据 > 全局 .env 兜底」——开源分发下部署者不该替用户垫额度。
 
 @app.get("/tts/status")
 async def api_tts_status(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
-    """TTS 是否可用 + 当前模型/音色（不暴露 key）。前端据此决定是否显示播放按钮。"""
-    ready, why = tts_ready()
+    """语音能力状态：是否可用、不可用原因、当前生效的模型与音色（不暴露密钥）。
+
+    返回的 `model` / `voice` 是**当前实际生效值**：用户配了就回显用户值，没配则回显
+    代码默认值，而不是空串。同时附中文展示名（`*_label`），避免前端直接渲染
+    `longanlingxi_v3.1` 这类内部 id。
+
+    `source` 标明生效来源：`user`（用户自持）/ `global`（部署者全局兜底）/ `none`。
+    `defaults` 单独给出代码默认值，供前端把输入框占位提示写成「留空则用默认：xxx」
+    （不给具体值，避免把「用户没填」和「用户填了默认值」在表单里混为一谈）。
+    """
     s = get_settings()
-    return {"enabled": s.TTS_ENABLED, "ready": ready, "reason": why,
-            "model": s.TTS_MODEL if ready else "", "voice": s.TTS_VOICE if ready else "",
-            "emotions": list(EMOTION_TAGS)}
+    rt, why = await tts_resolve(user.id)
+    # 生效值优先取 resolve 结果；不可用时回落到「用户存的配置」再回落代码默认，
+    # 这样设置页在「配了但没解锁」时仍能正确预填用户之前填过的内容。
+    cfg = await llmstore.get_tts_masked(user.id)
+    model = (rt or {}).get("model") or cfg.get("model") or s.TTS_MODEL
+    voice = (rt or {}).get("voice") or cfg.get("voice") or s.TTS_VOICE
+    return {
+        "enabled": s.TTS_ENABLED,
+        "ready": rt is not None,
+        "reason": why,
+        "source": (rt or {}).get("source", "none"),
+        "model": model,
+        "model_label": MODEL_LABEL,
+        "voice": voice,
+        "voice_label": voice_label(voice),
+        "emotions": list(EMOTION_TAGS),
+        "configured": cfg.get("configured", False),   # 用户是否已存过自己的凭据
+        "unlocked": cfg.get("unlocked", False),
+        "voices": [{"id": k, "label": v} for k, v in VOICE_LABELS.items()],
+        "defaults": {
+            "model": s.TTS_MODEL,
+            "voice": s.TTS_VOICE,
+            "voice_label": voice_label(s.TTS_VOICE),
+            "instruction": s.TTS_INSTRUCTION,
+        },
+    }
 
 
 @app.post("/tts")
@@ -254,7 +583,7 @@ async def api_tts(body: TtsIn, user: authn.AuthUser = Depends(authn.get_current_
     if len(text) > s.TTS_MAX_CHARS * 2:
         raise HTTPException(status_code=400,
                             detail=f"文本过长（>{s.TTS_MAX_CHARS * 2} 字），请缩短后再合成")
-    r = await synthesize(text, body.emotion or None)
+    r = await synthesize(text, body.emotion or None, user_id=user.id)
     if not r.ok:
         log.info("TTS 未合成 user=%s 原因=%s", user.username, r.error)
         return {"ok": False, "error": r.error, "url": "", "emotion": "", "elapsed_ms": 0}
@@ -262,7 +591,41 @@ async def api_tts(body: TtsIn, user: authn.AuthUser = Depends(authn.get_current_
             "model": r.model, "voice": r.voice, "elapsed_ms": r.elapsed_ms}
 
 
+@app.get("/tts/config")
+async def api_tts_config_get(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """读自己的语音凭据。**只返回掩码**，任何情况都不回显明文 key。"""
+    return await llmstore.get_tts_masked(user.id)
+
+
+@app.put("/tts/config")
+async def api_tts_config_put(body: TtsConfigIn,
+                             user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """保存语音凭据（api_key 加密落库）。留空 api_key = 保留原 key。
+
+    未解锁时 `password` 与 `passphrase` 至少给一个：首次用来建立 DEK 与解锁通道，
+    之后用来解锁。传 `password` 会顺带绑定「登录自动解锁」，下次登录直接生效。
+    """
+    try:
+        return await llmstore.save_tts_config(
+            user.id, api_key=body.api_key, workspace_id=body.workspace_id,
+            model=body.model, voice=body.voice, instruction=body.instruction,
+            passphrase=body.passphrase, password=body.password,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/tts/config")
+async def api_tts_config_delete(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """删除自己的语音凭据（含密文），之后回落全局兜底配置或不可用。"""
+    ok = await llmstore.delete_tts_config(user.id)
+    return {"ok": ok, "deleted": ok}
+
+
 # ── 用户自定义云端模型（登录即可，配置只属于自己）─────────────────
+# 密钥体系：加密密钥由用户自持的「加密口令」派生，只活在服务端进程内存里
+# （详见 rag/llmstore.py）。进程重启 = 上锁，需重新 unlock；未解锁期间云模型
+# 自动回落本地默认 agent。
 
 @app.get("/llm/providers")
 async def api_llm_providers(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
@@ -275,22 +638,88 @@ async def api_llm_providers(user: authn.AuthUser = Depends(authn.get_current_use
 
 @app.get("/llm/config")
 async def api_llm_config_get(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
-    """读自己的云端模型配置。**只返回掩码**，任何情况都不回显明文 key。"""
+    """读自己的云端模型配置。**只返回掩码**，任何情况都不回显明文 key。
+
+    `unlocked=false` 表示本会话尚未输入加密口令，云端模型不会生效。
+    """
     cfg = await llmstore.get_config_masked(user.id)
     cfg["default_provider"] = get_settings().CHAT_PROVIDER_DEFAULT
     cfg["default_model"] = get_settings().LLM_MODEL   # 本地默认 agent（回落时用）
     return cfg
 
 
+@app.post("/llm/unlock")
+async def api_llm_unlock(body: UnlockIn,
+                         user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """解锁自己的云端密钥：登录密码（自动通道）或加密口令（兜底）任选其一。
+
+    正常登录时后端已经自动解锁过了；只有进程重启后仍持有旧 token、
+    或当初只用加密口令建立密钥时才需要手动调它。
+    """
+    ok = await llmstore.unlock(user.id, password=body.password, passphrase=body.passphrase)
+    if not ok:
+        raise HTTPException(status_code=400,
+                            detail="登录密码或加密口令不正确（或尚未配置云端模型）")
+    return {"ok": True, "unlocked": True}
+
+
+@app.post("/llm/lock")
+async def api_llm_lock(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """丢弃内存里的派生密钥（之后云端模型回落本地，需重新输入口令）。"""
+    llmstore.lock(user.id)
+    return {"ok": True, "unlocked": False}
+
+
+@app.post("/llm/passphrase")
+async def api_llm_passphrase(body: ChangePassphraseIn,
+                             user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """更换加密口令：必须提供**原口令**，服务端用它解出 key 再用新口令重新加密。"""
+    try:
+        await llmstore.change_passphrase(user.id, body.old, body.new)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "unlocked": True}
+
+
+@app.post("/llm/enabled")
+async def api_llm_enabled(body: LlmEnabledIn,
+                          user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """切换作答模型来源（本地默认 ↔ 云端自定义），**凭据原样保留**。
+
+    与 `PUT /llm/config` 职责分开，别合并：
+      · 本端点 = 只翻一个开关。不需要口令、不要求已解锁、不改 key；
+      · `PUT /llm/config` = 改地址/模型/key，需要口令来建立或解开 DEK。
+
+    这样「切回本地」不必再走「删除配置」，云端配置与语音凭据都留着随时切回来。
+
+    关掉（enabled=False）对没有配置行的用户是**幂等成功**——本来就在本地，
+    没必要为一次空操作报 400 把前端卡住。打开时才要求配置真的存在。
+    """
+    ok = await llmstore.set_enabled(user.id, body.enabled)
+    if body.enabled and not ok:
+        raise HTTPException(status_code=400,
+                            detail="还没有保存过云端配置，请先填写 API 信息并保存")
+    cfg = await llmstore.get_config_masked(user.id)
+    return {"ok": True, "enabled": bool(cfg["enabled"]),
+            "configured": bool(cfg["configured"]),
+            # 已启用但没解锁时云端并不生效（get_runtime 回落本地），前端据此给提示
+            "unlocked": bool(cfg["unlocked"])}
+
+
 @app.put("/llm/config")
 async def api_llm_config_put(body: LlmConfigIn,
                              user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
-    """保存云端模型配置（api_key 加密落库）。留空 api_key = 保留原 key。"""
+    """保存云端模型配置（api_key 加密落库）。留空 api_key = 保留原 key。
+
+    未解锁时 `password` 与 `passphrase` 至少给一个：首次用来建立 DEK 与解锁通道，
+    之后用来解锁。传 `password` 会顺带绑定「登录自动解锁」，下次登录直接生效。
+    """
     try:
         return await llmstore.save_config(
             user.id, base_url=body.base_url, model=body.model,
             api_key=body.api_key, provider=body.provider, enabled=body.enabled,
-            emotion_enabled=body.emotion_enabled,
+            emotion_enabled=body.emotion_enabled, passphrase=body.passphrase,
+            password=body.password,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -301,10 +730,14 @@ async def api_llm_config_test(body: LlmConfigIn,
                               user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """保存前连通性测试：拉一次 /models 验证 base_url + key 是否可用。
 
-    api_key 留空时用已存的 key 测（前端"只改地址不改 key"的场景）。
+    api_key 留空时用已存的 key 测（前端"只改地址不改 key"的场景）；
+    此时若尚未解锁，会先用 `password` / `passphrase` 解锁。
     """
     key = (body.api_key or "").strip()
     if not key:
+        if not llmstore.is_unlocked(user.id):
+            await llmstore.unlock(user.id, password=body.password,
+                                  passphrase=body.passphrase)
         cfg = await llmstore.get_runtime(user.id)
         key = (cfg or {}).get("api_key", "")
     if not key:
@@ -324,6 +757,8 @@ async def api_llm_models(base_url: str,
     key 取自该用户已保存的配置——不接受前端传 key，避免明文 key 出现在 URL/query
     里被日志、代理、浏览器历史记录下来。
     """
+    if not llmstore.is_unlocked(user.id):
+        raise HTTPException(status_code=400, detail="请先输入加密口令解锁，再拉取模型列表")
     cfg = await llmstore.get_runtime(user.id)
     if not cfg:
         raise HTTPException(status_code=400,

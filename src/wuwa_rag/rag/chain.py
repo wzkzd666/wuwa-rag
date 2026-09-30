@@ -15,6 +15,7 @@ from ..text import (
     AnswerFilter,
     chunk_text,
     dedup_list_items,
+    fix_percent_units,
     lock_focus,
     strip_ref_marks,
 )
@@ -25,7 +26,7 @@ from ..worker import (
     reset_progress,
 )
 from ..ww_logger import get_logger
-from . import llmstore, persona
+from . import llmstore, persona, tts
 from .characters import resolve_candidates
 from .emotion import detect_emotion
 from .intent import (
@@ -36,6 +37,8 @@ from .intent import (
     detect_stage,
     extract_characters,
     is_identity,
+    is_time_question,
+    mentions_time,
     rewrite_query,
     summarize_turns,
 )
@@ -44,8 +47,7 @@ from .loopguard import LoopGuard, trim_loop
 from .memory import get_checkpointer
 from .retrievers import fetch_chunks
 from .state import RagState
-from .tools import graph_search_tool, vector_search_tool
-from .tts import tts_ready
+from .tools import current_time_tool, graph_search_tool, vector_search_tool
 from .verify import verify_knowledge
 from .websearch import web_search
 
@@ -92,8 +94,9 @@ _SYSTEM = """依据下面的资料作答。你是爱弥斯（《鸣潮》里那�
 - 讲到爱弥斯本人时用第一人称「我」，活泼亲切；讲到其他角色时用角色名或「她/他」称呼。
 - 先用自己的话把要点讲清楚，再按下面的格式要求列数据。
 - 用中文，简洁、要点化；资料里有几个要点就讲几个要点。
-- 资料里出现「满级数值表」或「突破材料表」时，必须把该表逐行完整列出：数值、材料名与
-  「+」「*」「×」「%」原样照抄，不换算、不合并同类项、不改写成中文数字、不略过。
+- 凡是资料里带单位或符号的数字（`%`、`+`、`*`、`×`、`倍`、`秒`、`层`、`点`），
+  一律照原样抄回：百分号必须跟着数字，不省略、不换算、不改成中文数字、不擅自加
+  「万」「亿」这类量纲。
 - 事实严格依据资料，只讲资料里有的内容；资料里没有的，用一句话说不知道就停住。
 - 同一句话、同一段落、同一口头禅只说一次，讲完即止。
 - 列表、配队这类条目每条只出现一次，直接平铺列出即可。
@@ -105,6 +108,7 @@ _SYSTEM = """依据下面的资料作答。你是爱弥斯（《鸣潮》里那�
 _STAGE_LABELS = {
     "intent": "分析问题类型与角色",
     "chitchat": "陪家人聊两句",
+    "time": "查看当前时间",
     "graph": "查询角色关系图谱",
     "vector": "检索并重排相关资料",
     "verify": "核对资料是否对题",
@@ -152,8 +156,8 @@ async def _chat_client(state: RagState, strict: bool = False) -> tuple[Runnable,
 
     需求：① 默认用项目自带 agent（本地 Ollama aemeath）；② 用户配了自己的云端
     OpenAI 兼容 API 就走云端。判定顺序：state 里有 `user_id` → `llmstore.get_runtime`
-    取该用户配置（含解密后的 key）→ 取到走云端，取不到（未配 / 已停用 / SECRET_KEY
-    未设 / 解密失败）一律**回落本地默认**，问答不因配置问题中断。
+    取该用户配置（含解密后的 key）→ 取到走云端，取不到（未配 / 已停用 / 会话未
+    输入加密口令 / 解密失败）一律**回落本地默认**，问答不因配置问题中断。
 
     返回值 is_cloud 决定人设注入方式，两条规则相反（判断错误会丢失作答效果）：
       - 本地 aemeath：人设烧在 Modelfile SYSTEM，**不得**发 SystemMessage（会覆盖人设），
@@ -295,6 +299,13 @@ async def intent_node(state: RagState) -> dict:
         intent = "fact"
 
     # 闲聊分流，两层：
+    # ⓪ 时间类（「现在几点」）——最优先判且**不调 LLM**：答案只可能来自服务端时钟
+    #    （见 tools.current_time），走检索是空手而归、走闲聊是让模型猜。判据用原句 q。
+    #    条件带 `not slots`：像「秧秧共鸣链几号节点要多少材料」这种真游戏问题若被抢走
+    #    就丢了检索（时间问法在无槽位时才成立）。
+    #    另外算一个 need_time（弱信号）：句子里**顺带**问了时间（「现在几点，顺便说说
+    #    今汐的共鸣链」）时不动路由，只让检索/闲聊分支把服务端真值一并带上。
+    #    两条判据都来自 intent.py，规则硬编码、零额外延迟（判据本身只是几个正则）。
     # ① 人格/身份类硬信号（问「你」的台词/名字/身份）——即使改写出了角色名，本质也
     #    是问人格不是查资料，直接判 chitchat。用**原句 q** 判：改写 sq 已把「你」补成
     #    角色名（「你的台词」→「爱弥斯的台词」），第二人称信号会丢。aemeath 人设由模型
@@ -304,16 +315,24 @@ async def intent_node(state: RagState) -> dict:
     #    不能用 SEMANTIC_PATTERNS 当判据——「怎么」会误命中闲聊句（「怎么这么晚才来」）。
     #    有角色名绝不当闲聊（「你好呀卡卡罗」是提问）；LLM 解析失败回落 game。
     #    判据用改写句 sq：追问「那她配什么声骸」原句无角色，改写后有——不会误入闲聊。
-    if is_identity(q) and not slots:
+    pure_time = is_time_question(q) and not slots
+    # mentions_time 是 is_time_question 的超集，所以不必再 or 一次 pure_time
+    need_time = mentions_time(q)
+
+    if pure_time:
+        intent = "time"
+    elif is_identity(q) and not slots:
         intent = "chitchat"
     elif not chars and not slots and not stage and not element:
         topic = await classify_topic(sq)
         if topic == "chitchat":
             intent = "chitchat"
-    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s%s", intent, slots, chars or "未识别",
-             element or "-", stage or "-", f" | 改写={sq!r}" if sq != q else "")
+    log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s%s%s", intent, slots, chars or "未识别",
+             element or "-", stage or "-", " | 顺带问时间" if need_time and intent != "time" else "",
+             f" | 改写={sq!r}" if sq != q else "")
     return {"search_query": sq, "intent": intent, "slots": slots,
-            "characters": chars, "element": element, "stage": stage}
+            "characters": chars, "element": element, "stage": stage,
+            "need_time": need_time}
 
 
 def _route(state: RagState) -> str:
@@ -871,6 +890,7 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
                   characters: list[str] | None = None,
                   team_focus: bool = False,
                   user_context: str = "",
+                  now: str = "",
                   cloud: bool = False) -> str:
     """拼最终 prompt。
 
@@ -882,6 +902,9 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
         `SystemMessage(persona.cloud_system())` 注入，故这里**不再**前缀 `_SYSTEM`
         （否则术语表/作答要求会重复两遍，白白吃 token 且稀释指令）。
       两条路径的 `## 资料 / ## 问题 / tail / 输出格式` 部分完全一致。
+
+    参数 now 非空表示「这句里顺带问了时间」（intent.mentions_time + chain._now_if_needed）：
+    它是一句**附带**信息，所以放近因位、与 user_context 同级，措辞明确只要求顺带提一句。
     """
     # 不在这里注入 /no_think：实测它对 aemeath 无效（仍 38s + 'v' 泄漏前缀 + 触发
     # Ollama 500）。思考模式由 llm.py 的 .bind(think=False) 统一关闭。
@@ -915,9 +938,14 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
                  f"{user_context}\n"
                  "回答时可以自然贴合这位玩家的情况（比如TA主玩的角色、熟悉程度），"
                  "与资料冲突时以资料为准。")
+    if now:
+        # 顺带问了时间（见 intent.mentions_time / chain._now_if_needed）：
+        # 服务端真值放近因位，与「小档案」同级——它只是附带一句，不能挤掉资料主体。
+        # 措辞只写「怎么做」（本文件铁律：不写否定式反例，模型会照抄反例）。
+        tail += ("\n\n## 现在的时间（服务端真实时钟）\n"
+                 f"{now}\n"
+                 "家人这句话里也问了现在的时间，讲资料的同时顺带把它说一句即可。")
     blocks = blocks or []
-    if not blocks:
-        return prompt + tail
     # 指令必须压在 prompt **末尾**：_SYSTEM 里那条规则实测只能让模型「带上几个数」，
     # 面对长表仍会概括成「各需不同数量」而不逐行列（实测）。近因位置 + 点名禁止的
     # 采用保守写法，才能让它回到逐行照抄的状态。
@@ -929,6 +957,11 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
     #    表一起列出来——问技能却蹦出材料就是这么来的（实测）。
     # 正确写法：先保住「说人话的介绍」，再只点名**本轮真正补了的那几张表**，
     # 并显式禁止主动扩列没被问到的内容。
+    #
+    # 变更说明：早先这里有个 `if not blocks: return prompt + tail` 的短路，导致
+    # **无补料场景（共鸣链、剧情、机制问答）拿不到任何格式约束** —— 六链答出
+    # 「暴击伤害80万」那次正是这个场景（blocks 为空，输出格式块整块没进 prompt）。
+    # 现在无论有没有补料都要注入：表格条目按需增减，正文那条（%）是**无条件**的。
     has_value = any("满级数值表" in b for b in blocks)
     has_mat = any("突破材料表" in b for b in blocks)
     lines = ["\n\n## 输出格式（硬要求）"]
@@ -942,15 +975,28 @@ def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
     if has_mat:
         lines.append(f"{step}) 再把「突破材料表」里每一条都列出来，写成「- 材料名×数量」，"
                      "一条都不许省；")
+        step += 1
+    # 非表格内容（共鸣链、技能描述、声骸词条都属这块）单独点名：原文是「暴击固定为
+    # 80%，暴击伤害固定为275%」这种带百分号的散文，缺了这条约束就会被复述成
+    # 「八十万暴击伤害」「两百七十五」（实测，见 text.fix_percent_units）。
+    # 表述只写「怎么做」，不写任何反例（本文件铁律：反例会被当成样本照抄）。
+    lines.append(f"{step}) 讲正文（共鸣链、技能、声骸词条等内容）时，原文里的数字连同它"
+                 "后面的单位一起照抄过来，百分号、加号、乘号、倍、秒、层这些都不省略，"
+                 "也不要把数字换成另一种写法。")
     lines.append("禁止写成「各需不同数量」「材料如上」「数值都在资料里」这类概述，"
                  "禁止换算、合并、四舍五入或改成中文数字。")
     if has_mat:
         lines.append("「## 参考文档」里分等级展开的长表不要照抄，更不要把不同等级、不同技能的"
                      "材料拼成一张混在一起的清单——数值与材料一律以上面两张表为准，"
                      "且不要主动列出没被问到的内容。")
-    else:
+    elif has_value:
         lines.append("「## 参考文档」里分等级展开的长表（尤其是各种材料表）一律不要照抄，"
                      "更不要主动列出没被问到的内容——数值只以「满级数值表」为准。")
+    else:
+        # 无补料（共鸣链 / 剧情 / 机制问答）：**绝不能**在这里点名「满级数值表」，
+        # 否则模型会以为该有那张表，跑去「## 参考文档」里翻找并凭空扩列（实测过同类）。
+        # 只保留「按资料原文讲、不扩列」这一条通用约束。
+        lines.append("只讲资料里已有的内容，不要主动扩列没被问到的部分。")
     return prompt + "\n".join(lines) + tail
 
 
@@ -972,10 +1018,13 @@ async def generate_node(state: RagState):
                  " + ".join(b.splitlines()[0].lstrip("# ") for b in blocks))
     # provider：本地 aemeath（默认）或用户自配云端。is_cloud 决定人设注入方式（见 _chat_client）
     client, is_cloud, emotion_via_cloud = await _chat_client(state, strict=bool(blocks))
+    # 混合时间问句（既查资料又问时间，见 intent.mentions_time）：把服务端真值补进 prompt
+    now = await _now_if_needed(state)
     prompt = _build_prompt(context, state["question"], blocks=blocks,
                            characters=state.get("characters"),
                            team_focus=_named_team(state),
                            user_context=state.get("user_context") or "",
+                           now=now,
                            cloud=is_cloud)
     # 云端：人设走 SystemMessage（模型不认识爱弥斯，必须注入）；
     # 本地：只发 HumanMessage（人设在 Modelfile，发 system 会覆盖）。
@@ -1012,10 +1061,12 @@ async def generate_node(state: RagState):
     if answer_ok and truncated and hit:
         answer = _trim_loop(answer, hit)
     # 输出侧兜底清洗：剥来源标记 `[n]`（提示词只能概率压住）+ 去重重复的列表项（图谱与
-    # 参考文档给的是同一批队伍、只是角色名先后不同，8B 会读成「还有一批」再列一遍）。
-    clean = dedup_list_items(strip_ref_marks(answer))
+    # 参考文档给的是同一批队伍、只是角色名先后不同，8B 会读成「还有一批」再列一遍）
+    # + 补回缺失的百分号（术语紧跟裸数值，见 text.fix_percent_units）。
+    clean = dedup_list_items(fix_percent_units(strip_ref_marks(answer)))
     if clean != answer:
-        log.info("输出清洗：去掉 %d 个字符（来源标记 / 重复列表项）", len(answer) - len(clean))
+        log.info("输出清洗：去掉 %d 个字符（来源标记 / 重复列表项 / 缺失单位）",
+                 len(answer) - len(clean))
         answer = clean
 
     # 概括性配队：答完追问一句，引导用户点名具体队伍（点名后才会补向量检索打法）。
@@ -1027,9 +1078,10 @@ async def generate_node(state: RagState):
 
     # 情绪标签（供 TTS 使用）：仅在 TTS 可用时才判定——判定需要额外一次模型调用，
     # TTS 默认关闭时该字段无人消费，没有理由付出这一次延迟。
+    # 可用性按**当前用户**判（用户自持凭据优先，其次全局兜底，见 rag/tts.resolve）。
     # 判定模型：默认本地 8b；配了自定义云端模型且该用户开启兼任时才复用 chat_client。
     emotion = ""
-    if setting.EMOTION_ENABLED and tts_ready()[0]:
+    if setting.EMOTION_ENABLED and await tts.available(state.get("user_id")):
         emotion = await detect_emotion(
             answer, chat_client=client if emotion_via_cloud else None)
 
@@ -1045,13 +1097,56 @@ async def generate_node(state: RagState):
     }
 
 
-# 闲聊人设提示：模型自带人设，这里只给最小引导；不带术语表与 RAG 答题约束，
-# 否则会诱发「资料里没有…」式拒答独白（正是复读的温床）。
+# 「不检索」类分支的人设提示：模型自带人设，这里只给最小引导；不带术语表与 RAG
+# 答题约束，否则会诱发「资料里没有…」式拒答独白（正是复读的温床）。
 _CHITCHAT_HINT = "家人在跟你闲聊，没有要查资料。自然、简短地回应，不要提资料、检索或知识库。"
 
+# 时间分支的场景提示：把工具取到的**真实时间**原样摆到模型面前，只要求它照说。
+# 提示词铁律（见本模块顶部说明）：只写正面要求，不写「不要编时间」这类否定句——
+# aemeath 会把点名的反例当样本照抄。
+# 「照抄括号里的口语说法」这句是实测加上的：只给 24 小时制时模型会把 16:5x 心算成
+# 「三点五x」（8 次抽样错 3 次），明确指向预先生成的口语写法后不再出错；
+# 末尾的「一两句说完」是长度约束——短答案既贴爱弥斯「话多」的人设又不至于写飞。
+_TIME_HINT = (
+    "家人问的是现在的时间。服务端时钟刚查到：{now}。\n"
+    "用你自己的口吻把这个时间讲给家人听，一两句说完就好："
+    "把上面的年月日、星期三和括号里的口语说法（上午/下午几点几分）讲出来即可。"
+)
 
-async def chitchat_node(state: RagState):
-    """闲聊分支：不挂检索，带对话历史，人设自然回应。streaming node。"""
+# 「顺带问时间」的场景提示（state.need_time，见 intent.mentions_time）。
+# 与 _TIME_HINT 的区别：那边整句都在问时间，这边另有一个主诉求（查资料或闲聊），
+# 时间只是附带一句——所以措辞必须点明「别丢掉原来的话题」，否则模型容易只答时间。
+_TIME_ASIDE_HINT = (
+    "家人这句话里也问了现在的时间。服务端时钟刚查到：{now}。\n"
+    "顺带用你自己的口吻把这个时间讲一句就好，别丢掉上面那个话题本身。"
+)
+
+
+async def _now_if_needed(state: RagState) -> str:
+    """本轮**顺带**问了时间就取服务端真值，否则返回空串。
+
+    L1 直调（与 time_node 同一把工具、同一口径）：确定性调度，零幻觉。
+    纯时间问题（intent=time）不走这里——它由 time_node 独占处理，本函数只服务
+    「既问资料又问时间」的混合问句（intent 仍是 fact/semantic/hybrid/chitchat）。
+    工具异常返回空串：少说一句时间而已，绝不能让检索那条主链路跟着挂掉。
+    """
+    if not state.get("need_time"):
+        return ""
+    try:
+        return await current_time_tool.ainvoke({})
+    except Exception as exc:
+        log.error("current_time 工具调用失败（混合时间问句）: %s", exc)
+        return ""
+
+
+async def _chat_turn(state: RagState, hint: str):
+    """「不检索」类分支的公共实现：闲聊 chitchat_node 与时间 time_node 共用。
+
+    两处的人设口径、云端/本地 system 注入规则、流式累积、复读兜底、情绪判定、
+    记忆写回**完全一致**，唯一差别就是那句场景提示 hint —— 所以不复制两份代码：
+    双份实现的必然结局是修了一处忘另一处（本项目对「同一语义挂两条判据」已有
+    多次踩坑记录）。streaming node：内部累积全文，只在收尾 yield 一次最终状态。
+    """
     client, is_cloud, emotion_via_cloud = await _chat_client(state)
     msgs: list = []
     # 云端：人设走 SystemMessage（见 _chat_client 的两条相反规则）。
@@ -1063,7 +1158,7 @@ async def chitchat_node(state: RagState):
             msgs.append(HumanMessage(content=m["content"]))
         else:
             msgs.append(AIMessage(content=m["content"]))
-    msgs.append(HumanMessage(content=f"{_CHITCHAT_HINT}\n\n家人说：{state['question']}"))
+    msgs.append(HumanMessage(content=f"{hint}\n\n家人说：{state['question']}"))
 
     guard = _new_loop_guard()
     full: list[str] = []
@@ -1093,10 +1188,10 @@ async def chitchat_node(state: RagState):
     if answer_ok and truncated and hit:
         answer = _trim_loop(answer, hit)
 
-    # 情绪标签：与 generate_node 使用同一开关（仅在 TTS 可用时判定）。
+    # 情绪标签：与 generate_node 使用同一开关（仅在 TTS 可用时判定，按当前用户判）。
     # 闲聊是 playful/cheerful 的高发场景，情绪对语音表现力价值最大。
     emotion = ""
-    if setting.EMOTION_ENABLED and tts_ready()[0]:
+    if setting.EMOTION_ENABLED and await tts.available(state.get("user_id")):
         emotion = await detect_emotion(
             answer, chat_client=client if emotion_via_cloud else None)
 
@@ -1109,10 +1204,51 @@ async def chitchat_node(state: RagState):
     }
 
 
+async def chitchat_node(state: RagState):
+    """闲聊分支：不挂检索，带对话历史，人设自然回应。streaming node。
+
+    如果这句闲聊里**顺带**问了时间（「今天几号呀，天气真好」这类），把服务端真值
+    一并交给它 —— 不为此另开分支：答案的形态仍然是闲聊，只是多了一条可信依据。
+    （纯时间问题走 time_node；两者的差别只是提示词，见 _chat_turn。）
+    """
+    hint = _CHITCHAT_HINT
+    now = await _now_if_needed(state)
+    if now:
+        hint = f"{_CHITCHAT_HINT}\n\n{_TIME_ASIDE_HINT.format(now=now)}"
+    async for out in _chat_turn(state, hint):
+        yield out
+
+
+async def time_node(state: RagState):
+    """时间分支：**确定性**调 current_time 工具取服务端真值，再交模型用爱弥斯口吻说出。
+
+    为什么单开一条分支：模型没有时钟，训练数据里的「今天」永远停在训练期附近；
+    而「现在几点」这类问句经 classify_topic 会被判成闲聊（它确实与游戏无关），落到
+    chitchat_node 后模型对真实时间一无所知，只能含糊其辞（「应该是下午吧」）或自信地
+    报一个错日期。主题分类器那层 LLM 判断在这里没有价值——时间的事实来源只有服务端时钟。
+
+    走 L1 直调（而非 agent.py 的 bind_tools 自主选工具）与本项目其余工具口径一致：
+    确定性调度，零幻觉、零额外延迟。工具异常不静默——hint 里明确告知没读到，
+    让模型按人设说不知道，而不是顺手编一个时间出来。
+    """
+    now = ""
+    try:
+        now = await current_time_tool.ainvoke({})
+    except Exception as exc:
+        log.error("current_time 工具调用失败: %s", exc)
+    hint = _TIME_HINT.format(now=now) if now else (
+        "家人问的是现在的时间，但服务端时钟这次没读到。"
+        "用你自己的口吻老实说没拿到当前时间，让家人稍后再问一次。"
+    )
+    async for out in _chat_turn(state, hint):
+        yield out
+
+
 def build_graph() -> StateGraph:
     g = StateGraph(RagState)
     g.add_node("intent", intent_node)
     g.add_node("chitchat", chitchat_node)
+    g.add_node("time", time_node)
     g.add_node("graph", graph_node)
     g.add_node("vector", vector_node)
     g.add_node("verify", verify_node)
@@ -1121,7 +1257,8 @@ def build_graph() -> StateGraph:
 
     g.add_edge(START, "intent")
     g.add_conditional_edges("intent", _route, {
-        "fact": "graph", "semantic": "vector", "hybrid": "graph", "chitchat": "chitchat",
+        "fact": "graph", "semantic": "vector", "hybrid": "graph",
+        "chitchat": "chitchat", "time": "time",
     })
     # 检索完先进 verify 把关（材料空/跑题在此发现），不再直达 generate
     g.add_conditional_edges("graph", _after_graph, {
@@ -1135,6 +1272,7 @@ def build_graph() -> StateGraph:
     g.add_edge("web", "generate")
     g.add_edge("generate", END)
     g.add_edge("chitchat", END)
+    g.add_edge("time", END)
     return g
 
 
@@ -1195,7 +1333,7 @@ async def ensure_characters(question: str) -> tuple[list[str], bool, list[str]]:
 
 
 def _fresh_state(question: str, characters: list[str], user_context: str = "",
-                 user_id: int | None = None) -> dict:
+                 user_id: int | None = None, history: list[dict] | None = None) -> dict:
     """每轮问答的初始状态：检索侧字段全部清零。
 
     docs/graph_facts/web_facts 等是普通字段（无 reducer），checkpointer 会把上一轮
@@ -1204,8 +1342,13 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "",
     哪些 / 在游戏里有没有技能 / 爱弥斯共鸣解放）产出同样 78 字的同一套话；同时
     _build_context 的零资料判定、verify_knowledge 的审查、前端「N 条引用」全部被
     污染。所以在入口显式清零，用 input_state 覆盖 checkpointer 的旧值。
+
+    `history` 只在「重新生成」时传：那一步已经把转录表里要重答的那一轮删掉了，
+    必须把模型侧的记忆（checkpointer 里的 history 窗口）也**替换**成删完之后的版本，
+    否则模型仍记得自己刚被删掉的那个回答，重新生成大概率吐出同一段话。
+    传 None（默认）表示不动 —— checkpointer 的 history 照常累积，这是正常问答路径。
     """
-    return {
+    state: dict = {
         "question": question,
         "characters": characters,
         "docs": [],
@@ -1216,6 +1359,9 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "",
         "retry_count": 0,
         "refreshed": False,
         "used_web": False,
+        # 同 verify_stage 一类的「每轮必须清零」字段：checkpointer 会把上一轮的值原样带进
+        # 本轮，上一轮顺带问了时间、这一轮没问，若不清零会白给一句时间。
+        "need_time": False,
         "user_context": user_context,   # 用户画像事实串；checkpointer 会跨轮带旧值，每轮显式覆盖
         # 约束：user_id 必须每轮显式覆盖（与 user_context 同理，但后果更严重）：
         # checkpointer 会跨轮带旧值，若不清零，同一 thread_id 上换人提问时，
@@ -1223,6 +1369,9 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "",
         # 无登录/未配置时为 None，_chat_client 直接回落本地默认。
         "user_id": user_id,
     }
+    if history is not None:
+        state["history"] = history
+    return state
 
 
 def _unknown_text(names: list[str]) -> str:
@@ -1239,7 +1388,7 @@ def _unknown_text(names: list[str]) -> str:
 
 
 async def ask(question: str, thread_id: str = "default", user_context: str = "",
-              user_id: int | None = None) -> dict:
+              user_id: int | None = None, history: list[dict] | None = None) -> dict:
     candidates, ok, crawled = await ensure_characters(question)
     if candidates and not ok:
         log.info("自动爬取: 最终回「不知道」(角色=%s)", candidates)
@@ -1250,13 +1399,13 @@ async def ask(question: str, thread_id: str = "default", user_context: str = "",
     chain = await get_chain()
     injected = crawled if crawled else []
     return await chain.ainvoke(
-        _fresh_state(question, injected, user_context, user_id),
+        _fresh_state(question, injected, user_context, user_id, history),
         config={"configurable": {"thread_id": thread_id}},
     )
 
 
 async def ask_stream(question: str, thread_id: str = "default", user_context: str = "",
-                     user_id: int | None = None):
+                     user_id: int | None = None, history: list[dict] | None = None):
     """流式问答：走 LangGraph astream_events，checkpointer 自动管理多轮记忆。
 
     yield dict：
@@ -1280,6 +1429,10 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         yield {
             "done": True, "answer": text, "intent": "", "slots": [],
             "characters": candidates, "docs": 0, "sources": [], "truncated": False,
+            # thread_id 必须回传：会话现在是服务端建的（前端不传 thread_id 时由后端生成），
+            # 前端要靠这个事件认领新建的会话 id，否则「新建对话」后第一句问答
+            # 前端永远不知道自己的会话叫什么。
+            "thread_id": thread_id,
         }
         return
 
@@ -1287,11 +1440,12 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
 
     chain = await get_chain()
     injected = crawled if crawled else []
-    input_state = _fresh_state(question, injected, user_context, user_id)
+    input_state = _fresh_state(question, injected, user_context, user_id, history)
     config = {"configurable": {"thread_id": thread_id}}
 
     # 从事件流抽 token + 阶段 + 最终元数据
-    full: list[str] = []
+    full: list[str] = []               # 模型原稿（旁路抽取，用于算 done.answer）
+    sent: list[str] = []               # 实际下发给前端的正文（收尾只补差量时当前缀基准）
     final_state: dict = {}
     emitted_stages: set[str] = set()   # streaming node 会触发两次 on_chain_start，去重
     answer_filter = AnswerFilter()     # 流式剥 `[n]` + 去重重复列表项（见 text.AnswerFilter）
@@ -1311,11 +1465,13 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         #    未挡 wwa:summary 时摘要整句被拼进答案尾巴；接情绪标签时预判到 wwa:emotion 同样。
         # ② 节点过滤：intent_node 里的主题分类器也调 LLM，事件同样挂 on_chat_model_stream
         #    （node='intent'），不过滤会把 {"topic":"chitchat"} 当答案吐给前端（实测发生过）。
+        #    白名单 = 三个会产出「给用户看的正文」的节点（generate/chitchat/time），
+        #    新增这类节点必须同步加进来，否则答案会被静默丢弃、前端一个字都收不到。
         elif kind == "on_chat_model_stream":
             if _INTERNAL_TAGS & set(event.get("tags") or []):
                 continue
             node = event.get("metadata", {}).get("langgraph_node", "")
-            if node not in ("generate", "chitchat"):
+            if node not in ("generate", "chitchat", "time"):
                 continue
             chunk = event.get("data", {}).get("chunk")
             if chunk and hasattr(chunk, "content") and chunk.content:
@@ -1323,6 +1479,7 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
                 # 输出侧清洗：剥 `[n]` 来源标记 + 去重重复列表项（见 text.AnswerFilter）
                 safe = answer_filter.feed(chunk.content)
                 if safe:
+                    sent.append(safe)
                     yield {"token": safe}
 
         # 图执行结束事件：拿最终完整状态（含 intent/slots/characters/docs/truncated/answer）
@@ -1331,18 +1488,38 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
             if isinstance(output, dict):
                 final_state = output
 
-    # 收尾：吐出过滤器扣住的尾巴（被切成多 token 的 `[n]` 开头、最后一行列表项）
-    tail_out = answer_filter.flush()
+    # 收尾：先吐出过滤器扣住的尾巴（被切成多 token 的 `[n]` 开头、最后一行列表项），
+    # 再做单位修正——顺序反了会让修正文本排在被扣住的尾巴前面（见 AnswerFilter.request_more）。
+    tail_out = answer_filter.request_more()
     if tail_out:
+        sent.append(tail_out)
         yield {"token": tail_out}
     if answer_filter.removed_marks or answer_filter.removed_lines:
         log.info("流式清洗：来源标记 %d 处 / 重复列表项 %d 行",
                  answer_filter.removed_marks, answer_filter.removed_lines)
 
-    answer = dedup_list_items(strip_ref_marks("".join(full)))
+    answer = dedup_list_items(fix_percent_units(strip_ref_marks("".join(full))))
     # 如果 generate_node 内部已截断，final_state["answer"] 是截断后的权威全文
     if final_state.get("truncated") and final_state.get("answer"):
         answer = final_state["answer"]
+
+    # 单位修正的**流式补吐**：token 是旁路抽取的，屏幕上还是模型原稿；把修正后的
+    # 完整文本在滤器里过一遍（去重状态与刚才同源），只把**新增的后缀**吐出去。
+    # 截断/已收口时跳过（与下面追问句同一口径：半截答案后面补东西反而突兀）。
+    #
+    # ⚠️ 判据必须用「已下发的正文」`sent` 做前缀比较，**不能**用 AnswerFilter.would_append：
+    # 它只看列表行的去重集合 `_seen`，而 `_route` 对非列表行是无条件直通的——答案里
+    # 没有列表行时 `_seen` 恒为空、would_append 恒为 True，`feed(answer)` 会把**整篇正文
+    # 原样重吐一遍**。实测（单元级复现 + 端到端）：闲聊/时间这类无列表行的短答案整段重复
+    # 一遍（48 字答案流出 96 字）；含列表行的事实答案则是开头的非列表行被重吐一遍
+    # （`你好呀…` 之后又跟一句开头）。前端最终会用 `done.answer` 覆盖，所以屏幕上的终稿
+    # 没错，但流式过程中的重复/错位是实打实的，且与「只补后缀」的原意相反。
+    already = "".join(sent)
+    if not final_state.get("truncated") and answer.startswith(already) and len(answer) > len(already):
+        for chunk in answer_filter.feed(answer[len(already):]):
+            if chunk:
+                sent.append(chunk)
+                yield {"token": chunk}
 
     # 概括性配队：generate_node 已把追问句拼进 final_state["answer"]，但流式的 token
     # 是**旁路抽取**的（on_chat_model_stream），只有模型生成的正文，必须把这段差量补吐
@@ -1371,6 +1548,7 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         "sources": doc_sources(final_state.get("docs") or []),
         "truncated": bool(final_state.get("truncated")),
         "emotion": final_state.get("emotion", ""),   # TTS 情绪（未开启时为空串）
+        "thread_id": thread_id,   # 见上：供前端认领服务端新建的会话
     }
 
 

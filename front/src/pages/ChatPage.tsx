@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Plus, MessageSquare, Trash2, Pencil, Check, X, Sparkles, Library, Swords, Gem, Coins } from 'lucide-react'
-import { useStore, ensureActiveConversation } from '../store/useStore'
+import { useStore } from '../store/useStore'
 import MessageBubble from '../components/MessageBubble'
 import Composer from '../components/Composer'
 import './ChatPage.css'
@@ -13,15 +13,15 @@ const EXAMPLES = [
   { icon: Sparkles, text: '今汐怎么玩？', tag: '攻略' },
 ]
 
-/** 左侧会话列表 */
+/** 左侧会话列表（数据来自服务端，按登录用户隔离） */
 function SessionList() {
-  const conversations = useStore((s) => s.conversations)
-  const activeId = useStore((s) => s.activeId)
+  const convs = useStore((s) => s.convs)
+  const activeThreadId = useStore((s) => s.activeThreadId)
   const select = useStore((s) => s.selectConversation)
   const create = useStore((s) => s.newConversation)
   const remove = useStore((s) => s.deleteConversation)
   const rename = useStore((s) => s.renameConversation)
-  const busyId = useStore((s) => s.busyId)
+  const busy = useStore((s) => s.busy)
   const navigate = useNavigate()
 
   const [editing, setEditing] = useState<string | null>(null)
@@ -36,7 +36,7 @@ function SessionList() {
     setDraft(title)
   }
   const commit = (id: string) => {
-    rename(id, draft)
+    void rename(id, draft)
     setEditing(null)
   }
 
@@ -52,28 +52,28 @@ function SessionList() {
         <Plus size={15} /> 新建对话
       </button>
       <div className="session-scroll">
-        {conversations.length === 0 && (
+        {convs.length === 0 && (
           <div className="session-empty">暂无会话</div>
         )}
-        {conversations.map((c) => (
+        {convs.map((c) => (
           <div
-            key={c.id}
-            className={`session-item ${c.id === activeId ? 'session-active' : ''}`}
-            onClick={() => !busyId && select(c.id)}
+            key={c.thread_id}
+            className={`session-item ${c.thread_id === activeThreadId ? 'session-active' : ''}`}
+            onClick={() => !busy && void select(c.thread_id)}
           >
             <MessageSquare size={14} className="session-icon" />
-            {editing === c.id ? (
+            {editing === c.thread_id ? (
               <span className="session-edit" onClick={(e) => e.stopPropagation()}>
                 <input
                   autoFocus
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') commit(c.id)
+                    if (e.key === 'Enter') commit(c.thread_id)
                     if (e.key === 'Escape') setEditing(null)
                   }}
                 />
-                <button onClick={() => commit(c.id)} title="保存">
+                <button onClick={() => commit(c.thread_id)} title="保存">
                   <Check size={13} />
                 </button>
                 <button onClick={() => setEditing(null)} title="取消">
@@ -84,18 +84,18 @@ function SessionList() {
               <>
                 <span className="session-title">{c.title}</span>
                 <span className="session-ops" onClick={(e) => e.stopPropagation()}>
-                  <button title="重命名" onClick={() => startEdit(c.id, c.title)}>
+                  <button title="重命名" onClick={() => startEdit(c.thread_id, c.title)}>
                     <Pencil size={12} />
                   </button>
                   <button
-                    title={confirmDel === c.id ? '再点一次确认删除' : '删除'}
-                    className={confirmDel === c.id ? 'danger-confirm' : ''}
+                    title={confirmDel === c.thread_id ? '再点一次确认删除' : '删除'}
+                    className={confirmDel === c.thread_id ? 'danger-confirm' : ''}
                     onClick={() => {
-                      if (confirmDel === c.id) {
-                        remove(c.id)
+                      if (confirmDel === c.thread_id) {
+                        void remove(c.thread_id)
                         setConfirmDel(null)
                       } else {
-                        setConfirmDel(c.id)
+                        setConfirmDel(c.thread_id)
                       }
                     }}
                   >
@@ -117,19 +117,14 @@ function SessionList() {
 }
 
 export default function ChatPage() {
-  const activeId = useStore((s) => s.activeId)
-  const conversations = useStore((s) => s.conversations)
-  const busyId = useStore((s) => s.busyId)
+  const messages = useStore((s) => s.messages)
+  const busy = useStore((s) => s.busy)
   const send = useStore((s) => s.send)
   const stop = useStore((s) => s.stop)
   const regenerate = useStore((s) => s.regenerate)
   const health = useStore((s) => s.health)
   const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const navigate = useNavigate()
-
-  const conv = conversations.find((c) => c.id === activeId)
-  const messages = conv?.messages ?? []
-  const busy = busyId === activeId
 
   const scrollRef = useRef<HTMLDivElement>(null)
 
@@ -147,11 +142,6 @@ export default function ChatPage() {
     return () => window.removeEventListener('wuwa-nav', handler)
   }, [navigate])
 
-  // 保证有活跃会话
-  useEffect(() => {
-    if (!activeId) ensureActiveConversation()
-  }, [activeId])
-
   const isEmpty = messages.length === 0
 
   return (
@@ -162,23 +152,27 @@ export default function ChatPage() {
         <div className="chat-scroll" ref={scrollRef}>
           {isEmpty ? (
             <div className="chat-welcome">
-              <div className="welcome-logo">
-                {avatarAssistant ? <img src={avatarAssistant} alt="爱弥斯" /> : <Sparkles size={26} />}
-              </div>
-              <h1>
-                你好，我是<b className="grad-text">爱弥斯</b>
-              </h1>
-              <p className="welcome-sub">
-                鸣潮角色知识助手 · 声骸配装 / 突破材料 / 共鸣链 / 角色攻略，问我吧
-              </p>
-              {health === 'down' && (
-                <div className="welcome-warn">
-                  后端服务未连接（127.0.0.1:8000）。请先启动 FastAPI 与 Celery worker，或在「设置」中检查 API 地址。
+              {/* 标题与副标题收进一块带底色的面板：自定义背景图下，气泡/卡片外的
+                  文字直接压在图片上，深色图里几乎读不出来（见 ChatPage.css .welcome-card）。 */}
+              <div className="welcome-card">
+                <div className="welcome-logo">
+                  {avatarAssistant ? <img src={avatarAssistant} alt="爱弥斯" /> : <Sparkles size={26} />}
                 </div>
-              )}
+                <h1>
+                  你好，我是<b className="grad-text">爱弥斯</b>
+                </h1>
+                <p className="welcome-sub">
+                  鸣潮角色知识助手 · 声骸配装 / 突破材料 / 共鸣链 / 角色攻略，问我吧
+                </p>
+                {health === 'down' && (
+                  <div className="welcome-warn">
+                    后端服务未连接（127.0.0.1:8000）。请先启动 FastAPI 与 Celery worker，或在「设置」中检查 API 地址。
+                  </div>
+                )}
+              </div>
               <div className="example-grid">
                 {EXAMPLES.map(({ icon: Icon, text, tag }) => (
-                  <button key={text} className="example-card" onClick={() => send(text)}>
+                  <button key={text} className="example-card" onClick={() => void send(text)}>
                     <span className="example-icon">
                       <Icon size={16} />
                     </span>
