@@ -27,9 +27,11 @@ from wuwa_rag.config import get_settings
 from wuwa_rag.core import conversations as conv
 from wuwa_rag.core import llmstore
 from wuwa_rag.core.authdb import close_pool, ensure_schema
+from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
 from wuwa_rag.dialog.graph import ask, ask_stream, doc_sources
 from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
+from wuwa_rag.knowledge import entities as kb
 from wuwa_rag.services.emotion import EMOTION_TAGS
 from wuwa_rag.services.profile import (
     all_users_stats,
@@ -41,7 +43,14 @@ from wuwa_rag.services.profile import (
 )
 from wuwa_rag.services.tts import MODEL_LABEL, VOICE_LABELS, synthesize, voice_label
 from wuwa_rag.services.tts import resolve as tts_resolve
-from wuwa_rag.tasks.worker import PIPELINE_STEPS, STEP_LABELS, build_pipeline, get_progress
+from wuwa_rag.tasks.worker import (
+    PIPELINE_STEPS,
+    STEP_LABELS,
+    build_pipeline,
+    build_refresh_pipeline,
+    delete_character_knowledge,
+    get_progress,
+)
 from wuwa_rag.ww_logger import get_logger
 
 log = get_logger("app")
@@ -814,3 +823,85 @@ async def api_ingest_status(character: str,
                       "error": snap.get("errors", {}).get(k)})
     return {"character": character, "status": overall, "found": True,
             "steps": steps, "updated_at": snap.get("updated_at")}
+
+
+# ── 知识库视图（列出「已拥有什么」；重爬/删除仅管理员） ─────────────
+
+@app.get("/knowledge/characters")
+async def api_knowledge_characters(
+        user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """列出知识库里**实际拥有**的角色 —— 回答「我现在有什么」。
+
+    与 `/ingest` 那条「往流水线里塞一个角色」是两件事。列表对**所有登录用户**
+    开放（知识库覆盖度是产品信息，游客也该看得到），写操作才是 admin。
+
+    字段含义：
+    - `source`  入库时写的来源标识（当前恒为 `kurobbs`，即鸣潮 WIKI）；
+    - `raw_uri` RustFS 里的原文对象指针，用来核对「这份知识是从哪份原文来的」；
+    - `chunks`  实际块数 —— 为 0 说明入了库但没跑索引，是个有用的健康信号；
+    - `seeded`  是否属于内置种子名册，**False = 靠自动爬取发现并入库的新角色**，
+                这也是「名册随增随变」在界面上的可见证据。
+    """
+    async with get_cursor() as cur:
+        await cur.execute(
+            """
+            SELECT d.character, d.source, d.title, d.raw_uri, d.raw_size,
+                   d.created_at, d.updated_at, count(c.id) AS chunks
+            FROM documents d
+            LEFT JOIN chunks c ON c.document_id = d.id
+            WHERE d.deleted_at IS NULL
+            GROUP BY d.id
+            ORDER BY d.updated_at DESC, d.character
+            """
+        )
+        rows = await cur.fetchall()
+    items = [
+        {
+            "character": r[0],
+            "source": r[1],
+            "title": r[2],
+            "raw_uri": r[3],
+            "raw_size": r[4],
+            "created_at": r[5].isoformat() if r[5] else None,
+            "updated_at": r[6].isoformat() if r[6] else None,
+            "chunks": int(r[7] or 0),
+            "seeded": r[0] in kb.SEED_CHARACTER_NAMES,
+        }
+        for r in rows
+    ]
+    in_db = {r[0] for r in rows}
+    return {
+        "items": items,
+        "total": len(items),
+        # 种子名册里还没入库的角色 —— 前端拿去渲染「可一键收录」的候选区。
+        # 由后端下发而不是前端硬编码：候选名册只允许有一个来源，
+        # 否则加新角色时前后端两份清单必然不同步。
+        "seeded_only": sorted(kb.SEED_CHARACTER_NAMES - in_db),
+    }
+
+
+@app.post("/knowledge/refresh")
+async def api_knowledge_refresh(body: IngestIn,
+                                user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """重爬更新：**先清该角色的旧知识**，再重跑五步链。
+
+    为什么必须先清而不是直接重跑：wiki 改版后块内容全变、hash 也全变，
+    `chunks` 表的 `ON CONFLICT (chunk_id) DO NOTHING` 只能挡同 hash，
+    挡不住新旧并存 —— 不清就会召回到旧知识（这正是 verify 判不匹配时的同一套刷新链）。
+    """
+    r = build_refresh_pipeline(body.character).apply_async()
+    return {"character": body.character, "chain_id": r.id, "state": r.state}
+
+
+@app.delete("/knowledge/characters/{character}")
+async def api_knowledge_delete(
+        character: str,
+        user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """删除该角色的知识库：PG（级联 chunks）+ Chroma + Neo4j + BM25 全清。
+
+    异步执行 —— Chroma 与 Neo4j 的清理不是毫秒级的事，同步做会把接口挂住。
+    前端拿到 task_id 后轮询 `GET /knowledge/characters`，看它从列表里消失即可。
+    """
+    r = delete_character_knowledge.apply_async(args=[character])
+    kb.invalidate_roster()      # 名册立刻不再包含它，不必等 60s TTL
+    return {"character": character, "task_id": r.id}

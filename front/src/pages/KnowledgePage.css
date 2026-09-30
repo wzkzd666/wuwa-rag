@@ -17,8 +17,8 @@
   margin-bottom: 16px;
 }
 
+.kb-owned,
 .kb-form,
-.kb-roster,
 .kb-records {
   padding: 18px 20px;
   margin-bottom: 16px;
@@ -79,8 +79,8 @@
   line-height: 1.45;
 }
 
-/* 名册 */
-.kb-roster-head {
+/* ============ 已收录角色 ============ */
+.kb-owned-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -88,10 +88,34 @@
   margin-bottom: 14px;
   flex-wrap: wrap;
 }
-.kb-roster-head h3 {
+.kb-owned-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 14.5px;
   font-weight: 650;
 }
+/* 角色计数气泡 —— 数字要一眼看到，但别抢标题的视觉重量 */
+.kb-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
+  background: var(--grad-soft);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.kb-owned-tools {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
 .kb-search {
   display: flex;
   align-items: center;
@@ -110,6 +134,61 @@
   font-size: 12.5px;
   font-family: inherit;
   width: 140px;
+}
+
+.kb-owned-table td {
+  vertical-align: middle;
+}
+/* 「操作」列右对齐、不折行 —— 两枚按钮要齐平，换行会看出参差 */
+.kb-act-col {
+  text-align: right;
+  white-space: nowrap;
+}
+.kb-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* 「自动收录」标记：这个名字不在内置名册里，是爬取时发现的新角色 */
+.kb-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 7px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(240, 171, 252, 0.35);
+  background: rgba(240, 171, 252, 0.08);
+  color: var(--accent-3);
+  font-size: 10.5px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
+/* 来源两行：上行给「来源站点」，下行给原文体积，避免再加一列 */
+.kb-src {
+  display: block;
+  color: var(--text-secondary);
+}
+.kb-src-sub {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 候选名册（名册里有、库里还没有的角色，点一下即入库） */
+.kb-candidates {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+.kb-candidates-title {
+  display: block;
+  margin-bottom: 9px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .roster-grid {
@@ -133,10 +212,6 @@
   color: var(--accent);
   background: rgba(94, 234, 212, 0.08);
   transform: translateY(-1px);
-}
-.roster-empty {
-  color: var(--text-muted);
-  font-size: 12.5px;
 }
 
 /* 记录表 */

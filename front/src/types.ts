@@ -133,6 +133,36 @@ export interface IngestRecord {
   error?: string
 }
 
+/** GET /knowledge/characters 的单条：知识库里**实际拥有**的一个角色 */
+export interface KnowledgeCharacter {
+  character: string
+  /** 来源标识（当前恒为 kurobbs，即鸣潮 WIKI） */
+  source: string
+  title: string | null
+  /** RustFS 原文对象指针 —— 用来核对「这份知识是从哪份原文来的」 */
+  raw_uri: string | null
+  raw_size: number | null
+  created_at: string | null
+  updated_at: string | null
+  /** 实际块数；为 0 说明入了库但索引没跑成，是有用的健康信号 */
+  chunks: number
+  /** 是否属于内置种子名册。false = 靠自动爬取发现并入库的新角色 */
+  seeded: boolean
+}
+
+/** GET /knowledge/characters 返回体 */
+export interface KnowledgeOut {
+  items: KnowledgeCharacter[]
+  total: number
+  /**
+   * 种子名册里**尚未入库**的角色。
+   *
+   * 由后端下发而不是前端硬编码：候选名册只允许有一个来源，否则加新角色时
+   * 前后端两份清单必然不同步（这正是改造前那份 `ROSTER` 常量的毛病）。
+   */
+  seeded_only: string[]
+}
+
 // ---------- 鉴权 + 用户画像（2026-09-22） ----------
 
 /** 登录态：token 存 localStorage，请求带 Authorization: Bearer */

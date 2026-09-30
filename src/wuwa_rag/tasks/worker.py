@@ -18,10 +18,20 @@ from wuwa_rag.core.db import close_pool, get_cursor
 from wuwa_rag.knowledge.crawl.chunker import chunk_markdown
 from wuwa_rag.knowledge.crawl.pipeline import _load_chunks as load_chunks_by_char
 from wuwa_rag.knowledge.crawl.pipeline import ingest_one, purge_character
-from wuwa_rag.knowledge.graph.build_graph import close_driver, delete_character, init_schema, ping, upsert_character
+from wuwa_rag.knowledge.graph.build_graph import (
+    close_driver,
+    delete_character,
+    init_schema,
+    ping,
+    upsert_character,
+)
 from wuwa_rag.knowledge.graph.extract import extract_character, load_chunks
 from wuwa_rag.knowledge.index.build_index import _load_chunks as load_all_chunks
-from wuwa_rag.knowledge.index.build_index import build_dense, build_sparse, delete_dense_by_character
+from wuwa_rag.knowledge.index.build_index import (
+    build_dense,
+    build_sparse,
+    delete_dense_by_character,
+)
 from wuwa_rag.ww_logger import get_logger
 
 
@@ -341,6 +351,32 @@ def build_refresh_pipeline(character: str):
         index_character.si(character),
         graph_character.si(character),
     )
+
+
+# ───────────── 删除（把该角色的知识库整个拿走，不重爬） ─────────────
+@celery_app.task(bind=True)
+def delete_character_knowledge(self, character: str):
+    """删掉一个角色的全部知识：PG（documents 级联 chunks）+ Chroma + Neo4j + BM25。
+
+    与刷新链第一步 `purge_character_data` 的关键差别在**最后一步**：purge 后面本来
+    跟着重爬，索引会被 `index_character` 重建；纯删除没有后续步骤，所以必须自己
+    重建 BM25 —— `bm25.pkl` 是**全量单文件**，不重建的话里面仍留着该角色的块，
+    检索照样把它召回来，表现成「删了还在答」。
+    """
+    try:
+        _run(_delete_character_async(character))
+    except Exception as exc:
+        log.warning("删除角色知识库失败 %s: %s", character, exc)
+        raise
+    reset_progress(character)          # 进度键一并清掉，免得前端看到幽灵进度
+    return {"character": character}
+
+
+async def _delete_character_async(character: str) -> None:
+    await _purge_async(character)      # PG + Chroma + Neo4j（结尾已 close_pool）
+    rows = await load_all_chunks()     # 池刚被关掉，这里会按需重开
+    build_sparse(rows)                 # BM25 全量重建，剔除残留块
+    await close_pool()
 
 
 # ───────────── CLI 入口（可选） ─────────────

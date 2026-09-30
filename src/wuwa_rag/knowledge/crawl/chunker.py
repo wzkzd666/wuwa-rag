@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
 
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 

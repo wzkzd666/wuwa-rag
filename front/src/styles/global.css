@@ -255,6 +255,11 @@ body::before {
   padding: 7px;
   border-radius: var(--radius-sm);
 }
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+  gap: 5px;
+}
 
 .input,
 .textarea,

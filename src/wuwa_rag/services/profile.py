@@ -24,7 +24,7 @@ import re
 
 from wuwa_rag.core.authdb import get_pool
 from wuwa_rag.core.llm import get_tool_llm
-from wuwa_rag.knowledge.entities import CHARACTER_ALIASES, CHARACTER_NAMES
+from wuwa_rag.knowledge.entities import CHARACTER_ALIASES, current_names
 from wuwa_rag.ww_logger import get_logger
 
 # 事实长度 / 条数硬帽
@@ -79,7 +79,10 @@ _TAIL_NOISE = re.compile(r"(?:角色|定位|流派|打法|阵容|配队|玩法|�
 # 编造出来的「刻晴」「行吟诗人」都不在名册里，所以名册检查抓的是**另一类**问题：
 # 事实里提到了某个真实角色、但用户根本没提过（例如用户说守岸人、事实却写成忌炎）。
 # 与上面的句式正则互补 —— 正则抓「任意名字被塞进角色位」，名册抓「已知名字无依据出现」。
-_KNOWN_NAMES: tuple[str, ...] = tuple(sorted(set(CHARACTER_NAMES) | set(CHARACTER_ALIASES)))
+# 名册取**动态快照**（种子 ∪ 库内角色）：新角色入库后自动纳入检查范围，
+# 不必回来改代码。这里同步读快照，不 await（profile 走的是同步过滤链路）。
+def _known_names() -> tuple[str, ...]:
+    return tuple(sorted(current_names() | set(CHARACTER_ALIASES)))
 
 
 def _grounded(fact: str, question: str) -> bool:
@@ -89,7 +92,7 @@ def _grounded(fact: str, question: str) -> bool:
     「这位用户的小档案」，一条假事实会长期扭曲模型对这位用户的认识。
     因此两道检查都刻意偏严：宁可丢，不可留。
     """
-    for name in _KNOWN_NAMES:
+    for name in _known_names():
         if name in fact and name not in question:
             return False
     for m in _ROLE_ASSERT.finditer(fact):

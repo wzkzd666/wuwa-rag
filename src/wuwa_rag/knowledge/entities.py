@@ -1,21 +1,31 @@
-"""角色名解析：静态角色名册 + LLM 兜底。
+"""角色名解析：名册（种子 ∪ 库内实际角色）+ LLM 兜底。
+
 用于问答时识别「知识库里还没有」的角色，以便自动触发爬取+建库。
-规则优先：先在名册(CHARACTER_NAMES / CHARACTER_ALIASES)里做匹配；名册没命中再走一次轻量 LLM 抽取。
+
+⚠️ 名册**不是**写死的清单。`SEED_CHARACTER_NAMES` 只是冷启动种子（空库时规则层
+也得认得常见角色名），真正的名册是 `get_roster()` = **种子 ∪ PG `documents` 里
+已入库的角色**。所以新角色入库后自动进名册，不需要改代码。
+
+规则优先：先在名册里匹配；名册没命中再走一次轻量 LLM 抽取——兜底保留，作用是
+识别**连库都还没有**的全新角色（wiki 刚出的那种）。
 """
 from __future__ import annotations
 
 import json
 import re
+import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llm import get_tool_llm
 from wuwa_rag.ww_logger import get_logger
 
 log = get_logger('rag')
 
-# 全量角色名
-CHARACTER_NAMES: set[str] = {
+# 冷启动种子名册：只在「库是空的」或「库读不出来」时兜底。
+# 它不是权威清单，别往这里追加新角色——入库即可生效，见 get_roster()。
+SEED_CHARACTER_NAMES: set[str] = {
     "丹瑾", "丽贝卡", "仇远", "今汐", "凌阳", "千咲", "卜灵", "卡卡罗", "卡提希娅", "吟霖",
     "嘉贝莉娜", "坎特蕾拉", "夏空", "奥古斯塔", "守岸人", "安可", "尤诺", "布兰特", "弗洛洛",
     "忌炎", "折枝", "散华", "桃祈", "椿", "洛可可", "洛瑟菈", "清宵", "渊武",
@@ -33,6 +43,54 @@ CHARACTER_ALIASES: dict[str, str] = {
     "电主": "漂泊者-男-导电",
     "卡提": "卡提希娅",          # wiki 配队表里的简称，实测散落在多个角色页
 }
+
+# ---------- 动态名册：种子 ∪ 库内实际角色 ----------
+_ROSTER_TTL = 60.0
+# (采集时刻 monotonic, 名册快照)。**空快照 = 还没采过**，不能拿它当「名册为空」用。
+_roster_snap: tuple[float, frozenset[str]] = (0.0, frozenset())
+
+
+async def get_roster() -> set[str]:
+    """当前名册 = 种子名册 ∪ 库里已入库的角色；TTL 60s 缓存。
+
+    数据源取 PG `documents`（唯一真源）而不是 Neo4j：Neo4j 是可重建的派生索引，
+    而「名册里该不该有这个角色」必须跟真源走 —— 角色被删除时 documents 先没了，
+    名册就该立刻不再包含它。
+
+    读库失败不抛（问答链路不能因为一次名册查询挂掉），回落种子名册并告警。
+    """
+    global _roster_snap
+    now = time.monotonic()
+    if _roster_snap[1] and now - _roster_snap[0] < _ROSTER_TTL:
+        return set(_roster_snap[1])
+    in_db: set[str] = set()
+    try:
+        async with get_cursor() as cur:
+            await cur.execute(
+                "SELECT DISTINCT character FROM documents WHERE deleted_at IS NULL")
+            in_db = {r[0] for r in await cur.fetchall() if r[0]}
+    except Exception as exc:
+        log.warning("读取库内角色失败（本轮回落种子名册）: %s", exc)
+        return set(SEED_CHARACTER_NAMES)
+    full = frozenset(SEED_CHARACTER_NAMES | in_db)
+    _roster_snap = (now, full)
+    return set(full)
+
+
+def current_names() -> set[str]:
+    """同步读最近一次名册快照（尚未采过则回落种子）。
+
+    给 `normalize_character_name` 这类**同步**调用方用：图谱抽取与检索侧是同步
+    批处理，不该为了一次归一去 await。快照由 `get_roster()` 负责刷新。
+    """
+    return set(_roster_snap[1]) if _roster_snap[1] else set(SEED_CHARACTER_NAMES)
+
+
+def invalidate_roster() -> None:
+    """让下一次 `get_roster()` 立刻重采（入库/删除角色后调用，不必等 TTL）。"""
+    global _roster_snap
+    _roster_snap = (0.0, frozenset())
+
 
 # 漂泊者：性别维度归一为[男]
 _POVER_ATTRS = ("导电", "气动", "湮灭", "衍射", "热熔", "冷凝")
@@ -82,7 +140,7 @@ def normalize_character_name(tok: str, known: set[str] | None = None) -> str | N
         `折枝 或者作为奶位配合任意队伍` -> 前缀最长匹配 -> `折枝`（规则⑤）
         `主输出`             -> 全不中 -> None
     """
-    names = CHARACTER_NAMES if known is None else known
+    names = current_names() if known is None else known
     t = (tok or "").strip()
     if not t:
         return None
@@ -165,7 +223,7 @@ def _pover_resolve(question: str) -> str | None:
 async def _llm_candidates(question: str) -> list[str]:
     """名册没命中时的 LLM 兜底，走 tool 模型 qwen3:8b（抽取任务，非 chat）。
 
-    输出不要再用 CHARACTER_NAMES 过滤：规则层已覆盖名册内角色（兜底触发率约 0%），
+    输出不要再用名册过滤：规则层已覆盖名册内角色（兜底触发率约 0%），
     这个兜底的唯一价值就是识别「名册里还没有的新角色」以触发自动爬取；
     拿名册过滤等于把该功能废掉。幻觉名由爬取侧 CharacterNotFound 兜住。
     """
@@ -188,24 +246,29 @@ async def _llm_candidates(question: str) -> list[str]:
 
 
 
-def _rule_candidates(question: str) -> list[str]:
-    """名册规则匹配。漂泊者走特例（性别归男）；其余按 CHARACTER_NAMES / CHARACTER_ALIASES 匹配。"""
+async def _rule_candidates(question: str) -> list[str]:
+    """名册规则匹配，吃的是**动态名册**（种子 ∪ 库内角色，见 `get_roster`）。
+
+    漂泊者走特例（性别归男）；其余按名册 / `CHARACTER_ALIASES` 匹配。
+    命中结果按名排序：`hits` 是 set，不排的话多角色问句的候选顺序每轮都不同，
+    日志和后续自动爬取的入队顺序都跟着飘。
+    """
+    names = await get_roster()
     hits: set[str] = set()
     p = _pover_resolve(question)
     if p:
         hits.add(p)
-    for n in CHARACTER_NAMES:
+    for n in names:
         if n and n in question:
             hits.add(n)
     for alias, std in CHARACTER_ALIASES.items():
         if alias in question:
             hits.add(std)
-    out = [s for s in hits]
-    return out
+    return sorted(hits)
 
 
 async def resolve_candidates(question: str) -> list[str]:
-    rule = _rule_candidates(question)
+    rule = await _rule_candidates(question)
     if rule:
         log.info("角色抽取: 规则命中 %s", rule)
         return rule

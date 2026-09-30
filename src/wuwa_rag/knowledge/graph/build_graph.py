@@ -12,7 +12,12 @@ from __future__ import annotations
 import asyncio
 
 from wuwa_rag.config import ensure_dirs
-from wuwa_rag.knowledge.graph.extract import CharacterFacts, all_characters, extract_character, load_chunks
+from wuwa_rag.knowledge.graph.extract import (
+    CharacterFacts,
+    all_characters,
+    extract_character,
+    load_chunks,
+)
 from wuwa_rag.knowledge.graph.neo4j_client import close_driver, get_session, init_schema, ping
 from wuwa_rag.ww_logger import get_logger
 
@@ -112,12 +117,19 @@ WITH DISTINCT c
 OPTIONAL MATCH (c)-[r2:HAS_CHAIN]->(x:ChainNode {character: $n})
 DETACH DELETE x, r2
 WITH DISTINCT c
-MATCH (c)-[rel:NEEDS_MATERIAL|RECOMMENDS_WEAPON|RECOMMENDS_ECHO|SYNERGIZES_WITH]->()
+OPTIONAL MATCH (c)-[rel:NEEDS_MATERIAL|RECOMMENDS_WEAPON|RECOMMENDS_ECHO|SYNERGIZES_WITH]->()
 DELETE rel
 WITH DISTINCT c
 REMOVE c.element, c.weapon, c.gender, c.birthplace,
        c.echo_main, c.echo_main_stats, c.echo_sub_stats
 """
+# ⚠️ 上面第三条 OPTIONAL 不是可选项，是必须：
+# Cypher 里 `MATCH (c)-[rel:...]->()` 是**强制匹配**，角色一条这类出边都没有时整行被
+# 过滤掉 → 后面的 `REMOVE`/`DELETE` 一次都不执行，整段清图**静默半途而废**（不报错、
+# 日志照样写「清图谱完成」）。实测：只带属性的孤立角色节点，跑完清图 element/weapon/
+# gender 原封不动；改成 OPTIONAL 后立刻被剥离。触发场景是真实存在的——重爬失败、
+# 图谱步出错的角色、人工入过库的角色，都可能只有属性没有队友/材料边。
+# 去掉 OPTIONAL 会让「刷新重爬」把上一版属性当成本轮结果带进答案，且不会有人发现。
 
 
 async def _delete_tx(tx, name: str) -> None:

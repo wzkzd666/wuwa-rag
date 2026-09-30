@@ -1,20 +1,21 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Library, Search, Download, CheckCircle2, XCircle, Clock, Zap, Info, Loader2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  CheckCircle2, Clock, Download, Info, Library, Loader2, RefreshCw, Search, Trash2, XCircle, Zap,
+} from 'lucide-react'
 import { useStore } from '../store/useStore'
-import { ingestStatus } from '../lib/api'
-import type { IngestRecord, IngestStatus } from '../types'
+import {
+  ingestStatus, knowledgeCharacters, knowledgeDelete, knowledgeRefresh,
+} from '../lib/api'
+import type { IngestRecord, IngestStatus, KnowledgeOut } from '../types'
 import './KnowledgePage.css'
 
-/** 角色名册（与后端 rag/characters.py CHARACTER_NAMES 对齐，供快捷选择） */
-const ROSTER = [
-  '丹瑾', '丽贝卡', '仇远', '今汐', '凌阳', '千咲', '卜灵', '卡卡罗', '卡提希娅', '吟霖',
-  '嘉贝莉娜', '坎特蕾拉', '夏空', '奥古斯塔', '守岸人', '安可', '尤诺', '布兰特', '弗洛洛',
-  '忌炎', '折枝', '散华', '桃祈', '椿', '洛可可', '洛瑟菈', '清宵', '渊武',
-  '漂泊者-男-导电', '漂泊者-男-气动', '漂泊者-男-湮灭', '漂泊者-男-衍射',
-  '灯灯', '炽霞', '爱弥斯', '珂莱塔', '琳奈', '白芷', '相里要', '秋水',
-  '秧秧', '秧秧·玄翎', '穗穗', '绯雪', '维里奈', '莫宁', '莫特斐', '菲比',
-  '西格莉卡', '赞妮', '达妮娅', '釉瑚', '鉴心', '长离', '陆·赫斯', '露帕', '露西',
-]
+/**
+ * 知识库页 = 「我现在有什么」（已收录列表）+ 「怎么加新的」（提交表单）。
+ *
+ * ⚠️ 这里**不再有**角色名册常量。改造前前端存着一份与后端 CHARACTER_NAMES
+ * 对齐的 ROSTER 数组，加新角色要改两个地方、必然不同步；现在候选名册由
+ * `GET /knowledge/characters` 的 `seeded_only` 下发，唯一来源在后端。
+ */
 
 const PIPELINE_STEPS = [
   { name: '抓取', desc: 'wuwa-mcp 抓鸣潮 wiki 原文' },
@@ -23,6 +24,20 @@ const PIPELINE_STEPS = [
   { name: '索引', desc: 'BM25 稀疏 + Chroma 稠密' },
   { name: '图谱', desc: '正则抽事实 → Neo4j' },
 ]
+
+/** 来源标识 -> 展示名。后端 source 目前恒为 `kurobbs`（鸣潮 WIKI）。 */
+const SOURCE_LABELS: Record<string, string> = { kurobbs: '鸣潮 WIKI' }
+
+function fmtSize(n: number | null): string {
+  if (!n) return '—'
+  return n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`
+}
+
+function fmtTime(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false })
+}
 
 /** 提交记录「状态」列：优先渲染后端实时五步进度，回落到提交回执 */
 function renderStatus(r: IngestRecord, st?: IngestStatus) {
@@ -65,13 +80,36 @@ export default function KnowledgePage() {
   const ingestCharacter = useStore((s) => s.ingestCharacter)
   const health = useStore((s) => s.health)
   const apiBase = useStore((s) => s.settings.apiBase)
-  // 收录仅管理员（后端 /ingest 与 /ingest/status 均为 admin 守卫）
+  const toast = useStore((s) => s.toast)
+  // 写入类操作（提交/重爬/删除）仅管理员；后端 /ingest 与 /knowledge/refresh|DELETE 都是 admin 守卫
   const isAdmin = useStore((s) => s.auth?.role === 'admin')
 
   const [name, setName] = useState('')
   const [filter, setFilter] = useState('')
   // 角色名 -> 实时进度。3s 轮询 /ingest/status，五步全终态后停轮该角色
   const [progress, setProgress] = useState<Record<string, IngestStatus>>({})
+  // 知识库列表（服务端真值，不回 store、不持久化）
+  const [kb, setKb] = useState<KnowledgeOut | null>(null)
+  const [kbErr, setKbErr] = useState('')
+  const [kbLoading, setKbLoading] = useState(false)
+  // 逐行操作中的标记：角色名 -> 'refresh' | 'delete'
+  const [busy, setBusy] = useState<Record<string, string>>({})
+
+  const loadKb = useCallback(async () => {
+    setKbLoading(true)
+    try {
+      setKb(await knowledgeCharacters(apiBase))
+      setKbErr('')
+    } catch (err) {
+      setKbErr(err instanceof Error ? err.message : String(err))
+    } finally {
+      setKbLoading(false)
+    }
+  }, [apiBase])
+
+  useEffect(() => {
+    void loadKb()
+  }, [loadKb])
 
   const pendingChars = useMemo(
     () =>
@@ -84,6 +122,10 @@ export default function KnowledgePage() {
         }),
     [ingests, progress],
   )
+
+  // 待轮询角色的「集合指纹」。用它当 effect 依赖，而不是直接依赖数组本身
+  // （每轮 setProgress 都会产生新数组引用，直接依赖会无限重建定时器）
+  const pendingKey = pendingChars.join('、')
 
   useEffect(() => {
     if (pendingChars.length === 0 || health === 'down') return
@@ -105,19 +147,74 @@ export default function KnowledgePage() {
       alive = false
       clearInterval(t)
     }
-  }, [pendingChars.join('、'), health, apiBase])
+  }, [pendingKey, health, apiBase])
 
-  const filtered = useMemo(() => {
+  // 一批入库跑完就刷新知识库列表 —— 新角色这时才真的出现在「已收录」里
+  const wasPending = useRef(false)
+  useEffect(() => {
+    if (wasPending.current && pendingKey === '') void loadKb()
+    wasPending.current = pendingKey !== ''
+  }, [pendingKey, loadKb])
+
+  const items = kb?.items ?? []
+  const filteredItems = useMemo(() => {
     const kw = filter.trim()
-    if (!kw) return ROSTER
-    return ROSTER.filter((r) => r.includes(kw))
-  }, [filter])
+    return kw ? items.filter((it) => it.character.includes(kw)) : items
+  }, [items, filter])
 
   const submit = (character: string) => {
     const c = (character || name).trim()
     if (!c) return
     ingestCharacter(c)
     setName('')
+  }
+
+  const doRefresh = async (character: string) => {
+    setBusy((b) => ({ ...b, [character]: 'refresh' }))
+    try {
+      await knowledgeRefresh(character, apiBase)
+      toast('ok', `已提交「${character}」重爬更新，后台先清旧知识再跑五步`)
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy((b) => {
+        const n = { ...b }
+        delete n[character]
+        return n
+      })
+    }
+  }
+
+  const doDelete = async (character: string) => {
+    const ok = window.confirm(
+      `确认删除「${character}」的知识库？\n\n` +
+      `会清掉 PostgreSQL 文档与分块、向量索引、图谱节点，并重建 BM25。\n` +
+      `原始 md 对象保留在 RustFS，此操作不影响其他角色。`,
+    )
+    if (!ok) return
+    setBusy((b) => ({ ...b, [character]: 'delete' }))
+    try {
+      await knowledgeDelete(character, apiBase)
+      toast('info', `已提交删除「${character}」，后台清理中…`)
+      // 后台清理不是毫秒级（Chroma + Neo4j + BM25 重建），轮询等它从列表消失
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const out = await knowledgeCharacters(apiBase)
+        setKb(out)
+        if (!out.items.some((it) => it.character === character)) {
+          toast('ok', `「${character}」已从知识库移除`)
+          break
+        }
+      }
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy((b) => {
+        const n = { ...b }
+        delete n[character]
+        return n
+      })
+    }
   }
 
   return (
@@ -128,82 +225,177 @@ export default function KnowledgePage() {
             <Library size={19} className="grad-text" /> 角色知识库
           </h2>
           <p className="page-desc">
-            把新角色塞进异步收录流水线（抓取 → 分块 → 入库 → 索引 → 图谱）。提交后立即返回任务号，后台由 Celery worker 完成。
+            下面是你**当前拥有**的角色知识；新角色走「抓取 → 分块 → 入库 → 索引 → 图谱」五步异步收录，
+            提交后立即返回任务号，后台由 Celery worker 完成。角色名册随数据库自动增长，无需改配置。
           </p>
         </div>
       </div>
 
       {health === 'down' && (
         <div className="kb-warn">
-          <Info size={15} /> 后端未连接。入库接口需要 FastAPI(:8000) 与 Celery worker 同时在线。
+          <Info size={15} /> 后端未连接。入库/重爬/删除接口需要 FastAPI(:8000) 与 Celery worker 同时在线。
         </div>
       )}
 
-      {/* 提交表单（仅管理员） */}
-      {isAdmin ? (
-        <>
-          <section className="card kb-form">
-            <label className="kb-label">角色名（中文名册标准名，如「忌炎」）</label>
-            <div className="kb-form-row">
+      {/* ============ 已收录角色（核心） ============ */}
+      <section className="card kb-owned">
+        <div className="kb-owned-head">
+          <h3>
+            已收录角色
+            {kb && <span className="kb-count">{kb.total}</span>}
+          </h3>
+          <div className="kb-owned-tools">
+            <div className="kb-search">
+              <Search size={14} />
               <input
-                className="input"
-                value={name}
-                placeholder="输入或从下方名册点选…"
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && submit(name)}
+                value={filter}
+                placeholder="筛选已收录角色…"
+                onChange={(e) => setFilter(e.target.value)}
               />
-              <button className="btn btn-primary" onClick={() => submit(name)} disabled={!name.trim()}>
-                <Download size={15} /> 提交入库
-              </button>
             </div>
+            <button className="btn btn-ghost btn-sm" onClick={() => void loadKb()} disabled={kbLoading}>
+              {kbLoading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
+            </button>
+          </div>
+        </div>
 
-            <div className="pipeline">
-              {PIPELINE_STEPS.map((s, i) => (
-                <div key={s.name} className="pipeline-step">
-                  <span className="pipeline-dot">
-                    <Zap size={11} />
-                  </span>
-                  <div>
-                    <b>
-                      {i + 1}. {s.name}
-                    </b>
-                    <span>{s.desc}</span>
-                  </div>
-                </div>
+        {kbErr && (
+          <div className="kb-warn">
+            <Info size={15} /> 读取知识库失败：{kbErr}
+          </div>
+        )}
+
+        {!kbErr && filteredItems.length === 0 ? (
+          <div className="empty-state">
+            <Library size={26} />
+            <span>{items.length === 0 ? '知识库还是空的，先在下面收录一个角色' : '没有匹配的角色'}</span>
+          </div>
+        ) : (
+          <table className="kb-table kb-owned-table">
+            <thead>
+              <tr>
+                <th>角色</th>
+                <th>来源</th>
+                <th>分块</th>
+                <th>最近更新</th>
+                <th className="kb-act-col">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredItems.map((it) => (
+                <tr key={it.character}>
+                  <td className="kb-char">
+                    {it.character}
+                    {!it.seeded && (
+                      <span className="kb-badge" title="不在内置名册里，是自动爬取发现并入库的新角色">
+                        自动收录
+                      </span>
+                    )}
+                  </td>
+                  <td>
+                    <span className="kb-src">{SOURCE_LABELS[it.source] ?? it.source}</span>
+                    <span className="kb-src-sub" title={it.raw_uri ?? ''}>
+                      原文 {fmtSize(it.raw_size)}
+                    </span>
+                  </td>
+                  <td className="kb-mono">{it.chunks}</td>
+                  <td className="kb-time">{fmtTime(it.updated_at)}</td>
+                  <td className="kb-act-col">
+                    {isAdmin ? (
+                      <div className="kb-actions">
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          disabled={!!busy[it.character]}
+                          onClick={() => void doRefresh(it.character)}
+                          title="清掉旧知识后重新抓取更新（wiki 改版后用）"
+                        >
+                          {busy[it.character] === 'refresh' ? (
+                            <Loader2 size={12} className="spin" />
+                          ) : (
+                            <RefreshCw size={12} />
+                          )}
+                          重爬
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm btn-danger"
+                          disabled={!!busy[it.character]}
+                          onClick={() => void doDelete(it.character)}
+                          title="从知识库彻底移除该角色"
+                        >
+                          {busy[it.character] === 'delete' ? (
+                            <Loader2 size={12} className="spin" />
+                          ) : (
+                            <Trash2 size={12} />
+                          )}
+                          删除
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="kb-time">—</span>
+                    )}
+                  </td>
+                </tr>
               ))}
-            </div>
-          </section>
+            </tbody>
+          </table>
+        )}
+      </section>
 
-          {/* 名册快捷选择 */}
-          <section className="card kb-roster">
-            <div className="kb-roster-head">
-              <h3>角色名册</h3>
-              <div className="kb-search">
-                <Search size={14} />
-                <input
-                  value={filter}
-                  placeholder="筛选角色…"
-                  onChange={(e) => setFilter(e.target.value)}
-                />
+      {/* ============ 收录新角色（仅管理员） ============ */}
+      {isAdmin ? (
+        <section className="card kb-form">
+          <label className="kb-label">收录新角色（可输入名册外的任意角色名，会自动去 wiki 抓取）</label>
+          <div className="kb-form-row">
+            <input
+              className="input"
+              value={name}
+              placeholder="输入角色名，如「忌炎」…"
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && submit(name)}
+            />
+            <button className="btn btn-primary" onClick={() => submit(name)} disabled={!name.trim()}>
+              <Download size={15} /> 提交入库
+            </button>
+          </div>
+
+          {kb && kb.seeded_only.length > 0 && (
+            <div className="kb-candidates">
+              <span className="kb-candidates-title">
+                名册里还没收录的 {kb.seeded_only.length} 个角色（点一下即可入库）
+              </span>
+              <div className="roster-grid">
+                {kb.seeded_only.map((r) => (
+                  <button key={r} className="roster-chip" onClick={() => submit(r)}>
+                    {r}
+                  </button>
+                ))}
               </div>
             </div>
-            <div className="roster-grid">
-              {filtered.map((r) => (
-                <button key={r} className="roster-chip" onClick={() => submit(r)}>
-                  {r}
-                </button>
-              ))}
-              {filtered.length === 0 && <span className="roster-empty">没有匹配的角色</span>}
-            </div>
-          </section>
-        </>
+          )}
+
+          <div className="pipeline">
+            {PIPELINE_STEPS.map((s, i) => (
+              <div key={s.name} className="pipeline-step">
+                <span className="pipeline-dot">
+                  <Zap size={11} />
+                </span>
+                <div>
+                  <b>
+                    {i + 1}. {s.name}
+                  </b>
+                  <span>{s.desc}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
       ) : (
         <div className="kb-warn">
-          <Info size={15} /> 收录新角色需要管理员账号（admin）登录。你当前是游客，可以正常问答。
+          <Info size={15} /> 收录 / 重爬 / 删除需要管理员账号（admin）登录。你当前是游客，可以正常问答。
         </div>
       )}
 
-      {/* 提交记录 */}
+      {/* ============ 提交记录 ============ */}
       <section className="card kb-records">
         <h3>提交记录</h3>
         {ingests.length === 0 ? (

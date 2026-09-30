@@ -249,7 +249,7 @@ _PENDING: dict[int, dict[str, str]] = {}
 def crypto_ready() -> bool:
     """加密库是否可用（`cryptography` 为可选依赖，缺失则云模型功能整体降级）。"""
     try:
-        from cryptography.fernet import Fernet       # noqa: F401
+        from cryptography.fernet import Fernet  # noqa: F401
     except Exception as exc:
         log.error("凭证加密不可用（云模型配置将被禁用）：%s", exc)
         return False

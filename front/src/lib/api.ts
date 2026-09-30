@@ -1,6 +1,7 @@
 import type {
-  AskOut, ConversationDetail, ConversationMeta, IngestOut, IngestStatus, LlmConfig, LlmConfigIn,
-  LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus, UserFact,
+  AskOut, ConversationDetail, ConversationMeta, IngestOut, IngestStatus, KnowledgeOut, LlmConfig,
+  LlmConfigIn, LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus,
+  UserFact,
 } from '../types'
 
 /**
@@ -108,6 +109,30 @@ export function ingest(character: string, base?: string): Promise<IngestOut> {
 /** GET /ingest/status?character=xxx —— 按角色查五步入库进度 */
 export function ingestStatus(character: string, base?: string): Promise<IngestStatus> {
   return request(`/ingest/status?character=${encodeURIComponent(character)}`, { method: 'GET' }, base)
+}
+
+// ---------- 知识库视图 ----------
+
+/** GET /knowledge/characters —— 知识库里实际拥有的角色（含来源、块数、更新时间） */
+export function knowledgeCharacters(base?: string): Promise<KnowledgeOut> {
+  return request('/knowledge/characters', { method: 'GET' }, base)
+}
+
+/** POST /knowledge/refresh —— 先清旧知识再重跑五步链（管理员） */
+export function knowledgeRefresh(character: string, base?: string): Promise<IngestOut> {
+  return request('/knowledge/refresh', { method: 'POST', body: JSON.stringify({ character }) }, base)
+}
+
+/** DELETE /knowledge/characters/{name} —— 删除该角色知识库（管理员，后台异步执行） */
+export function knowledgeDelete(
+  character: string,
+  base?: string,
+): Promise<{ character: string; task_id: string }> {
+  return request(
+    `/knowledge/characters/${encodeURIComponent(character)}`,
+    { method: 'DELETE' },
+    base,
+  )
 }
 
 // ---------- 用户自定义云端模型（2026-09-29）----------
