@@ -151,6 +151,27 @@
   gap: 6px;
 }
 
+/* 分页条：只在超过一页时出现，贴在表格下方、不出卡片 */
+.kb-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.kb-pager-info {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+.kb-pager-btns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 「自动收录」标记：这个名字不在内置名册里，是爬取时发现的新角色 */
 .kb-badge {
   display: inline-flex;

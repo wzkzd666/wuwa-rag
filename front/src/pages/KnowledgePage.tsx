@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  CheckCircle2, Clock, Download, Info, Library, Loader2, RefreshCw, Search, Trash2, XCircle, Zap,
+  ChevronLeft, ChevronRight, CheckCircle2, Clock, Download, Info, Library, Loader2, RefreshCw,
+  Search, Trash2, XCircle, Zap,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import {
@@ -27,6 +28,9 @@ const PIPELINE_STEPS = [
 
 /** 来源标识 -> 展示名。后端 source 目前恒为 `kurobbs`（鸣潮 WIKI）。 */
 const SOURCE_LABELS: Record<string, string> = { kurobbs: '鸣潮 WIKI' }
+
+/** 已收录列表每页条数。角色会随库增长（目前 57+），不分页表格会一路拉长。 */
+const PAGE_SIZE = 20
 
 function fmtSize(n: number | null): string {
   if (!n) return '—'
@@ -86,6 +90,8 @@ export default function KnowledgePage() {
 
   const [name, setName] = useState('')
   const [filter, setFilter] = useState('')
+  // 已收录列表页码（从 1 开始）
+  const [page, setPage] = useState(1)
   // 角色名 -> 实时进度。3s 轮询 /ingest/status，五步全终态后停轮该角色
   const [progress, setProgress] = useState<Record<string, IngestStatus>>({})
   // 知识库列表（服务端真值，不回 store、不持久化）
@@ -162,6 +168,12 @@ export default function KnowledgePage() {
     return kw ? items.filter((it) => it.character.includes(kw)) : items
   }, [items, filter])
 
+  // 翻页。列表顺序沿用后端口径（updated_at DESC），新入库/刚重爬的角色本来就在最上面。
+  // 页码只做「越界回第 1 页」的收敛，不额外写 effect —— 筛选变短时可能就落到了空页。
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / PAGE_SIZE))
+  const safePage = Math.min(page, totalPages)
+  const pageItems = filteredItems.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE)
+
   const submit = (character: string) => {
     const c = (character || name).trim()
     if (!c) return
@@ -237,6 +249,62 @@ export default function KnowledgePage() {
         </div>
       )}
 
+      {/* ============ 收录新角色（仅管理员，置顶） ============
+          放在「已收录列表」之上：列表会长到需要翻页，收新角色是这页最常用的动作，
+          不该被压在几十行表格下面。 */}
+      {isAdmin ? (
+        <section className="card kb-form">
+          <label className="kb-label">收录新角色（可输入名册外的任意角色名，会自动去 wiki 抓取）</label>
+          <div className="kb-form-row">
+            <input
+              className="input"
+              value={name}
+              placeholder="输入角色名，如「忌炎」…"
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && submit(name)}
+            />
+            <button className="btn btn-primary" onClick={() => submit(name)} disabled={!name.trim()}>
+              <Download size={15} /> 提交入库
+            </button>
+          </div>
+
+          {kb && kb.seeded_only.length > 0 && (
+            <div className="kb-candidates">
+              <span className="kb-candidates-title">
+                名册里还没收录的 {kb.seeded_only.length} 个角色（点一下即可入库）
+              </span>
+              <div className="roster-grid">
+                {kb.seeded_only.map((r) => (
+                  <button key={r} className="roster-chip" onClick={() => submit(r)}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="pipeline">
+            {PIPELINE_STEPS.map((s, i) => (
+              <div key={s.name} className="pipeline-step">
+                <span className="pipeline-dot">
+                  <Zap size={11} />
+                </span>
+                <div>
+                  <b>
+                    {i + 1}. {s.name}
+                  </b>
+                  <span>{s.desc}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : (
+        <div className="kb-warn">
+          <Info size={15} /> 收录 / 重爬 / 删除需要管理员账号（admin）登录。你当前是游客，可以正常问答。
+        </div>
+      )}
+
       {/* ============ 已收录角色（核心） ============ */}
       <section className="card kb-owned">
         <div className="kb-owned-head">
@@ -250,7 +318,10 @@ export default function KnowledgePage() {
               <input
                 value={filter}
                 placeholder="筛选已收录角色…"
-                onChange={(e) => setFilter(e.target.value)}
+                onChange={(e) => {
+                  setFilter(e.target.value)
+                  setPage(1)
+                }}
               />
             </div>
             <button className="btn btn-ghost btn-sm" onClick={() => void loadKb()} disabled={kbLoading}>
@@ -282,7 +353,7 @@ export default function KnowledgePage() {
               </tr>
             </thead>
             <tbody>
-              {filteredItems.map((it) => (
+              {pageItems.map((it) => (
                 <tr key={it.character}>
                   <td className="kb-char">
                     {it.character}
@@ -339,61 +410,31 @@ export default function KnowledgePage() {
             </tbody>
           </table>
         )}
-      </section>
 
-      {/* ============ 收录新角色（仅管理员） ============ */}
-      {isAdmin ? (
-        <section className="card kb-form">
-          <label className="kb-label">收录新角色（可输入名册外的任意角色名，会自动去 wiki 抓取）</label>
-          <div className="kb-form-row">
-            <input
-              className="input"
-              value={name}
-              placeholder="输入角色名，如「忌炎」…"
-              onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && submit(name)}
-            />
-            <button className="btn btn-primary" onClick={() => submit(name)} disabled={!name.trim()}>
-              <Download size={15} /> 提交入库
-            </button>
-          </div>
-
-          {kb && kb.seeded_only.length > 0 && (
-            <div className="kb-candidates">
-              <span className="kb-candidates-title">
-                名册里还没收录的 {kb.seeded_only.length} 个角色（点一下即可入库）
-              </span>
-              <div className="roster-grid">
-                {kb.seeded_only.map((r) => (
-                  <button key={r} className="roster-chip" onClick={() => submit(r)}>
-                    {r}
-                  </button>
-                ))}
-              </div>
+        {totalPages > 1 && (
+          <div className="kb-pager">
+            <span className="kb-pager-info">
+              第 {safePage} / {totalPages} 页 · 共 {filteredItems.length} 个角色
+            </span>
+            <div className="kb-pager-btns">
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setPage(safePage - 1)}
+                disabled={safePage <= 1}
+              >
+                <ChevronLeft size={13} /> 上一页
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setPage(safePage + 1)}
+                disabled={safePage >= totalPages}
+              >
+                下一页 <ChevronRight size={13} />
+              </button>
             </div>
-          )}
-
-          <div className="pipeline">
-            {PIPELINE_STEPS.map((s, i) => (
-              <div key={s.name} className="pipeline-step">
-                <span className="pipeline-dot">
-                  <Zap size={11} />
-                </span>
-                <div>
-                  <b>
-                    {i + 1}. {s.name}
-                  </b>
-                  <span>{s.desc}</span>
-                </div>
-              </div>
-            ))}
           </div>
-        </section>
-      ) : (
-        <div className="kb-warn">
-          <Info size={15} /> 收录 / 重爬 / 删除需要管理员账号（admin）登录。你当前是游客，可以正常问答。
-        </div>
-      )}
+        )}
+      </section>
 
       {/* ============ 提交记录 ============ */}
       <section className="card kb-records">
