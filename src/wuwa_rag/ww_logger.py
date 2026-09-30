@@ -5,7 +5,7 @@ import time
 
 from concurrent_log_handler import ConcurrentTimedRotatingFileHandler
 
-from .config import ensure_dirs, get_settings
+from wuwa_rag.config import ensure_dirs, get_settings
 
 s = get_settings()
 

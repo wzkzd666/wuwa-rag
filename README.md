@@ -85,14 +85,14 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
   - 唯一依赖是可选包 `cryptography`，缺失时该功能整体降级
 - 读接口只返回掩码，日志只记指纹，任何情况下都不回显明文 key
 - **tool 模型（抽取 / 摘要 / 校验）永远走本地 qwen3:8b**，不跟随 provider：结构化任务要稳定 JSON，也不该把个人密钥花在内部任务上
-- 云端模型不认识爱弥斯，人设由 `rag/persona.py` 以 `SystemMessage` 注入（本地路径绝不可传 system，会覆盖 Modelfile 内置人设）
+- 云端模型不认识爱弥斯，人设由 `services/persona.py` 以 `SystemMessage` 注入（本地路径绝不可传 system，会覆盖 Modelfile 内置人设）
 - ⚠️ 公网部署或开放注册时必须设 `CLOUD_ALLOW_PRIVATE_NET=false`，否则等于把内网探测口开放给注册用户
 
 ### 语音朗读 + 情绪标签
 
 - **情绪标签**：答案生成后判定语气（cheerful / amazed / serious / empathetic / playful），映射到 Qwen-Audio-TTS 的官方控制标签；判定失败一律回落默认语气，不阻塞问答主链
   - **判定模型的分工**：默认由本地 qwen3:8b 承担（零远程依赖、不消耗个人额度）；配了自定义云端 LLM 的用户可在设置页选择让自己的模型兼任，此时复用本轮答题的客户端，不额外建连
-- **TTS 合成**：`rag/tts.py` 用 httpx 直连 **Qwen-Audio-3.1-TTS-Flash**（北京地域 + 业务空间 ID），返回 24h 有效的音频 URL
+- **TTS 合成**：`services/tts.py` 用 httpx 直连 **Qwen-Audio-3.1-TTS-Flash**（北京地域 + 业务空间 ID），返回 24h 有效的音频 URL
   - **指令控制**：以 `instruction` 参数描述音色性格与语速基调（如「活泼开朗、带笑意的少女语气」），官方上限 100 字符且**汉字按 2 字计**，超长在本地截断后再发送
   - **音色适配**：默认 `longanlingxi_v3.1`（龙安灵希 · 可爱甜美 · 社交陪伴），贴合爱弥斯爱笑、话多的少女感。⚠️ 音色与模型**强绑定**，3.1 只认带 `_v3.1` 后缀的音色，填旧版音色名会返回 `InvalidParameter`
 - **朗读稿清洗**：送合成前把 markdown 转成纯文本（表格分隔符转顿号、去掉标题井号 / 列表符号 / 链接语法），并再剥一次引用标记，避免把版式符号念出来
@@ -139,6 +139,12 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 ## 架构
 
+> **分层设计、各包职责、依赖规则**（含分层图与可执行的依赖守卫）见 **[ARCHITECTURE.md](ARCHITECTURE.md)**。
+> 一句话概括：`src/wuwa_rag` 分 7 层，依赖**只向下**，同层可互调，内部导入一律用绝对路径；
+> 跑 `uv run python scripts/check_layers.py` 可校验（当前 120 条依赖边、0 违规、0 环）。
+>
+> 下面只讲各组件的**数据角色**与链路。
+
 ### 存储：PostgreSQL 是唯一真源
 
 | 组件 | 角色 |
@@ -147,7 +153,7 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 | **Chroma** | bge-m3 稠密向量，**派生索引**，可全量重建 |
 | **bm25.pkl** | jieba + rank_bm25 稀疏索引，**派生索引**，含词典快照 |
 | **Neo4j** | 结构化事实图谱，**派生索引**，MERGE 幂等 |
-| **RustFS (S3)** | 原文 md + 立绘；`storage/s3.py` 是抽象层，换后端只改这一层 |
+| **RustFS (S3)** | 原文 md + 立绘；`knowledge/s3.py` 是抽象层，换后端只改这一层 |
 | **Redis** | Celery broker / backend + 进度聚合键 |
 | **PG `lg` schema** | LangGraph checkpointer（`AsyncPostgresSaver`，多轮记忆） |
 
@@ -336,7 +342,7 @@ EMOTION_ENABLED=true          # 情绪标签；关闭则语音统一用默认语
 docker compose up -d                                        # PG(pgvector16) / Neo4j / Redis / RustFS
 # 建表：把 pgsql/001_init.sql 应用到 wuwa 库
 
-uv run celery -A wuwa_rag.worker:celery_app worker --pool=solo --loglevel=info
+uv run celery -A wuwa_rag.tasks.worker:celery_app worker --pool=solo --loglevel=info
 uv run python -m wuwa_rag.api.server                        # FastAPI :8000
 ```
 
@@ -357,7 +363,7 @@ uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价�
 ### 6. 验证
 
 ```bash
-uv run python -m wuwa_rag.rag.chain      # RAG 冒烟：跑 3 个内置问题
+uv run python -m wuwa_rag.dialog.graph      # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
 ```
 
@@ -403,19 +409,21 @@ psycopg / neo4j 的异步实现在 uvicorn 自起的 Proactor loop 上会报 `In
 
 ```
 src/wuwa_rag/          # ✅ 已入库
-├── api/          FastAPI 服务、路由、认证（scrypt + Bearer + RBAC）
-├── rag/          问答链核心：chain / state / intent / verify / loopguard
-│                 memory / profile / retrievers / llm / characters / websearch
-├── retrieval/    embeddings(bge-m3) / bm25 / rerank(CrossEncoder) / build_index
-├── graph/        Neo4j 客户端、规则抽取、图谱构建
-├── ingest/       chunker(结构感知分块) / pipeline(入库)
-├── storage/      S3 抽象层（RustFS）
-├── worker.py     Celery 5 步流水线
-└── config.py     配置（pydantic-settings）
+├── config.py    配置项唯一定义处（pydantic-settings 读 .env）
+├── ww_logger.py 跨进程安全日志（API 与 Celery 共写一个文件）
+├── text.py      纯文本工具：切块 / 引用角标剥离 / 行级去重
+├── core/        L1 内核：security(口令哈希) db(业务库连接池) authdb(鉴权表+种子)
+│                conversations(会话存储) llm(两个 LLM 客户端) llmstore(凭据保险箱)
+├── knowledge/   L2 知识：crawl(分块+落库) graph(Neo4j+正则抽取) index(bm25+向量+精排)
+│                retrieve(双路召回+RRF) entities(角色名册与别名) s3(对象存储抽象)
+├── tasks/       L3 任务：worker.py —— Celery 5 步流水线 + 进度上报
+├── services/    L4 服务：persona emotion tts verify websearch profile
+├── dialog/      L5 对话：graph(主编排) state nlu(意图/改写) tools agent guard memory
+└── api/         L6 接口：app(路由) auth(登录/token/RBAC) server(uvicorn 入口)
 
 front/                 # ✅ 已入库   React + TS + Vite 前端
 pgsql/                 # ✅ 已入库   建表 SQL（幂等）
-scripts/               # ✅ 已入库   start.ps1 / stop.ps1
+scripts/               # ✅ 已入库   start.ps1 / stop.ps1 / check_layers.py（架构守卫）
 
 data/                  # ⚠️ gitignore，未入库（需自行采集生成）
 ├── raw/          57 个角色 wiki markdown（由 wuwa-mcp 爬取）
@@ -423,7 +431,8 @@ data/                  # ⚠️ gitignore，未入库（需自行采集生成）
 ├── chroma/       稠密向量库 + bm25.pkl（派生索引，可全量重建）
 └── sft/          LoRA 训练数据、评估脚本、训练记录
 
-CLAUDE.md              # ⚠️ gitignore，未入库   481 行架构文档（含踩坑记录与实测数据）
+ARCHITECTURE.md        # ✅ 已入库   分层架构：依赖规则 + 包职责 + 决策取舍
+CLAUDE.md              # ⚠️ gitignore，未入库   本地开发笔记（踩坑记录与实测数据）
 logs/ .runtime/ .env   # ⚠️ gitignore，运行时产物与密钥
 ```
 

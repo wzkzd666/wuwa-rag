@@ -196,7 +196,7 @@ try {
     # concurrent-log-handler 的文件锁（**不再按 role 拆文件**）。
     # 改这里要同步 ww_logger._process_tag 的注释。
     Start-ServiceWindow -Name 'celery' -Title '潮声智库 · Celery Worker' -WorkDir $Root `
-        -Command '$env:WUWA_LOG_ROLE=''worker''; uv run celery -A wuwa_rag.worker:celery_app worker --pool=solo --loglevel=info' | Out-Null
+        -Command '$env:WUWA_LOG_ROLE=''worker''; uv run celery -A wuwa_rag.tasks.worker:celery_app worker --pool=solo --loglevel=info' | Out-Null
 
     # ========== 4. FastAPI ==========
     Write-Step '启动 FastAPI（:8000）'

@@ -12,7 +12,7 @@
   - Markdown 渲染（GFM 表格/代码块，DOMPurify 净化防 XSS）
   - 多会话：新建/切换/重命名/两步确认删除；`thread_id` 对应后端 LangGraph 多轮记忆
   - 复制答案、重新生成、欢迎屏示例问题一键提问
-- **知识库**（`/knowledge`）：提交角色入库（`POST /ingest`），50+ 角色名册快捷点选（与后端 `rag/characters.py` 对齐）、流水线 5 步说明、提交记录表（chain_id/state/时间）
+- **知识库**（`/knowledge`）：提交角色入库（`POST /ingest`），50+ 角色名册快捷点选（与后端 `knowledge/entities.py` 对齐）、流水线 5 步说明、提交记录表（chain_id/state/时间）
 - **历史**（`/history`）：全会话按时间排序、关键词搜索（标题+正文）、单个/全部导出 JSON、继续对话
 - **设置**（`/settings`）：API 地址自定义、连接测试、流式开关、暗/浅主题、基础字号、数据统计与清空（两步确认）
 - **其他**：后端连通性指示（每 30s 探测 `/health`）、Toast 通知、会话/设置 localStorage 持久化、移动端响应式（侧栏抽屉）

@@ -22,15 +22,16 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from .. import conversations as conv
-from ..authdb import close_pool, ensure_schema
-from ..config import get_settings
-from ..rag import llmstore
-from ..rag.chain import ask, ask_stream, doc_sources
-from ..rag.emotion import EMOTION_TAGS
-from ..rag.llmstore import PROVIDER_PRESETS
-from ..rag.memory import close_checkpointer, get_checkpointer
-from ..rag.profile import (
+from wuwa_rag.api import auth as authn
+from wuwa_rag.config import get_settings
+from wuwa_rag.core import conversations as conv
+from wuwa_rag.core import llmstore
+from wuwa_rag.core.authdb import close_pool, ensure_schema
+from wuwa_rag.core.llmstore import PROVIDER_PRESETS
+from wuwa_rag.dialog.graph import ask, ask_stream, doc_sources
+from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
+from wuwa_rag.services.emotion import EMOTION_TAGS
+from wuwa_rag.services.profile import (
     all_users_stats,
     extract_facts_safe,
     facts_to_context,
@@ -38,11 +39,10 @@ from ..rag.profile import (
     save_facts,
     soft_delete_fact,
 )
-from ..rag.tts import MODEL_LABEL, VOICE_LABELS, synthesize, voice_label
-from ..rag.tts import resolve as tts_resolve
-from ..worker import PIPELINE_STEPS, STEP_LABELS, build_pipeline, get_progress
-from ..ww_logger import get_logger
-from . import auth as authn
+from wuwa_rag.services.tts import MODEL_LABEL, VOICE_LABELS, synthesize, voice_label
+from wuwa_rag.services.tts import resolve as tts_resolve
+from wuwa_rag.tasks.worker import PIPELINE_STEPS, STEP_LABELS, build_pipeline, get_progress
+from wuwa_rag.ww_logger import get_logger
 
 log = get_logger("app")
 

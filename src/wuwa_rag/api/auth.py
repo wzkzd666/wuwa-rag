@@ -2,6 +2,8 @@
 
 设计取舍（保持简单）：
 - 口令哈希用 stdlib hashlib.scrypt（自带盐），格式 `scrypt$<salt hex>$<hash hex>`；
+  **实现已下沉到 `wuwa_rag.core.security`**——`core.authdb` 种子管理员时也要算哈希，
+  留在本层会让 core 反向依赖 api（层次倒置，且容易成环）；
 - token 是 secrets.token_hex(32)（256bit），存 auth_tokens 表、30 天过期——
   服务重启不丢登录态（内存 dict 方案重启全员掉线，pass）；
 - 请求带 `Authorization: Bearer <token>`，FastAPI 依赖里解析。
@@ -16,8 +18,6 @@
 """
 from __future__ import annotations
 
-import hashlib
-import hmac
 import secrets
 from datetime import UTC, timedelta
 from datetime import datetime as dt
@@ -25,36 +25,15 @@ from datetime import datetime as dt
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from ..authdb import get_pool
-from ..rag.llmstore import rebind_password, unlock_with_password
-from ..ww_logger import get_logger
+from wuwa_rag.core.authdb import get_pool
+from wuwa_rag.core.llmstore import rebind_password, unlock_with_password
+from wuwa_rag.core.security import hash_password, verify_password
+from wuwa_rag.ww_logger import get_logger
 
 log = get_logger("auth")
 
 TOKEN_TTL_DAYS = 30
 _ERR_UNAUTHORIZED = HTTPException(status_code=401, detail="未登录或登录已过期")
-
-
-# ---------- 口令哈希（scrypt，自带随机盐） ----------
-
-def hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    h = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
-    return f"scrypt${salt.hex()}${h.hex()}"
-
-
-def verify_password(password: str, stored: str) -> bool:
-    """格式不对/参数不对一律返回 False，不抛异常（老数据兼容）。"""
-    try:
-        algo, salt_hex, hash_hex = stored.split("$")
-        if algo != "scrypt":
-            return False
-        h = hashlib.scrypt(
-            password.encode("utf-8"), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1
-        )
-        return hmac.compare_digest(h.hex(), hash_hex)
-    except Exception:
-        return False
 
 
 # ---------- 注册 / 登录 / token ----------

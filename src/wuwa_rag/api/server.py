@@ -10,7 +10,7 @@ import asyncio
 
 import uvicorn
 
-from ..config import ensure_dirs, get_settings
+from wuwa_rag.config import ensure_dirs, get_settings
 
 
 def main() -> None:

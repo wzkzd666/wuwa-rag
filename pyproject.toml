@@ -68,11 +68,11 @@ dev = [
 ]
 
 [project.scripts]
-wuwa-chunk = "wuwa_rag.ingest.chunker:main"
-wuwa-ingest = "wuwa_rag.ingest.pipeline:main"
-wuwa-index = "wuwa_rag.retrieval.build_index:main"
-wuwa-graph = "wuwa_rag.graph.build_graph:main"
-wuwa-ingest-character = "wuwa_rag.worker:ingest_cli"
+wuwa-chunk = "wuwa_rag.knowledge.crawl.chunker:main"
+wuwa-ingest = "wuwa_rag.knowledge.crawl.pipeline:main"
+wuwa-index = "wuwa_rag.knowledge.index.build_index:main"
+wuwa-graph = "wuwa_rag.knowledge.graph.build_graph:main"
+wuwa-ingest-character = "wuwa_rag.tasks.worker:ingest_cli"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }

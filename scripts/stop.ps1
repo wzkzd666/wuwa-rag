@@ -111,7 +111,7 @@ foreach ($port in 8000, 5173) {
 # 窗口先死，uv / celery.exe / python 就成了孤儿（2026-09-22 实测曾两套 Celery 并存、
 # 抢同一个 Redis 队列）。这里只匹配本项目独有的命令行特征，不会误伤其他进程。
 $stale = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.CommandLine -and ($_.CommandLine -like '*wuwa_rag.worker*' -or $_.CommandLine -like '*wuwa_rag.api.server*')
+    $_.CommandLine -and ($_.CommandLine -like '*wuwa_rag.tasks.worker*' -or $_.CommandLine -like '*wuwa_rag.api.server*')
 })
 if ($stale.Count -gt 0) {
     Write-Warn2 "清扫本项目遗留进程 $($stale.Count) 个"
