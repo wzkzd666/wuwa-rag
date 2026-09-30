@@ -4,27 +4,21 @@ __pycache__/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 
 # Virtual environments
-.venv
+.venv/
 
-# work file
+# Local-only runtime artifacts and secrets (not part of the published tree)
 .env
-data
-logs
-.runtime
-CLAUDE.md
+data/
+logs/
+.runtime/
 
 # Editor / tooling caches
 .vscode/
 .ruff_cache/
 .uv-cache/
-.workbuddy/
 
 # Frontend caches（包管理器缓存不得入库）
-front/.npm-cache/
-.vscode/
-.ruff_cache/
-.uv-cache/
 front/.npm-cache/

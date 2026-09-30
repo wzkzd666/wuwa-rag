@@ -1,0 +1,12 @@
+# 统一行尾：仓库内一律 LF，跨平台克隆结果一致
+* text=auto eol=lf
+
+# 二进制文件不做任何行尾转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.gif   binary
+*.ico   binary
+*.gguf  binary
+*.pkl   binary
