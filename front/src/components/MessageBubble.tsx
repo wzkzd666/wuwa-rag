@@ -206,58 +206,57 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
                   {msg.streaming && <span className="caret" />}
                 </>
               )}
-
-              {/* 元数据 chips：**在气泡内**。
-                  原先挂在 `.bubble` 之后的 `.msg-main` 里，等于直接压在页面上——
-                  自定义背景图时，深色照片上的灰字标签基本读不出来（实测反馈）。
-                  `.tag` 自带底色，所以搬进来只是把「没有底色的间距」一起收进有底色的框。 */}
-              {msg.meta && msg.status !== 'error' && (
-                <div className="meta-row">
-                  {msg.meta.intent && (
-                    <span className="tag tag-violet">
-                      <Target size={11} />
-                      {INTENT_LABEL[msg.meta.intent] || msg.meta.intent}
-                    </span>
-                  )}
-                  {msg.meta.characters && msg.meta.characters.length > 0 && (
-                    <span className="tag tag-accent">
-                      <Users size={11} />
-                      {msg.meta.characters.join('、')}
-                    </span>
-                  )}
-                  {msg.meta.slots && msg.meta.slots.length > 0 && (
-                    <span className="tag tag-pink">
-                      <Layers size={11} />
-                      {msg.meta.slots.join('·')}
-                    </span>
-                  )}
-                  {typeof msg.meta.docs === 'number' && msg.meta.docs > 0 && (
-                    <SourcePanel count={msg.meta.docs} sources={msg.meta.sources} />
-                  )}
-                  {msg.meta.truncated && (
-                    <span className="tag tag-warn" title="模型出现重复输出，已自动截断">
-                      <Scissors size={11} />
-                      已截断重复内容
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {/* 操作栏：同样收进气泡内（图标按钮没有底色，压在背景图上会糊掉） */}
-              {!msg.streaming && msg.content && msg.status !== 'error' && (
-                <div className="msg-actions">
-                  <CopyBtn text={msg.content} />
-                  {ttsEnabled && <TtsBtn text={msg.content} emotion={msg.meta?.emotion} />}
-                  {canRegenerate && onRegenerate && (
-                    <button className="msg-action" title="重新生成" onClick={() => onRegenerate(msg.id)}>
-                      <RefreshCw size={13} />
-                    </button>
-                  )}
-                </div>
-              )}
             </>
           )}
         </div>
+
+        {/* 元数据 chips：挂在气泡**外**（.msg-main 内、气泡之下），与气泡左对齐。
+            这是原版布局，别再挪进气泡里 —— 挪进去会在气泡内多出一条虚线，
+            「闲聊」「角色」这类附注标签塞进语音气泡的观感不对。 */}
+        {!isUser && msg.meta && msg.status !== 'error' && (
+          <div className="meta-row">
+            {msg.meta.intent && (
+              <span className="tag tag-violet">
+                <Target size={11} />
+                {INTENT_LABEL[msg.meta.intent] || msg.meta.intent}
+              </span>
+            )}
+            {msg.meta.characters && msg.meta.characters.length > 0 && (
+              <span className="tag tag-accent">
+                <Users size={11} />
+                {msg.meta.characters.join('、')}
+              </span>
+            )}
+            {msg.meta.slots && msg.meta.slots.length > 0 && (
+              <span className="tag tag-pink">
+                <Layers size={11} />
+                {msg.meta.slots.join('·')}
+              </span>
+            )}
+            {typeof msg.meta.docs === 'number' && msg.meta.docs > 0 && (
+              <SourcePanel count={msg.meta.docs} sources={msg.meta.sources} />
+            )}
+            {msg.meta.truncated && (
+              <span className="tag tag-warn" title="模型出现重复输出，已自动截断">
+                <Scissors size={11} />
+                已截断重复内容
+              </span>
+            )}
+          </div>
+        )}
+
+        {/* 操作栏：同样在气泡外（原版布局），仅悬停时显形 */}
+        {!isUser && !msg.streaming && msg.content && msg.status !== 'error' && (
+          <div className="msg-actions">
+            <CopyBtn text={msg.content} />
+            {ttsEnabled && <TtsBtn text={msg.content} emotion={msg.meta?.emotion} />}
+            {canRegenerate && onRegenerate && (
+              <button className="msg-action" title="重新生成" onClick={() => onRegenerate(msg.id)}>
+                <RefreshCw size={13} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

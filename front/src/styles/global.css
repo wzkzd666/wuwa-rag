@@ -457,11 +457,21 @@ select.input {
   margin: 0 auto;
 }
 
+/* 页面标题块也包一层底色面板。
+   为什么必须包：自定义背景图下，气泡/卡片以外的文字**没有底色**，浅灰的副标题
+   压在照片上基本读不出来（与欢迎屏 .welcome-card 同一个问题，同一套 token）。
+   用它的三页（知识库 / 设置 / 历史）因此外观一致，换主题或换背景都不用再单独调。 */
 .page-head {
   display: flex;
   align-items: flex-start;
   gap: 16px;
   margin-bottom: 20px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--bg-surface);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-1);
 }
 .page-title {
   display: flex;

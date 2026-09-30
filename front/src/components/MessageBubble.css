@@ -78,32 +78,20 @@
   font-size: 13px;
 }
 
-/* 元数据 + 操作栏现在都在**气泡内**（见 MessageBubble.tsx 的说明：挂在气泡外
-   就等于直接压在背景图片上，深色照片上的灰字读不出来）。用一条虚线跟正文分开，
-   视觉上仍能区分「正文 / 附注 / 操作」。 */
+/* 元数据 chips：气泡**外**的附注行（.tag 自带底色），与气泡左对齐 */
 .meta-row {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 10px;
-  padding-top: 9px;
-  border-top: 1px dashed var(--line);
+  margin-top: 8px;
 }
 
 .msg-actions {
   display: flex;
   gap: 4px;
   margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--line);
   opacity: 0;
   transition: opacity 0.18s;
-}
-/* 紧跟元数据时不再画第二条虚线：相邻两条分隔线看起来像渲染错误 */
-.meta-row + .msg-actions {
-  margin-top: 2px;
-  padding-top: 0;
-  border-top: none;
 }
 .msg-row:hover .msg-actions {
   opacity: 1;
