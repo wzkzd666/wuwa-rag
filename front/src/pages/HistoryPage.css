@@ -15,7 +15,9 @@
   gap: 9px;
   padding: 9px 14px;
   border-radius: var(--radius);
-  background: var(--bg-surface);
+  /* 与 .card / .page-head 同一套 --panel-* 材质，整页一块玻璃 */
+  background: rgb(var(--panel-rgb) / var(--panel-alpha));
+  backdrop-filter: blur(var(--panel-blur));
   border: 1px solid var(--line);
   color: var(--text-muted);
   margin-bottom: 16px;

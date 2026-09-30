@@ -11,6 +11,13 @@
   --bg-elevated: #17213a;
   --bg-hover: #1c2846;
 
+  /* 面板统一底色：卡片 / 页面标题块 / 欢迎卡都走这三个变量（半透明 + 磨砂）。
+     --panel-rgb 由主题给出；alpha 与模糊半径由设置页「外观」下发（App.tsx 写 CSS 变量），
+     这里的值是 JS 接管前的默认值。1.0 = 实心，调低更透、背景图更有存在感。 */
+  --panel-rgb: 18 26 46;
+  --panel-alpha: 0.72;
+  --panel-blur: 12px;
+
   --line: rgba(148, 180, 255, 0.12);
   --line-strong: rgba(148, 180, 255, 0.24);
 
@@ -56,6 +63,8 @@
   --bg-surface: #ffffff;
   --bg-elevated: #ffffff;
   --bg-hover: #eef1fa;
+
+  --panel-rgb: 255 255 255;
 
   --line: rgba(30, 41, 82, 0.1);
   --line-strong: rgba(30, 41, 82, 0.2);
@@ -194,11 +203,11 @@ body::before {
 
 /* ---------- 通用组件样式 ---------- */
 .card {
-  background: var(--bg-surface);
+  background: rgb(var(--panel-rgb) / var(--panel-alpha));
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-1);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(var(--panel-blur));
 }
 
 .btn {
@@ -457,9 +466,10 @@ select.input {
   margin: 0 auto;
 }
 
-/* 页面标题块也包一层底色面板。
-   为什么必须包：自定义背景图下，气泡/卡片以外的文字**没有底色**，浅灰的副标题
-   压在照片上基本读不出来（与欢迎屏 .welcome-card 同一个问题，同一套 token）。
+/* 页面标题块：与下方卡片**同一套面板材质**（--panel-*），只是更薄一点。
+   为什么必须包：自定义背景图下，卡片以外的文字**没有底色**，浅灰的副标题
+   压在照片上基本读不出来；但做成实心大白框又太抢眼，所以走磨砂半透明，
+   强度与卡片统一由设置页「外观」调节。
    用它的三页（知识库 / 设置 / 历史）因此外观一致，换主题或换背景都不用再单独调。 */
 .page-head {
   display: flex;
@@ -469,8 +479,10 @@ select.input {
   padding: 18px 20px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  background: var(--bg-surface);
-  backdrop-filter: blur(12px);
+  /* 与 .card **完全同一材质**（同样的 alpha / 模糊 / 内边距）——
+     别再单独给标题块打折：三页的标题块与各自卡片必须看不出是两套东西。 */
+  background: rgb(var(--panel-rgb) / var(--panel-alpha));
+  backdrop-filter: blur(var(--panel-blur));
   box-shadow: var(--shadow-1);
 }
 .page-title {

@@ -4,8 +4,9 @@
   width: 100%;
 }
 
+/* 与 .page-head / 知识库 .kb-* 同一档内边距（18/20），三页的主卡片看不出是三套 */
 .set-card {
-  padding: 20px 22px;
+  padding: 18px 20px;
   margin-bottom: 16px;
 }
 

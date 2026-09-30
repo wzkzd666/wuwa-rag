@@ -965,7 +965,7 @@ export default function SettingsPage() {
           <h2 className="page-title">
             <SettingsIcon size={19} className="grad-text" /> 设置
           </h2>
-          <p className="page-desc">连接后端、外观与数据管理。设置保存在浏览器本地。</p>
+          <p className="page-desc">配置后端连接、界面外观与数据管理。</p>
         </div>
       </div>
 
@@ -1186,7 +1186,7 @@ export default function SettingsPage() {
         <div className="set-row bg-row">
           <div className="set-row-main">
             <label>聊天背景</label>
-            <p>预设渐变或自定义图片。自定义图片存在浏览器本地（自动压缩到长边 1600px）。</p>
+            <p>预设渐变或自定义图片。图片自动压缩至长边 1600px，仅在本机留存，不上传服务端。</p>
           </div>
           <div className="set-row-ctl bg-swatches">
             {BG_PRESETS.map(({ key, label, css }) => (
@@ -1207,6 +1207,45 @@ export default function SettingsPage() {
                 <span className="bg-swatch-label">{label}</span>
               </button>
             ))}
+          </div>
+        </div>
+
+        {/* 面板材质：卡片 / 页面标题块 / 欢迎卡统一走 --panel-*，对所有背景预设都生效 */}
+        <div className="set-row">
+          <div className="set-row-main">
+            <label>面板不透明度</label>
+            <p>
+              卡片与标题块的底色浓度。100% 为实心，调低更透、背景更有存在感，但表格文字对比度会下降。
+              当前 {(settings.panelAlpha * 100).toFixed(0)}%。
+            </p>
+          </div>
+          <div className="set-row-ctl font-ctl">
+            <input
+              type="range"
+              min={0.3}
+              max={1}
+              step={0.02}
+              value={settings.panelAlpha}
+              onChange={(e) => setSettings({ panelAlpha: Number(e.target.value) })}
+            />
+            <span className="font-val">{(settings.panelAlpha * 100).toFixed(0)}%</span>
+          </div>
+        </div>
+        <div className="set-row">
+          <div className="set-row-main">
+            <label>面板磨砂</label>
+            <p>面板背后的模糊半径，0 为不模糊。当前 {settings.panelBlur}px。</p>
+          </div>
+          <div className="set-row-ctl font-ctl">
+            <input
+              type="range"
+              min={0}
+              max={24}
+              step={1}
+              value={settings.panelBlur}
+              onChange={(e) => setSettings({ panelBlur: Number(e.target.value) })}
+            />
+            <span className="font-val">{settings.panelBlur}px</span>
           </div>
         </div>
 

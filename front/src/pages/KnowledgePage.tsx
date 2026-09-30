@@ -237,8 +237,8 @@ export default function KnowledgePage() {
             <Library size={19} className="grad-text" /> 角色知识库
           </h2>
           <p className="page-desc">
-            下面是你**当前拥有**的角色知识；新角色走「抓取 → 分块 → 入库 → 索引 → 图谱」五步异步收录，
-            提交后立即返回任务号，后台由 Celery worker 完成。角色名册随数据库自动增长，无需改配置。
+            已收录角色的知识资产概览。新增角色经「抓取 → 分块 → 入库 → 索引 → 图谱」五步流水线
+            异步处理，提交后返回任务号，由后台 Celery worker 执行；角色名册与数据库保持同步。
           </p>
         </div>
       </div>

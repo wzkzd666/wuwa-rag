@@ -185,10 +185,8 @@
   animation: fade-up 0.5s ease both;
 }
 
-/* 标题块的底色面板。
-   为什么必须包一层：自定义背景图下，气泡以外的文字**没有底色**，浅灰色副标题
-   压在照片上基本读不出来（用户反馈「白框外的字不清晰」）。整块收进带底色的
-   面板里，与气泡同一套 token，切换主题/换背景都不需要再调。 */
+/* 欢迎屏标题块：材质与 .card / .page-head **统一**走 --panel-*（磨砂半透明），
+   不再各写一套底色 —— 否则设置页调了面板透明度，这里不会跟着变、观感立刻不一致。 */
 .welcome-card {
   display: flex;
   flex-direction: column;
@@ -198,8 +196,8 @@
   padding: 26px 30px 24px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  background: var(--bg-surface);
-  backdrop-filter: blur(12px);
+  background: rgb(var(--panel-rgb) / var(--panel-alpha));
+  backdrop-filter: blur(var(--panel-blur));
   box-shadow: var(--shadow-1);
   animation: fade-up 0.45s ease both;
 }
@@ -247,7 +245,8 @@
   padding: 15px 16px;
   border-radius: var(--radius);
   border: 1px solid var(--line);
-  background: var(--bg-surface);
+  background: rgb(var(--panel-rgb) / var(--panel-alpha));
+  backdrop-filter: blur(var(--panel-blur));
   cursor: pointer;
   text-align: left;
   transition: all 0.18s cubic-bezier(0.22, 1, 0.36, 1);

@@ -221,6 +221,10 @@ export interface Settings {
   bgDim: number
   /** 自定义背景的模糊半径 0~16px */
   bgBlur: number
+  /** 面板（卡片 / 页面标题块）底色不透明度 0.3~1，越低越透 */
+  panelAlpha: number
+  /** 面板磨砂模糊半径 0~24px */
+  panelBlur: number
 
   // ---------- 语音朗读（Qwen-Audio-3.1-TTS-Flash）----------
   /** 前端语音开关：关闭则不显示朗读按钮、不调 /tts（后端另有一道 TTS_ENABLED 总开关） */

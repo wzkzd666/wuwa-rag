@@ -47,7 +47,10 @@ export default function App() {
     root.dataset.theme = settings.theme
     root.style.setProperty('zoom', String(uiZoom))
     root.style.setProperty('--ui-zoom', String(uiZoom))
-  }, [settings.theme, settings.fontSize])
+    // 面板磨砂（卡片 / 页面标题块统一走 --panel-* 三个变量，见 global.css）
+    root.style.setProperty('--panel-alpha', String(settings.panelAlpha))
+    root.style.setProperty('--panel-blur', `${settings.panelBlur}px`)
+  }, [settings.theme, settings.fontSize, settings.panelAlpha, settings.panelBlur])
 
   // 启动时把 persist 恢复的 token 接回 api 层，并校验是否仍有效
   // （30 天过期 / 后端重启清库 → 静默登出，不做多余弹窗）

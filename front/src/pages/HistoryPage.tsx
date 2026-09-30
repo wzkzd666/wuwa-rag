@@ -91,8 +91,7 @@ export default function HistoryPage() {
             <History size={19} className="grad-text" /> 历史会话
           </h2>
           <p className="page-desc">
-            共 {convs.length} 个会话，保存在服务端、跟着账号走（换浏览器也在，别人看不到）。
-            可搜索、继续对话或导出为 JSON。
+            共 {convs.length} 个会话，存储于服务端并按账号隔离。支持检索、续接对话与导出为 JSON。
           </p>
         </div>
         <button className="btn btn-ghost head-btn" onClick={() => void exportAll()} disabled={convs.length === 0}>
