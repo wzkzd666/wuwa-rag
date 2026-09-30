@@ -109,6 +109,10 @@ async def _write(tx, cypher: str, rows: list[dict]) -> None:
 # 3) Character 本体保留只 REMOVE 属性——若 DETACH DELETE 它，会连**别人的队友
 #    入边**（other-[:SYNERGIZES_WITH]->c）一起毁掉，而那些边属于别人的页面、
 #    本次刷新不会重建。MERGE 按 name 命中现节点，upsert 时 SET += 填回新属性。
+#    由此派生的一条下游行为（**刻意维持**，2026-09-30 定）：删除角色后它仍是
+#    Neo4j 的「已知角色」，而 `dialog.graph.ensure_characters` 正是按 Neo4j 判
+#    「是否已在库」→ 删除后提问**不会**触发自动重爬，只答「不知道」。
+#    语义自洽：你亲手删掉的东西不该自己回来。要改就是改产品语义，别顺手改这里。
 _C_DELETE_CHAR = """
 MATCH (c:Character {name: $n})
 OPTIONAL MATCH (c)-[r:HAS_SKILL]->(s:Skill {character: $n})

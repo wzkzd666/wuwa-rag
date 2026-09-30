@@ -362,6 +362,18 @@ def delete_character_knowledge(self, character: str):
     跟着重爬，索引会被 `index_character` 重建；纯删除没有后续步骤，所以必须自己
     重建 BM25 —— `bm25.pkl` 是**全量单文件**，不重建的话里面仍留着该角色的块，
     检索照样把它召回来，表现成「删了还在答」。
+
+    ⚠️ 两条**刻意维持**的行为，别当成 bug 去「修」：
+
+    1. Neo4j 里的 `Character` 节点**保留**（只 REMOVE 属性）——DETACH DELETE 会把
+       **别人**指向它的 `SYNERGIZES_WITH` 入边一起毁掉，那是别人页面的数据、
+       本次操作不该动。理由详见 `build_graph._C_DELETE_CHAR` 的三条铁律。
+    2. 由 1 推出：删掉的角色在 Neo4j 里仍是「已知角色」，而
+       `dialog.graph.ensure_characters` 判定「是否已在知识库」用的正是 Neo4j
+       （`_known_characters`）→ **删除后提问不会触发自动重爬**，只会答「不知道」，
+       想加回要走「收录新角色」。实测（2026-09-30）：只图谱无实料的角色
+       `to_crawl=[]` 不重爬；真·未知角色仍正常触发爬取。
+       语义上这是自洽的：**你亲手删掉的东西不该自己回来**。
     """
     try:
         _run(_delete_character_async(character))

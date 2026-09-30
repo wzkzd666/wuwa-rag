@@ -901,6 +901,10 @@ async def api_knowledge_delete(
 
     异步执行 —— Chroma 与 Neo4j 的清理不是毫秒级的事，同步做会把接口挂住。
     前端拿到 task_id 后轮询 `GET /knowledge/characters`，看它从列表里消失即可。
+
+    ⚠️ 删除后**不会**被自动重爬：Neo4j 的 `Character` 节点刻意保留（理由见
+    `build_graph._C_DELETE_CHAR`），于是它仍算「已知角色」，提问只会答「不知道」。
+    要加回需走 `POST /ingest`。这是刻意维持的语义，别改。
     """
     r = delete_character_knowledge.apply_async(args=[character])
     kb.invalidate_roster()      # 名册立刻不再包含它，不必等 60s TTL
