@@ -1,5 +1,5 @@
 import type {
-  AskOut, ConversationDetail, ConversationMeta, IngestOut, IngestStatus, KnowledgeOut, LlmConfig,
+  AskOut, ConversationDetail, ConversationMeta, IngestOut, IngestRecordRow, IngestStatus, KnowledgeOut, LlmConfig,
   LlmConfigIn, LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus,
   UserFact,
 } from '../types'
@@ -109,6 +109,35 @@ export function ingest(character: string, base?: string): Promise<IngestOut> {
 /** GET /ingest/status?character=xxx —— 按角色查五步入库进度 */
 export function ingestStatus(character: string, base?: string): Promise<IngestStatus> {
   return request(`/ingest/status?character=${encodeURIComponent(character)}`, { method: 'GET' }, base)
+}
+
+/** POST /ingest/control —— 暂停 / 继续 / 取消一条正在跑的入库链（按角色，不按 chain_id） */
+export function ingestControl(
+  character: string,
+  action: 'pause' | 'resume' | 'cancel',
+  base?: string,
+): Promise<{ character: string; action: string; paused: boolean; cancelled: boolean }> {
+  return request(
+    '/ingest/control',
+    { method: 'POST', body: JSON.stringify({ character, action }) },
+    base,
+  )
+}
+
+/** GET /ingest/records —— 服务端提交账本（含提交人，刷新/换设备都在） */
+export function ingestRecords(
+  limit: number,
+  base?: string,
+): Promise<{ items: IngestRecordRow[]; total: number }> {
+  return request(`/ingest/records?limit=${limit}`, { method: 'GET' }, base)
+}
+
+/** DELETE /ingest/records/{id} —— 删掉一条提交记录（只删账本，不碰后台流水线） */
+export function ingestRecordDelete(
+  id: number,
+  base?: string,
+): Promise<{ id: number; character: string }> {
+  return request(`/ingest/records/${id}`, { method: 'DELETE' }, base)
 }
 
 // ---------- 知识库视图 ----------

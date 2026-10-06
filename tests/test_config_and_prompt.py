@@ -114,3 +114,44 @@ def test_SYSTEM_PROMPT_含云端不需要的本地约束() -> None:
     """
     assert isinstance(prompt_mod.SYSTEM_PROMPT, str)
     assert prompt_mod.SYSTEM_PROMPT.strip()
+
+
+# ---------- 本问解析（角色 / 内容 / 召回板块，三行各自可缺）----------
+
+def test_本问解析_角色与内容都确定时三行齐全() -> None:
+    """用户实测：问「心声骸推荐」，模型把「心声骸」当一个词、把「心」吃掉了。
+    角色与槽位在检索侧本就确定性可解，写进上下文即可省掉模型自己猜分词。"""
+    ctx = prompt_mod.build_context({
+        "question": "心声骸推荐",
+        "characters": ["心"],
+        "slots": ["声骸"],
+        "docs": [{"component": "声骸套装推荐", "breadcrumb": "心 › 声骸套装推荐", "text": "…"}],
+    })
+    assert "## 本问解析" in ctx
+    assert "- 被问到的角色：心" in ctx
+    assert "- 要问的内容：声骸" in ctx
+    assert "- 召回资料所属板块：声骸套装推荐" in ctx
+
+
+def test_本问解析_各行可缺且全缺时不生成() -> None:
+    """角色认不出就不写角色行；没槽位就改用召回板块；两者都没有则整段不生成。"""
+    # 角色没认出来 —— 不硬凑
+    ctx = prompt_mod.build_context({
+        "question": "声骸怎么配", "characters": [], "slots": ["声骸"],
+        "docs": [{"component": "角色养成", "breadcrumb": "x", "text": "…"}],
+    })
+    assert "被问到的角色" not in ctx
+    assert "- 要问的内容：声骸" in ctx
+
+    # 无槽位 —— 改用实际召回的板块
+    ctx = prompt_mod.build_context({
+        "question": "这个角色怎么玩", "characters": ["心"], "slots": [],
+        "docs": [{"component": "技能介绍", "breadcrumb": "…", "text": "…"},
+                 {"component": "角色机制", "breadcrumb": "…", "text": "…"}],
+    })
+    assert "要问的内容" not in ctx
+    assert "- 召回资料所属板块：技能介绍、角色机制" in ctx
+
+    # 闲聊轮：全缺 → 整段不生成（不留空标题）
+    ctx = prompt_mod.build_context({"question": "你好呀", "characters": [], "slots": [], "docs": []})
+    assert "## 本问解析" not in ctx

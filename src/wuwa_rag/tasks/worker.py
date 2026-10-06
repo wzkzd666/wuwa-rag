@@ -15,6 +15,7 @@ from wuwa_mcp.core.container import get_container
 
 from wuwa_rag.config import ensure_dirs, get_settings
 from wuwa_rag.core.db import close_pool, get_cursor
+from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge.crawl.chunker import chunk_markdown
 from wuwa_rag.knowledge.crawl.pipeline import _load_chunks as load_chunks_by_char
 from wuwa_rag.knowledge.crawl.pipeline import ingest_one, purge_character
@@ -58,6 +59,10 @@ celery_app.conf.update(task_track_started=True, result_expires=3600)
 
 class CharacterNotFound(Exception):
     """角色在 wiki 上不存在，链应中止（不重试）。"""
+
+
+class IngestCancelled(Exception):
+    """用户手动取消了入库（pause → 等待，cancel → 掐断整条链）。"""
 
 
 # ───────────── 入库进度打点（Redis，供 GET /ingest/status 轮询） ─────────────
@@ -127,6 +132,88 @@ def reset_progress(character: str) -> None:
         log.warning("进度重置失败（忽略）: %s", exc)
 
 
+# ───────────── 暂停 / 继续 / 取消（控制旗标） ─────────────
+#
+# 为什么用 Redis 旗标而不是 `celery_control.revoke()`：
+# 五步是 `chain(...)` 串联的，链里每一步各有自己的 task_id，revoke 只能停掉**某一个** id，
+# 停掉链尾那一步时前面几步照跑；要停整条链得先把所有 task_id 收集齐，而
+# `apply_async` 返回的 result 上取不全、随时可能漏 —— 表现为「点了取消，任务还在跑」。
+# 旗标法是**每一步开头自查**：不依赖 task_id、不依赖 revoke 的语义，也不会漏。
+#
+# 暂停为什么用「等待」而不是「不执行」：`chain` 里某一步正常返回，下一步**照样会被调度**，
+# 没有「条件链」这种原语。所以暂停 = 这一步醒来后原地等（1s 一轮），等到解除为止；
+# 好处是继续之后自动往下跑，链的进度不丢。代价：暂停期间**占着一个 worker 槽**
+# （本项目 worker 是 --pool=solo，本来一次也只跑一条任务，影响面很小）。
+# 等待超过 _PAUSE_MAX_WAIT 秒后自动放行，避免「忘了取消」把 worker 永久占住。
+_PAUSE_POLL = 1.0
+_PAUSE_MAX_WAIT = 1800.0
+CANCEL_REASON = "已取消"
+CANCEL_ERROR = "任务被手动取消"
+
+
+def ctl_key(character: str) -> str:
+    return f"ingest:ctl:{character}"
+
+
+def set_control(character: str, action: str) -> str:
+    """写控制旗标：`pause` / `cancel` 落盘，`resume` 删键（回到「无控制」）。
+
+    ⚠️ `cancel` **必须落盘**：早先把它也当成「删键」处理，结果 worker 只看得到 `pause`，
+    取消指令根本传不出去（点了取消没反应）。取消要等 worker 在下一步开头自查到它，
+    所以它得是个**能被读到的值**，而不是「键消失」。
+    """
+    if action == "resume":
+        _redis().delete(ctl_key(character))
+    else:
+        _redis().setex(ctl_key(character), _PROGRESS_TTL, action)
+    return action
+
+
+def get_control(character: str) -> str:
+    """当前旗标：`pause` / `cancel` / 空串（无控制）。读失败按「无控制」处理，别挡流水线。"""
+    try:
+        return _redis().get(ctl_key(character)) or ""
+    except Exception as exc:  # noqa: BLE001
+        log.warning("读控制旗标失败（忽略）: %s", exc)
+        return ""
+
+
+def wait_if_paused(character: str) -> bool:
+    """任务开跑前自查控制旗标。**返回 True 表示「被取消了」，调用方应立即停止。**
+
+    暂停时在这里循环等待；等待窗口内若收到 cancel 则立刻返回 True。
+    """
+    waited = 0.0
+    while get_control(character) == "pause":
+        if waited == 0.0:
+            log.info("入库已暂停：%s（等待继续，最长 %.0f 秒）", character, _PAUSE_MAX_WAIT)
+        if waited >= _PAUSE_MAX_WAIT:
+            log.warning("暂停等待超时（%.0f 秒），自动继续：%s", _PAUSE_MAX_WAIT, character)
+            return False
+        time.sleep(_PAUSE_POLL)
+        waited += _PAUSE_POLL
+    if waited:
+        # 循环退出说明旗标变了：要么被继续（键没了），要么被取消（键值=cancel）
+        log.info("入库%s：%s", "取消" if get_control(character) == "cancel" else "继续", character)
+    return get_control(character) == "cancel"
+
+
+def _cancelled(character: str, step: str) -> None:
+    """把当前步标记成「已取消」——状态仍是 failed，错误文案说明是手动取消。"""
+    _progress_mark(character, step, "fail", CANCEL_ERROR)
+
+
+def raise_if_cancelled(character: str, step: str) -> None:
+    """每步开头的守卫：被取消就落账并抛 `IngestCancelled`。
+
+    抛异常（而不是 return）才能真正**掐断整条链** —— 正常返回会让 chain 继续调度下一步。
+    `IngestCancelled` 不参与重试（Celery 只对显式 `self.retry` 重试）。
+    """
+    if wait_if_paused(character):
+        _cancelled(character, step)
+        raise IngestCancelled(CANCEL_REASON)
+
+
 # 流水线五步与标签见上方 PIPELINE_STEPS / STEP_LABELS
 
 
@@ -146,11 +233,17 @@ def _step_update(task, character: str, step: str, status: str, error: str | None
 
 
 # ───────────── crawl_runs 落地（crawl 步骤用） ─────────────
-async def _crawl_run_insert(character: str) -> int:
+async def _crawl_run_insert(character: str, submitted_by: str = "",
+                           submitted_by_name: str = "") -> int:
+    """建一条抓取账本。**提交人只有 API 知道**（见 crawl_runs 的建表注释）：
+    正常入库由 API 先建好行、把 id 当 run_id 传进来，这里只在没有 run_id
+    （自动重爬链 / CLI 直调）时自己补一行，提交人记成「自动」。"""
     async with get_cursor() as cur:
         await cur.execute(
-            "INSERT INTO crawl_runs (status, stats) VALUES ('running', %s) RETURNING id",
-            (json.dumps({"character": character}, ensure_ascii=False),),
+            "INSERT INTO crawl_runs (status, stats, character, submitted_by,"
+            " submitted_by_name) VALUES ('running', %s, %s, %s, %s) RETURNING id",
+            (json.dumps({"character": character}, ensure_ascii=False), character,
+             submitted_by, submitted_by_name or "自动"),
         )
         return (await cur.fetchone())[0]
 
@@ -158,8 +251,9 @@ async def _crawl_run_insert(character: str) -> int:
 async def _crawl_run_update(run_id: int, status: str, stats: dict) -> None:
     async with get_cursor() as cur:
         await cur.execute(
-            "UPDATE crawl_runs SET finished_at=now(), status=%s, stats=%s WHERE id=%s",
-            (status, json.dumps(stats, ensure_ascii=False), run_id),
+            "UPDATE crawl_runs SET finished_at=now(), status=%s, stats=%s,"
+            " error=%s, updated_at=now() WHERE id=%s",
+            (status, json.dumps(stats, ensure_ascii=False), stats.get("error"), run_id),
         )
 
 
@@ -171,6 +265,7 @@ async def _fetch_markdown(character: str) -> str:
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=15)
 def crawl_character(self, character: str, run_id: int | None = None):
+    raise_if_cancelled(character, "crawl")
     # 只在首次插入；重试通过 args 回传 run_id，避免重复 INSERT 污染 crawl_runs
     _step_update(self, character, "crawl", "start")
     if run_id is None:
@@ -223,6 +318,7 @@ async def _chunk_character_async(character: str) -> None:
 
 @celery_app.task(bind=True)
 def chunk_character(self, character: str):
+    raise_if_cancelled(character, "chunk")
     _step_update(self, character, "chunk", "start")
     try:
         _run(_chunk_character_async(character))
@@ -237,12 +333,15 @@ def chunk_character(self, character: str):
 async def _ingest_character_async(character: str) -> int:
     by_char = load_chunks_by_char(s.CHUNKS_JSONL)
     doc_id, n = await ingest_one(s.RAW_DIR / f"{character}.md", by_char.get(character, []))
+    # 新角色入库 → 领域词表的锚点集变了，标记重建（下次提问的后台任务里重算）
+    domain_terms.invalidate()
     await close_pool()
     return n
 
 
 @celery_app.task(bind=True)
 def ingest_character(self, character: str):
+    raise_if_cancelled(character, "ingest")
     _step_update(self, character, "ingest", "start")
     try:
         n = _run(_ingest_character_async(character))
@@ -264,6 +363,7 @@ async def _index_character_async(character: str) -> None:
 
 @celery_app.task(bind=True)
 def index_character(self, character: str):
+    raise_if_cancelled(character, "index")
     _step_update(self, character, "index", "start")
     try:
         _run(_index_character_async(character))
@@ -286,6 +386,7 @@ async def _graph_character_async(character: str) -> None:
 
 @celery_app.task(bind=True)
 def graph_character(self, character: str):
+    raise_if_cancelled(character, "graph")
     _step_update(self, character, "graph", "start")
     try:
         _run(_graph_character_async(character))
@@ -296,11 +397,15 @@ def graph_character(self, character: str):
     return {"character": character}
 
 
-def build_pipeline(character: str):
+def build_pipeline(character: str, run_id: int | None = None):
     """返回整条链（不入队），由 CLI / API 直接 apply_async。
-    用 .si() 让每一步都拿到 character，不被上一步返回值覆盖。"""
+    用 .si() 让每一步都拿到 character，不被上一步返回值覆盖。
+
+    `run_id` 由 API 传入（它先建好 crawl_runs 行、记下提交人，再把 id 交给 crawl 步复用）。
+    传 None 时 crawl 步会自己建一行，提交人记为「自动」。
+    """
     return chain(
-        crawl_character.si(character),
+        crawl_character.si(character, run_id),
         chunk_character.si(character),
         ingest_character.si(character),
         index_character.si(character),

@@ -274,6 +274,57 @@ def extract_characters(question: str, known: list[str]) -> list[str]:
     return mentioned_names(question, known)
 
 
+# ---------- 歧义角色名的 LLM 裁决（第 ④ 层；开关默认关闭，见 config.NAME_LLM_ADJUDICATION）
+#
+# 规则层已经处理掉绝大多数情况，剩下的疑难只有一类：**单字名**既被分词切成了独立
+# token（`心算`/`心累` 明明在 jieba 词典里却仍被切成 `心/…`），句内又没有领域词证据。
+# 理论上可以交给模型裁决。**实测 qwen3:8b 在这件事上不可用，两个方向都不可用**：
+#
+# · 问法 A「这句里的『心』指的是该角色吗」：69 条判对 47，22 条错**全是假阳性**
+#   （核心属性/开心/心田/心愿/心中有数/心太软 一律答「是角色」）→ 只能确认、不能否决；
+# · 问法 B「先说出该字所在的词，再判断」：12 条只对 4，错**全是假阴性**
+#   （心值得练吗/帮我配个心/心/心连招 一律判成不是角色）→ 会把真阳性全杀掉。
+#
+# 所以默认关闭。留着它的意义是：换模型 / 改问法之后改一行配置就能启用，不必再动代码。
+# ⚠️ 启用前请重跑上面两组实测，别凭感觉开：它会**否决**规则层给出的名字，
+# 假阴性高的模型会把本来认对的角色一起丢掉。
+_ADJUDICATE_SYSTEM = (
+    "你是《鸣潮》游戏的角色名消歧器。给你一句用户提问和其中一个单字，"
+    "判断这个单字在该句中指的是该游戏角色，还是普通词语。"
+    "只输出一个 JSON 对象，键为 refers_to_character，值是 true 或 false。不要输出别的内容。"
+)
+
+
+async def veto_ambiguous_names(question: str, candidates: list[str]) -> list[str]:
+    """用 tool LLM **否决**规则层给出的单字角色名。
+
+    只处理单字名（多字名规则层几乎不会错，交给模型反而引入风险）。
+    只有裁决明确说「不是角色」才移除；模型不可用、输出畸形、一切异常都保留规则层结论
+    —— 裁决是增益，绝不能反过来把问答主链弄挂。
+    """
+    keep = list(candidates)
+    for name in candidates:
+        if len(name) != 1 or name not in question:
+            continue
+        try:
+            resp = await get_tool_llm().ainvoke([
+                ("system", _ADJUDICATE_SYSTEM),
+                ("user", f"角色名：{name}（这是《鸣潮》里的一个角色）\n"
+                         f"用户提问：{question}\n\n"
+                         f"上面这句提问里的「{name}」字，指的是这个角色吗？只输出 JSON。"),
+            ])
+            m = re.search(r"\{.*\}", str(resp.content or ""), re.S)
+            if not m:
+                continue
+            if json.loads(m.group(0)).get("refers_to_character") is False:
+                keep = [c for c in keep if c != name]
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
+            log.warning("角色名 LLM 裁决输出无法解析（保留规则结论）: %s", exc)
+        except Exception as exc:  # noqa: BLE001 —— 模型不可用不该挡问答主链
+            log.warning("角色名 LLM 裁决失败（保留规则结论）: %s", exc)
+    return keep
+
+
 # ---------- 主题分类：闲聊 vs 游戏（qwen3:8b agent）----------
 
 _TOPIC_SYSTEM = """你是《鸣潮》问答助手的意图分类器。判断用户这句话属于哪一类，只输出一个 JSON：

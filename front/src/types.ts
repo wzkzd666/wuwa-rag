@@ -191,10 +191,34 @@ export interface IngestStep {
 
 export interface IngestStatus {
   character: string
-  status: 'pending' | 'running' | 'success' | 'failed'
+  /** `cancelled` 是本项目加的第四种终态：单看 steps 分不出「失败」与「被取消」 */
+  status: 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
   found: boolean
+  /** worker 侧 Redis 控制旗标：暂停期间那一步保持 pending，靠这两个布尔告诉前端 */
+  paused: boolean
+  cancelled: boolean
   steps: IngestStep[]
   updated_at: number | null
+}
+
+/**
+ * GET /ingest/records 的一条：**服务端**的抓取/入库提交账本（表 crawl_runs）。
+ * 与 `IngestRecord` 的区别：那个是浏览器会话内的临时列表（驱动轮询与置顶条），
+ * 这个刷新/换设备都在，并且带**提交人**。
+ */
+export interface IngestRecordRow {
+  id: number
+  character: string
+  submitted_by: string
+  submitted_by_name: string
+  chain_id: string | null
+  /** 库里那行的状态（running / success / failed） */
+  state: string
+  error: string | null
+  created_at: string | null
+  finished_at: string | null
+  /** 叠加 Redis 实时进度算出的活状态：unknown / running / success / failed */
+  status: 'unknown' | 'running' | 'success' | 'failed'
 }
 
 /** 聊天背景预设；'custom' 表示使用用户上传的图片（bgImage） */

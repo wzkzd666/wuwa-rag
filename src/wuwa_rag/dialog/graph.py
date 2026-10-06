@@ -28,6 +28,7 @@ from wuwa_rag.dialog.nlu import (
     mentions_time,
     rewrite_query,
     summarize_turns,
+    veto_ambiguous_names,
 )
 from wuwa_rag.dialog.prompt import (
     build_context,
@@ -36,6 +37,7 @@ from wuwa_rag.dialog.prompt import (
 )
 from wuwa_rag.dialog.state import RagState
 from wuwa_rag.dialog.tools import current_time_tool, graph_search_tool, vector_search_tool
+from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge.entities import find_mentions, resolve_candidates
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.retrieve import fetch_chunks
@@ -250,6 +252,9 @@ def _inject_far_characters(
 
 async def intent_node(state: RagState) -> dict:
     q = state["question"]
+    # 领域词表（单字角色名消歧用）过期就丢一个后台重建，本轮仍用旧词表、不阻塞问答。
+    # 冷启动时是空表，find_mentions 会回落到 entities 的手写兜底表。
+    domain_terms.schedule_warmup()
     known = await _known_characters()
     # 追问改写（A+B 输入）：滚动摘要（窗口外压缩记忆）+ 焦点锚点（全量文本提角色，
     # 不怕 120 字截断丢名）+ 最近 2 轮短原文。检索信号全部吃改写句——
@@ -263,6 +268,11 @@ async def intent_node(state: RagState) -> dict:
     chars = extract_characters(sq, known) or state.get("characters", [])
     # 远指代兜底：改写器偶发解析失败/半解析时，摘要里的「前角色」兜住
     chars = _inject_far_characters(sq, chars, summary, set(known))
+    # 歧义角色名的 LLM 裁决（默认关闭，见 config.NAME_LLM_ADJUDICATION —— 实测
+    # qwen3:8b 两个问法都不可用：一个只会答「是」、另一个只会答「不是」，都会误伤）。
+    # 放在 `_inject_far_characters` 之后：远指代补进来的名字也该受同一道裁决。
+    if chars and setting.NAME_LLM_ADJUDICATION:
+        chars = await veto_ambiguous_names(sq, chars)
     element = detect_element(sq) or state.get("element", "")
     stage = detect_stage(sq)
     intent = classify(sq, slots)
@@ -596,6 +606,8 @@ def _after_verify(state: RagState) -> str:
 #   8B 模型读 11 列宽表会串列（实测把 Lv7 读数读成中文数字），替它读比让它读可靠。
 _SKILL_TABS = ("常态攻击", "共鸣技能", "共鸣回路", "共鸣解放", "变奏技能", "延奏技能", "谐度破坏")
 _MATERIAL_SLOT_RE = re.compile(r"突破|材料|素材|培养|养成|练度")
+# 声骸/武器走确定性补料时，认领这两个槽位（组件名本身不写死，由 `chunks.component` 决定）
+_ECHO_SLOTS = ("声骸", "武器")
 _MATERIAL_ITEM_RE = re.compile(r"([\u4e00-\u9fa5A-Za-z·]+?)\s*[x×](\d+)")
 _SEP_CELL_RE = re.compile(r"^[-:\s]*$")
 _LEVEL_CELL_RE = re.compile(r"^L?V?\.?\d+$")          # 表头的 LV.2 / Lv 3 之类
@@ -775,8 +787,45 @@ async def _material_block(char: str) -> str:
     )
 
 
+async def _echo_block(char: str, slots: list[str]) -> str:
+    """声骸套装 / 武器推荐表（原文照抄）；取不到返回空串。
+
+    ⚠️ 组件名**不写死**：wiki 的板块叫什么由数据决定（`chunks.component`），
+    这里一次 `fetch_chunks(角色)` 取出该角色全部块，再按**槽位关键词**去挑组件
+    （问「声骸」挑名字里带「声骸」的板块，问「武器」挑带「武器」的）。
+    板块改名、加板块都不用改代码 —— 写死组件名的话，wiki 一改名就静默失效。
+
+    只接「声骸 / 武器」两个槽位：技能、突破材料各有专用块（`_skill_value_block` /
+    `_material_block`），这里再取一遍会重复。
+
+    ⚠️ 为什么必须补这一块（用户实测踩到）：问「心声骸推荐」，模型把「心声骸」当成
+    一个完整的词，答成「我先替你看看那位朋友的心声骸」—— 检索其实是对的（`COST 43311`
+    原样答出），是**生成侧的分词**出的问题。把「本问解析（角色=心 / 内容=声骸）」与
+    本块原文一起喂进去，模型就没有再猜分词的余地。
+    """
+    wanted = [s for s in slots if s in _ECHO_SLOTS]
+    if not wanted:
+        return ""
+    chunks = await _run_io(fetch_chunks, char)
+    if not chunks:
+        return ""
+    picked = {d.get("component") for d in chunks
+              if d.get("component") and any(s in d["component"] for s in wanted)}
+    if not picked:
+        return ""
+    body = "\n".join(chunk_text(d) for d in chunks if d.get("component") in picked).strip()
+    if not body:
+        return ""
+    return (
+        "## 声骸 / 武器推荐表（原文照抄）\n"
+        f"（本问只答「{char}」本人的推荐。下表逐行完整列出，套装名与武器名是专有名词、"
+        "逐字照抄（不改字、不换词、不用近义写法），COST 与词条里的数字和符号原样保留。）\n"
+        + body
+    )
+
+
 async def _value_blocks(state: RagState) -> list[str]:
-    """按问题类型补「满级数值表 / 突破材料表」。取不到返回空，绝不影响主链路。"""
+    """按问题类型补「满级数值表 / 突破材料表 / 声骸武器推荐表」。取不到返回空，绝不影响主链路。"""
     chars = state.get("characters") or []
     if not chars:
         return []
@@ -790,6 +839,12 @@ async def _value_blocks(state: RagState) -> list[str]:
                 blocks.append(b)
         if _MATERIAL_SLOT_RE.search(sq):
             b = await _material_block(chars[0])
+            if b:
+                blocks.append(b)
+        # 声骸/武器放最后：prompt 里越靠后的块离问句越近（近因位），而问「X 声骸」
+        # 时它才是主料；上面两块是次要补充
+        if "声骸" in slots or "武器" in slots:
+            b = await _echo_block(chars[0], slots)
             if b:
                 blocks.append(b)
     except Exception as exc:  # noqa: BLE001 —— 补料是增益不是依赖，失败只记日志

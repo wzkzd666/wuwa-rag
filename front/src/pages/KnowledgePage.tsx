@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  ChevronLeft, ChevronRight, CheckCircle2, Clock, Download, Info, Library, Loader2, RefreshCw,
-  Search, Trash2, XCircle, Zap,
+  ChevronLeft, ChevronRight, CheckCircle2, Clock, Download, Info, Library, Loader2, Pause,
+  Play, RefreshCw, Search, Trash2, XCircle, Zap,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import {
-  ingestStatus, knowledgeCharacters, knowledgeDelete, knowledgeRefresh,
+  ingestControl, ingestRecordDelete, ingestRecords, ingestStatus,
+  knowledgeCharacters, knowledgeDelete, knowledgeRefresh,
 } from '../lib/api'
-import type { IngestRecord, IngestStatus, KnowledgeOut } from '../types'
+import type { IngestRecord, IngestRecordRow, IngestStatus, KnowledgeOut } from '../types'
 import './KnowledgePage.css'
 
 /**
@@ -43,11 +44,22 @@ function fmtTime(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false })
 }
 
+/** 一条失败/取消的原因文案：优先取出错那一步的 error（后端已写好可读原因） */
+function failureOf(st?: IngestStatus): string {
+  if (!st) return ''
+  const bad = st.steps.find((s) => s.status === 'failed')
+  return (bad?.error || '').trim()
+}
+
 /** 提交记录「状态」列：优先渲染后端实时五步进度，回落到提交回执 */
 function renderStatus(r: IngestRecord, st?: IngestStatus) {
   if (r.ok && st && st.found && st.status !== 'pending') {
+    const failed = st.status === 'failed' || st.status === 'cancelled'
     return (
-      <div className="step-bar" title={st.steps.map((s) => `${s.label}:${s.status}${s.error ? ' ' + s.error : ''}`).join('\n')}>
+      <div
+        className="step-bar"
+        title={st.steps.map((s) => `${s.label}:${s.status}${s.error ? ' ' + s.error : ''}`).join('\n')}
+      >
         {st.steps.map((s) => (
           <span key={s.key} className={`step-dot step-${s.status}`}>
             {s.status === 'running' ? (
@@ -62,8 +74,20 @@ function renderStatus(r: IngestRecord, st?: IngestStatus) {
             <em>{s.label}</em>
           </span>
         ))}
-        <span className={`tag ${st.status === 'success' ? 'tag-ok' : st.status === 'failed' ? 'tag-err' : 'tag-violet'}`}>
-          {st.status === 'success' ? '完成' : st.status === 'failed' ? '失败' : '进行中'}
+        <span
+          className={`tag ${
+            st.status === 'success' ? 'tag-ok' : failed ? 'tag-err' : 'tag-violet'
+          }`}
+        >
+          {st.status === 'success'
+            ? '完成'
+            : st.status === 'cancelled'
+              ? '已取消'
+              : st.status === 'failed'
+                ? '失败'
+                : st.paused
+                  ? '已暂停'
+                  : '进行中'}
         </span>
       </div>
     )
@@ -75,6 +99,27 @@ function renderStatus(r: IngestRecord, st?: IngestStatus) {
   ) : (
     <span className="tag tag-err" title={r.error}>
       <XCircle size={11} /> {r.state}
+    </span>
+  )
+}
+
+/** 服务端账本行的「状态」列：优先用本轮已轮询到的五步进度，否则退回行上的活状态 */
+function renderRecordStatus(r: IngestRecordRow, st?: IngestStatus) {
+  if (st && st.found && st.status !== 'pending') {
+    return renderStatus(
+      { id: String(r.id), character: r.character, chainId: r.chain_id ?? '',
+        state: r.state, createdAt: 0, ok: true },
+      st,
+    )
+  }
+  const done = r.status === 'success' || r.state === 'success'
+  const bad = r.status === 'failed' || r.state === 'failed'
+  return (
+    <span
+      className={`tag ${done ? 'tag-ok' : bad ? 'tag-err' : 'tag-violet'}`}
+      title={r.error || ''}
+    >
+      {done ? '完成' : bad ? '失败' : r.status === 'running' ? '进行中' : '—'}
     </span>
   )
 }
@@ -92,11 +137,18 @@ export default function KnowledgePage() {
   const [filter, setFilter] = useState('')
   // 已收录列表页码（从 1 开始）
   const [page, setPage] = useState(1)
+  // 置顶区块里「暂停/继续/取消/重试」正在调用的角色（防连点）
+  const [ctlBusy, setCtlBusy] = useState('')
   // 角色名 -> 实时进度。3s 轮询 /ingest/status，五步全终态后停轮该角色
   const [progress, setProgress] = useState<Record<string, IngestStatus>>({})
   // 知识库列表（服务端真值，不回 store、不持久化）
   const [kb, setKb] = useState<KnowledgeOut | null>(null)
   const [kbErr, setKbErr] = useState('')
+  // 提交记录：**服务端**账本（crawl_runs），刷新/换设备都在，且带提交人。
+  // 浏览器里那份 ingests 仍留着驱动「置顶进度条 + 轮询」，但不再充当记录。
+  const [records, setRecords] = useState<IngestRecordRow[]>([])
+  const [recLoading, setRecLoading] = useState(false)
+  const [recErr, setRecErr] = useState('')
   const [kbLoading, setKbLoading] = useState(false)
   // 逐行操作中的标记：角色名 -> 'refresh' | 'delete'
   const [busy, setBusy] = useState<Record<string, string>>({})
@@ -113,9 +165,39 @@ export default function KnowledgePage() {
     }
   }, [apiBase])
 
+  const loadRecords = useCallback(async () => {
+    setRecLoading(true)
+    try {
+      const out = await ingestRecords(30, apiBase)
+      setRecords(out.items)
+      setRecErr('')
+    } catch (err) {
+      setRecErr(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRecLoading(false)
+    }
+  }, [apiBase])
+
+  const doDeleteRecord = async (id: number) => {
+    if (!window.confirm('删掉这条提交记录？\n\n只删账本记录；正在跑的流水线请先用「取消」停掉。')) {
+      return
+    }
+    setCtlBusy(String(id))
+    try {
+      await ingestRecordDelete(id, apiBase)
+      setRecords((rs) => rs.filter((r) => r.id !== id))
+      toast('ok', '已删除该条提交记录')
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setCtlBusy('')
+    }
+  }
+
   useEffect(() => {
     void loadKb()
-  }, [loadKb])
+    void loadRecords()
+  }, [loadKb, loadRecords])
 
   const pendingChars = useMemo(
     () =>
@@ -132,6 +214,19 @@ export default function KnowledgePage() {
   // 待轮询角色的「集合指纹」。用它当 effect 依赖，而不是直接依赖数组本身
   // （每轮 setProgress 都会产生新数组引用，直接依赖会无限重建定时器）
   const pendingKey = pendingChars.join('、')
+
+  // 置顶显示的提交：正在跑的 + 刚失败的（含提交本身就失败的）。
+  // 「已取消」不置顶 —— 那是我自己点的，落回下面的提交记录即可。
+  const pinnedIngests = useMemo(
+    () =>
+      ingests.filter((r) => {
+        if (!r.ok) return true
+        const st = progress[r.character]
+        if (st?.status === 'failed') return true
+        return pendingChars.includes(r.character)
+      }),
+    [ingests, progress, pendingChars],
+  )
 
   useEffect(() => {
     if (pendingChars.length === 0 || health === 'down') return
@@ -156,11 +251,15 @@ export default function KnowledgePage() {
   }, [pendingKey, health, apiBase])
 
   // 一批入库跑完就刷新知识库列表 —— 新角色这时才真的出现在「已收录」里
+  // （提交记录是服务端的，同样要刷新：状态是活的，不刷新就一直停在「进行中」）
   const wasPending = useRef(false)
   useEffect(() => {
-    if (wasPending.current && pendingKey === '') void loadKb()
+    if (wasPending.current && pendingKey === '') {
+      void loadKb()
+      void loadRecords()
+    }
     wasPending.current = pendingKey !== ''
-  }, [pendingKey, loadKb])
+  }, [pendingKey, loadKb, loadRecords])
 
   const items = kb?.items ?? []
   const filteredItems = useMemo(() => {
@@ -179,6 +278,26 @@ export default function KnowledgePage() {
     if (!c) return
     ingestCharacter(c)
     setName('')
+  }
+
+  /** 暂停 / 继续 / 取消一条正在跑的入库链（后端按角色写 Redis 旗标，worker 每步开头自查） */
+  const doControl = async (character: string, action: 'pause' | 'resume' | 'cancel') => {
+    setCtlBusy(character)
+    try {
+      await ingestControl(character, action, apiBase)
+      toast(
+        'ok',
+        action === 'pause'
+          ? `已暂停「${character}」：worker 停在当前这一步等你`
+          : action === 'resume'
+            ? `已继续「${character}」`
+            : `已取消「${character}」`,
+      )
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setCtlBusy('')
+    }
   }
 
   const doRefresh = async (character: string) => {
@@ -336,6 +455,63 @@ export default function KnowledgePage() {
           </div>
         )}
 
+        {/* 置顶的「正在收录 / 刚失败」：提交表单在本页最上方，进度原本只在页面最下面的
+            「提交记录」里，用户提交完在列表这边看不到任何动静；「wiki 上不存在该角色」
+            这类失败更是完全没提示。置顶后失败原因直接摆在列表最上面。 */}
+        {pinnedIngests.length > 0 && (
+          <div className="kb-pinned">
+            {pinnedIngests.map((r) => {
+              const st = progress[r.character]
+              const busy = pendingChars.includes(r.character)
+              const why = failureOf(st) || r.error || ''
+              return (
+                <div className="kb-pin-row" key={r.id}>
+                  <div className="kb-pin-main">
+                    <b className="kb-pin-name">{r.character}</b>
+                    {renderStatus(r, st)}
+                    {why && <span className="kb-pin-why">{why}</span>}
+                  </div>
+                  <div className="kb-pin-ctl">
+                    {st?.status === 'failed' && !busy ? (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => submit(r.character)}
+                        disabled={ctlBusy === r.character}
+                      >
+                        <RefreshCw size={13} /> 重试
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => doControl(r.character, st?.paused ? 'resume' : 'pause')}
+                          disabled={!busy}
+                          title={
+                            busy
+                              ? '暂停后 worker 会在当前这一步原地等待，继续后自动往下跑'
+                              : '该任务已结束'
+                          }
+                        >
+                          {st?.paused ? <Play size={13} /> : <Pause size={13} />}
+                          {st?.paused ? '继续' : '暂停'}
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm kb-btn-danger"
+                          onClick={() => doControl(r.character, 'cancel')}
+                          disabled={!busy}
+                          title="取消后整条链在这一步掐断，已写入的数据不回滚"
+                        >
+                          <XCircle size={13} /> 取消
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
         {!kbErr && filteredItems.length === 0 ? (
           <div className="empty-state">
             <Library size={26} />
@@ -438,8 +614,20 @@ export default function KnowledgePage() {
 
       {/* ============ 提交记录 ============ */}
       <section className="card kb-records">
-        <h3>提交记录</h3>
-        {ingests.length === 0 ? (
+        <div className="kb-owned-head">
+          <h3>提交记录</h3>
+          <div className="kb-owned-tools">
+            <button className="btn btn-ghost btn-sm" onClick={() => void loadRecords()} disabled={recLoading}>
+              {recLoading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />} 刷新
+            </button>
+          </div>
+        </div>
+        {recErr && (
+          <div className="kb-warn">
+            <Info size={15} /> 读取提交记录失败：{recErr}
+          </div>
+        )}
+        {!recErr && records.length === 0 ? (
           <div className="empty-state">
             <Clock size={26} />
             <span>还没有提交过入库任务</span>
@@ -449,18 +637,33 @@ export default function KnowledgePage() {
             <thead>
               <tr>
                 <th>角色</th>
-                <th>任务号 chain_id</th>
+                <th>提交人</th>
                 <th>状态</th>
                 <th>提交时间</th>
+                <th className="kb-act-col">操作</th>
               </tr>
             </thead>
             <tbody>
-              {ingests.map((r) => (
+              {records.map((r) => (
                 <tr key={r.id}>
                   <td className="kb-char">{r.character}</td>
-                  <td className="kb-mono">{r.chainId || '—'}</td>
-                  <td>{renderStatus(r, progress[r.character])}</td>
-                  <td className="kb-time">{new Date(r.createdAt).toLocaleString('zh-CN')}</td>
+                  <td className="kb-who">{r.submitted_by_name}</td>
+                  <td>{renderRecordStatus(r, progress[r.character])}</td>
+                  <td className="kb-time">{fmtTime(r.created_at)}</td>
+                  <td className="kb-act-col">
+                    {isAdmin && (
+                      <div className="kb-actions">
+                        <button
+                          className="btn btn-ghost btn-sm kb-btn-danger"
+                          onClick={() => void doDeleteRecord(r.id)}
+                          disabled={ctlBusy === String(r.id)}
+                          title="只删这条账本记录；正在跑的流水线请先用上面的「取消」停掉"
+                        >
+                          <Trash2 size={12} /> 删除
+                        </button>
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

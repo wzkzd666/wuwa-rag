@@ -32,8 +32,10 @@ stub 成 game 之后 `我是颗粒` 仍判 chitchat，才证明硬信号真的�
 from __future__ import annotations
 
 import pytest
+from langchain_core.messages import AIMessage
 
-from wuwa_rag.dialog.nlu import is_identity, is_self_intro
+from wuwa_rag.dialog import nlu as nlu_mod
+from wuwa_rag.dialog.nlu import is_identity, is_self_intro, veto_ambiguous_names
 
 # (问句, 期望 intent, 期望 characters)。期望值取自 2026-10-06 实测（主题分类器 stub 成 game）。
 ROUTE_CASES = [
@@ -133,3 +135,48 @@ def test_两条硬信号不互相越界() -> None:
     assert not is_self_intro("你是谁")
     assert not is_identity("我是谁")
     assert not is_self_intro("我是谁")
+
+
+# ---------- 歧义角色名的 LLM 裁决（config.NAME_LLM_ADJUDICATION，默认关闭）----------
+
+class _FakeLLM:
+    """按脚本返回预设文本的 tool LLM 替身。记录收到的 user 消息以便断言调用范围。"""
+
+    def __init__(self, script, boom: bool = False) -> None:
+        self._script = script
+        self._boom = boom
+        self.seen: list[str] = []
+
+    async def ainvoke(self, messages):
+        self.seen.append(messages[-1][1])
+        if self._boom:
+            raise RuntimeError("ollama 没起")
+        text = self._script.pop(0) if self._script else ""
+        return AIMessage(content=text)
+
+
+async def test_裁决_说不是角色就否决(monkeypatch) -> None:
+    llm = _FakeLLM(['{"refers_to_character": false}'])
+    monkeypatch.setattr(nlu_mod, "get_tool_llm", lambda: llm)
+    assert await veto_ambiguous_names("心算不算强", ["心"]) == []
+
+
+async def test_裁决_说是角色就保留(monkeypatch) -> None:
+    llm = _FakeLLM(['{"refers_to_character": true}'])
+    monkeypatch.setattr(nlu_mod, "get_tool_llm", lambda: llm)
+    assert await veto_ambiguous_names("心声骸推荐", ["心"]) == ["心"]
+
+
+async def test_裁决_输出畸形或模型挂掉都保留规则结论(monkeypatch) -> None:
+    """裁决是增益：任何异常都**不得**改写规则层已经给出的名字。"""
+    for llm in (_FakeLLM(["不是 JSON"]), _FakeLLM([], boom=True), _FakeLLM(["{oops"])):
+        monkeypatch.setattr(nlu_mod, "get_tool_llm", lambda fake=llm: fake)
+        assert await veto_ambiguous_names("心值得练吗", ["心"]) == ["心"]
+
+
+async def test_裁决_多字名不送去模型(monkeypatch) -> None:
+    """多字名规则层几乎不会错，交给模型只会引入风险 —— 必须一个都不送。"""
+    llm = _FakeLLM(['{"refers_to_character": false}'])
+    monkeypatch.setattr(nlu_mod, "get_tool_llm", lambda: llm)
+    assert await veto_ambiguous_names("守岸人配队", ["守岸人"]) == ["守岸人"]
+    assert llm.seen == []

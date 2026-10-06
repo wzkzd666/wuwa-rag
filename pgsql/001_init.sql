@@ -83,6 +83,12 @@ CREATE INDEX IF NOT EXISTS ix_tool_calls_run     ON tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS ix_tool_calls_created ON tool_calls(created_at);
 
 -- ========== 采集运行记录 ==========
+-- crawl_runs 同时兼作「入库提交账本」：谁在什么时候提交了哪个角色的抓取。
+-- 原来角色名只塞在 stats.character 里、且行是 **worker 抓取时**才建的 —— 于是提交人无处可记
+-- （worker 只知道自己跑了什么，不知道是谁点的），前端那份提交列表只能放浏览器内存里：
+-- 刷新即失、换设备看不到，也没法回答「这条是谁提交的」。
+-- 现在：行由 **API 在提交时**先建（只有它知道提交人），把 id 当 run_id 传给 crawl 步，
+-- worker 复用同一行更新状态、不再另插。character 提升为独立列，并从 stats 回填老数据。
 CREATE TABLE IF NOT EXISTS crawl_runs (
     id          BIGSERIAL PRIMARY KEY,
     started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -90,6 +96,16 @@ CREATE TABLE IF NOT EXISTS crawl_runs (
     status      TEXT,
     stats       JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS character TEXT;
+ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS submitted_by TEXT;        -- users.id
+ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS submitted_by_name TEXT;   -- 冗余名，改名后历史仍可读
+ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS chain_id TEXT;
+ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS error TEXT;
+ALTER TABLE crawl_runs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+CREATE INDEX IF NOT EXISTS ix_crawl_runs_started ON crawl_runs(started_at DESC);
+-- 老库回填：角色名原来只存在 stats 里
+UPDATE crawl_runs SET character = stats ->> 'character'
+WHERE character IS NULL AND stats ? 'character';
 
 -- ========== 记忆四表 ==========
 CREATE TABLE IF NOT EXISTS messages (              -- 只追加，永不删改

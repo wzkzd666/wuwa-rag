@@ -15,13 +15,16 @@
    `wuwa_rag.dialog.prompt`）。这不是风格问题：写成带前缀的断言会**恒真通过**，
    空包回来了测试也不会红——典型假绿。本文件所有键名都是无前缀形态。
 ② 计数口径：
-   · `modules()` 返回 **49**：`__init__.py` 归到它所属的包名，所以顶层包与各子包
+   · `modules()` 返回 **50**：`__init__.py` 归到它所属的包名，所以顶层包与各子包
      （`core`、`knowledge.graph` …）都算一个模块，不是「纯 .py 文件数」；
-   · `build_graph()` 只有 **34** 个键：它用 defaultdict，**只收录有出边的模块**，
+   · `build_graph()` 只有 **35** 个键：它用 defaultdict，**只收录有出边的模块**，
      没有任何内部依赖的叶子模块不会出现在键里；
-   · 依赖边 **133** 条、违规 **0**、环 **0**。
+   · 依赖边 **140** 条、违规 **0**、环 **0**。
 2026-09-30 重构遗留的 5 个空包（rag/graph/ingest/retrieval/storage）已于
-2026-10-06 清理；在此之前它们让模块计数虚增 5（54 vs 49）。
+2026-10-06 清理；在此之前它们让模块计数虚增 5（55 vs 50）。
+同日新增 `knowledge/domain_terms.py`（单字角色名消歧用的领域词表派生），
++1 模块 / +7 边：它自己依赖 config+core.db+ww_logger（3 条出边），
+被 entities / dialog.graph / api.app / tasks.worker 引用（4 条入边）。
 """
 from __future__ import annotations
 
@@ -36,10 +39,10 @@ _GUARD = _ROOT / "scripts" / "check_layers.py"
 
 # 实测基线（2026-10-06）。这些数字会随正常开发变化——
 # 变化时应当**读懂为什么变了**再更新，而不是为了让测试变绿而随手改数。
-EXPECTED_MODULES = 49
-EXPECTED_EDGES = 133
-EXPECTED_GRAPH_KEYS = 34
-EXPECTED_LAYER_COUNTS = {0: 3, 1: 7, 2: 16, 3: 2, 4: 7, 5: 9, 6: 5}
+EXPECTED_MODULES = 50
+EXPECTED_EDGES = 140
+EXPECTED_GRAPH_KEYS = 35
+EXPECTED_LAYER_COUNTS = {0: 3, 1: 7, 2: 17, 3: 2, 4: 7, 5: 9, 6: 5}
 
 # 2026-09-30 重构后遗留、2026-10-06 清理掉的空壳包（**无前缀**键名，见模块 docstring ①）。
 REMOVED_EMPTY_PACKAGES = ("rag", "graph", "ingest", "retrieval", "storage")

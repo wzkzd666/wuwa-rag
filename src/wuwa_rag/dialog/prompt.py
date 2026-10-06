@@ -131,6 +131,36 @@ def build_context(state: RagState, extra: list[str] | None = None) -> str:
     web_facts = state.get("web_facts") or ""
     if web_facts:
         parts.append("## 联网搜索资料\n（实时搜索结果，本地资料不足时以本段为准）\n" + web_facts)
+    # 本问解析：把**已经确定**的角色与话题显式告诉模型。
+    #
+    # 为什么必须显式写：用户问「心声骸推荐」时，模型会把「心声骸」当成一个完整词
+    # （用户实测：答成「我先替你看看那位朋友的心声骸」，把「心」吃掉了）。
+    # 而角色与槽位在检索侧本来就是**确定性**解出来的（find_mentions + detect_slots），
+    # 直接写进上下文就不必再让模型自己猜分词 —— 「心」是角色、「声骸」是话题。
+    #
+    # 三行各自可缺，随这一轮实际情况变化，缺哪行就不写哪行：
+    #   · 角色：认出来了才写（没认出来就不写，不硬凑）；
+    #   · 要问的内容：取问句槽位；
+    #   · 召回资料所属板块：问句没槽位时，改为反映**实际召回的是什么**，
+    #     板块名直接来自 `chunks.component`，不写死。
+    # 三行都没有 → 整段不生成（闲聊轮次不会出现空标题）。
+    focus_chars = [c for c in (state.get("characters") or []) if c]
+    focus_slots = [s for s in (state.get("slots") or []) if s]
+    comps: list[str] = []
+    for d in (state.get("docs") or []):
+        c = str(d.get("component") or "").strip()
+        if c and c not in comps:
+            comps.append(c)
+    rows: list[str] = []
+    if focus_chars:
+        rows.append("- 被问到的角色：" + "、".join(focus_chars))
+    if focus_slots:
+        rows.append("- 要问的内容：" + "、".join(focus_slots))
+    if comps:
+        rows.append("- 召回资料所属板块：" + "、".join(comps[:4])
+                    + ("…" if len(comps) > 4 else ""))
+    if rows:
+        parts.append("## 本问解析\n（下面这些已由检索侧确定，直接照它作答）\n" + "\n".join(rows))
     # 确定性补料排在最后（紧贴 ## 问题）。真凶其实不在位置：实测把这张满级数值表
     # 放在 ## 资料 第一节时，aemeath 会「只抄前几行就收尾」并补一句「其他参数未在该
     # 列表中」，换表格/纯文本/编号/中文数值都无效——根因是 repeat_penalty=1.3 把彼此

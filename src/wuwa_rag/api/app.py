@@ -19,6 +19,7 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 
+import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -34,6 +35,7 @@ from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
 from wuwa_rag.dialog.graph import ask, ask_stream, doc_sources
 from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
+from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge import entities as kb
 from wuwa_rag.services.emotion import EMOTION_TAGS
 from wuwa_rag.services.profile import (
@@ -47,12 +49,15 @@ from wuwa_rag.services.profile import (
 from wuwa_rag.services.tts import MODEL_LABEL, VOICE_LABELS, synthesize, voice_label
 from wuwa_rag.services.tts import resolve as tts_resolve
 from wuwa_rag.tasks.worker import (
+    CANCEL_ERROR,
     PIPELINE_STEPS,
     STEP_LABELS,
     build_pipeline,
     build_refresh_pipeline,
     delete_character_knowledge,
+    get_control,
     get_progress,
+    set_control,
 )
 from wuwa_rag.ww_logger import get_logger
 
@@ -65,6 +70,12 @@ async def lifespan(app: FastAPI):
     await ensure_schema()   # 幂等建鉴权表 + 种子 admin/123456（见 pgsql/002_auth.sql）
     await conv.ensure_schema()       # 幂等建会话转录表（见 pgsql/003_conversation_scope.sql）
     await llmstore.ensure_schema()   # 幂等建 user_llm_configs（云端模型配置，含加密 key）
+    # 领域词表（单字角色名消歧用）：启动时建好，之后问答主链零额外开销。
+    # 失败不阻断启动 —— 判据会回落到 entities 的手写兜底表。
+    try:
+        await domain_terms.build()
+    except Exception as exc:  # noqa: BLE001 —— 派生词表是增益，挂了不该让服务起不来
+        log.warning("领域词表预热失败（回落到手写兜底表）: %s", exc)
     yield
     await close_checkpointer()
     await close_pool()
@@ -129,6 +140,13 @@ class AskOut(BaseModel):
 
 class IngestIn(BaseModel):
     character: str = Field(..., description="角色中文名，如 忌炎")
+
+
+class IngestControlIn(BaseModel):
+    """暂停/继续/取消的请求体。`action` 三选一，语义见 worker.set_control。"""
+    character: str = Field(..., description="角色中文名；控制按角色生效，不按 chain_id")
+    action: str = Field(..., pattern="^(pause|resume|cancel)$",
+                        description="pause 暂停（worker 原地等待）｜resume 继续｜cancel 取消并掐断整条链")
 
 
 class TitleIn(BaseModel):
@@ -832,9 +850,108 @@ async def api_llm_config_delete(user: authn.AuthUser = Depends(authn.get_current
 @app.post("/ingest")
 async def api_ingest(body: IngestIn,
                      user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
-    """把一个角色塞进异步流水线，立即返回 chain_id。"""
-    r = build_pipeline(body.character).apply_async()
-    return {"character": body.character, "chain_id": r.id, "state": r.state}
+    """把一个角色塞进异步流水线，立即返回 chain_id。
+
+    先建 `crawl_runs` 行再入队：**提交人只有 API 知道**（worker 只知道自己跑了什么），
+    行 id 作为 run_id 交给 crawl 步复用同一行，所以这份账本刷新页面/换设备都还在。
+    """
+    run_id = await asyncio.to_thread(_create_crawl_run, body.character, user.username)
+    r = build_pipeline(body.character, run_id).apply_async()
+    await asyncio.to_thread(_set_chain_id, run_id, r.id)
+    return {"character": body.character, "chain_id": r.id, "state": r.state, "run_id": run_id}
+
+
+def _create_crawl_run(character: str, username: str) -> int:
+    """提交时建一行 crawl_runs（同步驱动，跑在线程里）。返回行 id。"""
+    with psycopg.connect(get_settings().PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO crawl_runs (status, stats, character, submitted_by,"
+                " submitted_by_name) VALUES ('running', %s, %s, %s, %s) RETURNING id",
+                (json.dumps({"character": character}, ensure_ascii=False), character,
+                 str(username), str(username)),
+            )
+            return cur.fetchone()[0]
+
+
+def _set_chain_id(run_id: int, chain_id: str) -> None:
+    with psycopg.connect(get_settings().PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE crawl_runs SET chain_id = %s WHERE id = %s", (chain_id, run_id))
+
+
+@app.get("/ingest/records")
+async def api_ingest_records(limit: int = 20,
+                             user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """最近的抓取/入库提交记录（服务端真值，含提交人），按提交时间倒序。
+
+    `status` 是**实时**流水线状态：从 Redis 进度键按角色读出来叠加。
+    记录本身只存「谁在什么时候提了什么」，活的状态那份在 Redis。
+    """
+    limit = max(1, min(limit, 100))
+
+    def _load() -> list[dict]:
+        with psycopg.connect(get_settings().PG_DSN) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, character, submitted_by, submitted_by_name, chain_id,"
+                    " status, error, started_at, finished_at FROM crawl_runs"
+                    " WHERE character IS NOT NULL"
+                    " ORDER BY started_at DESC LIMIT %s",
+                    (limit,),
+                )
+                cols = [d.name for d in cur.description]
+                return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    rows = await asyncio.to_thread(_load)
+    snaps = await asyncio.gather(
+        *(asyncio.to_thread(get_progress, r["character"]) for r in rows)
+    )
+    items = []
+    for r, snap in zip(rows, snaps):
+        live = _live_status(snap)
+        items.append({
+            "id": r["id"],
+            "character": r["character"],
+            "submitted_by": r["submitted_by"],
+            "submitted_by_name": r["submitted_by_name"] or "自动",
+            "chain_id": r["chain_id"],
+            "state": r["status"],
+            "error": r["error"],
+            "created_at": r["started_at"].isoformat() if r["started_at"] else None,
+            "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None,
+            "status": live,
+        })
+    return {"items": items, "total": len(items)}
+
+
+@app.delete("/ingest/records/{record_id}")
+async def api_ingest_record_delete(record_id: int,
+                                   user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """删掉一条提交记录（只删账本，不碰后台正在跑的流水线；要停请先 POST /ingest/control）。"""
+    with psycopg.connect(get_settings().PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM crawl_runs WHERE id = %s RETURNING character", (record_id,))
+            row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return {"id": record_id, "character": row[0]}
+
+
+def _live_status(snap: dict | None) -> str:
+    """五步进度快照 -> 整体状态。`/ingest/status` 与 `/ingest/records` 共用这一份判定，
+    免得两处口径漂移（一个说完成一个说失败最难查）。无快照 = `unknown`。"""
+    if not snap:
+        return "unknown"
+    live = "success"
+    for k in PIPELINE_STEPS:
+        st = snap["steps"].get(k, "pending")
+        if st == "failed":
+            return "failed"
+        if st in ("pending", "running"):
+            live = "running"
+            break
+    return live
 
 
 @app.get("/ingest/status")
@@ -845,25 +962,48 @@ async def api_ingest_status(character: str,
     不依赖 chain_id：/ingest 返回的 chain_id 刷新页面就丢了，而进度键按角色
     天然可查。steps 恒为五步数组（含中文标签），整体 status：
     pending(还没开跑/无记录) | running | success | failed。
+
+    另外带两个控制旗标（`paused` / `cancelled`）：它们**不改变** steps 里的状态 ——
+    暂停时那一步保持 pending（没在跑），取消时那一步是 failed + `已取消`。
+    单看 status 区分不出「失败」与「被取消」，所以显式给前端两个布尔。
     """
+    ctl = await asyncio.to_thread(get_control, character)
     snap = await asyncio.to_thread(get_progress, character)
     if snap is None:
         return {"character": character, "status": "pending", "found": False,
+                "paused": ctl == "pause", "cancelled": ctl == "cancel",
                 "steps": [{"key": k, "label": STEP_LABELS[k], "status": "pending",
                            "error": None} for k in PIPELINE_STEPS],
                 "updated_at": None}
     steps = []
-    overall = "success"
+    overall = _live_status(snap)
     for k in PIPELINE_STEPS:
-        st = snap["steps"].get(k, "pending")
-        if st == "failed":
-            overall = "failed"
-        elif st in ("pending", "running"):
-            overall = "running"
-        steps.append({"key": k, "label": STEP_LABELS[k], "status": st,
+        steps.append({"key": k, "label": STEP_LABELS[k],
+                      "status": snap["steps"].get(k, "pending"),
                       "error": snap.get("errors", {}).get(k)})
-    return {"character": character, "status": overall, "found": True,
+    # 被取消时把整体状态也标成 cancelled：失败原因落在 error 里，前端据此显示「已取消」
+    cancelled = ctl == "cancel" or any(s["error"] == CANCEL_ERROR for s in steps)
+    return {"character": character,
+            "status": "cancelled" if cancelled else overall,
+            "found": True,
+            "paused": ctl == "pause",
+            "cancelled": cancelled,
             "steps": steps, "updated_at": snap.get("updated_at")}
+
+
+@app.post("/ingest/control")
+async def api_ingest_control(body: IngestControlIn,
+                            user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """暂停 / 继续 / 取消一条正在跑的入库链（按角色，不是按 chain_id）。
+
+    实现是**每步开头自查 Redis 旗标**（见 worker.wait_if_paused），不用
+    `celery revoke`：五步是 chain 串联，revoke 只能停掉单个 task_id，停链尾那一步时
+    前面几步照跑，表现为「点了取消还在跑」。
+    """
+    await asyncio.to_thread(set_control, body.character, body.action)
+    ctl = await asyncio.to_thread(get_control, body.character)
+    return {"character": body.character, "action": body.action,
+            "paused": ctl == "pause", "cancelled": ctl == "cancel"}
 
 
 # ── 知识库视图（列出「已拥有什么」；重爬/删除仅管理员） ─────────────
@@ -949,4 +1089,5 @@ async def api_knowledge_delete(
     """
     r = delete_character_knowledge.apply_async(args=[character])
     kb.invalidate_roster()      # 名册立刻不再包含它，不必等 60s TTL
+    domain_terms.invalidate()   # 领域词表同理：角色少了一个，锚点集变了、重建即可
     return {"character": character, "task_id": r.id}

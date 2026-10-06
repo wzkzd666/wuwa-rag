@@ -321,3 +321,68 @@
 .step-bar .tag {
   margin-left: 4px;
 }
+
+/* ---------- 置顶的「正在收录 / 刚失败」 ----------
+   提交表单在页面最上方，进度与失败原因必须也出现在上方，否则用户提交完
+   在列表这边看不到任何动静。 */
+.kb-pinned {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.kb-pin-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.kb-pin-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.kb-pin-name {
+  font-size: 13.5px;
+  font-weight: 650;
+}
+.kb-pin-why {
+  color: var(--err);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* 失败原因可能很长（抓取异常原文），限两行并允许悬停看全文 */
+.kb-pin-why {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kb-pin-ctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.kb-btn-danger {
+  color: var(--err);
+  border-color: var(--line-strong);
+}
+.kb-btn-danger:hover:not(:disabled) {
+  border-color: var(--err);
+}
+
+/* 提交记录里的「提交人」：账本是服务端的，这一列回答「这条是谁提的」 */
+.kb-who {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
