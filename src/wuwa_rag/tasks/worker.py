@@ -140,7 +140,7 @@ def _step_update(task, character: str, step: str, status: str, error: str | None
     if task is not None:
         try:
             task.update_state(state="PROGRESS", meta={"step": step, "status": status})
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 —— 观测性代码（Celery backend 上报）不得弄挂业务流水线
             log.warning("步骤上报失败 %s/%s: %s", step, status, exc)
     _progress_mark(character, step, {"start": "running", "done": "success", "fail": "failed"}[status], error)
 
@@ -184,7 +184,7 @@ def crawl_character(self, character: str, run_id: int | None = None):
         _run(_crawl_run_update(run_id, "failed", {"error": "not_found"}))   # 补状态
         _step_update(self, character, "crawl", "fail", "wiki 上不存在该角色")
         raise
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 上面已单独接 CharacterNotFound，这里兜网络类异常交 Celery 重试
         _run(_crawl_run_update(run_id, "failed", {"error": f"fetch: {exc}"}))
         if self.request.retries < self.max_retries:
             raise self.retry(exc=exc, args=(character, run_id))             # run_id 带回
@@ -226,7 +226,7 @@ def chunk_character(self, character: str):
     _step_update(self, character, "chunk", "start")
     try:
         _run(_chunk_character_async(character))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 必须先落账再抛，否则前端进度永远卡在 running
         _step_update(self, character, "chunk", "fail", f"{exc}")
         raise
     _step_update(self, character, "chunk", "done")
@@ -246,7 +246,7 @@ def ingest_character(self, character: str):
     _step_update(self, character, "ingest", "start")
     try:
         n = _run(_ingest_character_async(character))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 必须先落账再抛，否则前端进度永远卡在 running
         _step_update(self, character, "ingest", "fail", f"{exc}")
         raise
     _step_update(self, character, "ingest", "done")
@@ -267,7 +267,7 @@ def index_character(self, character: str):
     _step_update(self, character, "index", "start")
     try:
         _run(_index_character_async(character))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 必须先落账再抛，否则前端进度永远卡在 running
         _step_update(self, character, "index", "fail", f"{exc}")
         raise
     _step_update(self, character, "index", "done")
@@ -289,7 +289,7 @@ def graph_character(self, character: str):
     _step_update(self, character, "graph", "start")
     try:
         _run(_graph_character_async(character))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 必须先落账再抛，否则前端进度永远卡在 running
         _step_update(self, character, "graph", "fail", f"{exc}")
         raise
     _step_update(self, character, "graph", "done")
@@ -320,7 +320,7 @@ def purge_character_data(self, character: str):
     _step_update(self, character, "crawl", "start")   # 借位：清库算重爬前置，避免前端空窗
     try:
         _run(_purge_async(character))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 必须先落账再抛，否则前端进度永远卡在 running
         _step_update(self, character, "crawl", "fail", f"清库: {exc}")
         raise
     return {"character": character}
@@ -371,13 +371,13 @@ def delete_character_knowledge(self, character: str):
     2. 由 1 推出：删掉的角色在 Neo4j 里仍是「已知角色」，而
        `dialog.graph.ensure_characters` 判定「是否已在知识库」用的正是 Neo4j
        （`_known_characters`）→ **删除后提问不会触发自动重爬**，只会答「不知道」，
-       想加回要走「收录新角色」。实测（2026-09-30）：只图谱无实料的角色
-       `to_crawl=[]` 不重爬；真·未知角色仍正常触发爬取。
+       想加回要走「收录新角色」。只图谱无实料的角色 `to_crawl=[]` 不重爬；
+       真·未知角色仍正常触发爬取。
        语义上这是自洽的：**你亲手删掉的东西不该自己回来**。
     """
     try:
         _run(_delete_character_async(character))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 记一条可读日志后原样重抛，交 Celery 记失败状态
         log.warning("删除角色知识库失败 %s: %s", character, exc)
         raise
     reset_progress(character)          # 进度键一并清掉，免得前端看到幽灵进度

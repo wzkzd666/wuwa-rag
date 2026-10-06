@@ -39,6 +39,7 @@ verify ─┬─ ok / exhausted ────────────────
 - `StateGraph` 自定义状态（30 字段），3 处 `add_conditional_edges`
 - `AsyncPostgresSaver` 按 `thread_id` 持久化多轮记忆；`/ask` 与 `/ask/stream` **共用同一张图与 checkpointer**
 - **验证升级闭环**：重排低分只能挡"无资料"，挡不住跑题与脏数据，因此 `verify_node` 用独立 LLM 判定"资料能否回答问题"，不匹配时按代价从低到高升级——① 按角色清库重爬 ② 用 verifier 给出的 refined 检索式重检索 ③ 联网兜底 ④ exhausted 直接走"不知道"话术
+  - ⚠️ **① 有前置条件：`characters` 非空**。角色识别一旦失败（历史上单字角色名就被 `len >= 2` 过滤掉了，见下文「角色名识别」），① 直接跳过 → 额度耗尽 → 落到 ③ 联网兜底。所以"新角色明明已入库、提问却走联网"这类现象，**先查角色识别，别查检索或联网**
 - **防死循环三道闸**：`retry_count ≤ 1` + `refreshed` 仅一次 + `used_web` 仅一次
 
 ### 图谱：规则抽取 + Cypher 模板检索
@@ -105,13 +106,41 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 多轮对话里"她的声骸怎么配"这类指代残缺问句，检索前需补成自包含问句。三路合并输入：
 
-- **A 焦点锚点** `focus_anchors`：正则从全量历史提角色名，**零 LLM 零延迟**。解决"角色名落在长回答 120 字符截断区外"导致的丢名问题，按最近提及优先排序
+- **A 焦点锚点** `focus_anchors`：从全量历史提角色名，**零 LLM 零延迟**。解决"角色名落在长回答 120 字符截断区外"导致的丢名问题，按最近提及优先排序
 - **B 滚动摘要** `summarize_turns`：压缩滑出窗口的旧轮次，由 checkpointer 持久化；仅在真有 eviction 时调用
 - **最近 2 轮短原文**
 
 指代消解规则经实测校准：「她/他/那位」**近指代** → 话题角色第一个；「开头/之前聊的那位」**远指代** → 摘要里的角色。8B 模型光靠规则句不执行，必须在 system prompt 里给完整示例（few-shot）才生效。
 
 **生成侧禁注入摘要**：实测把 `context_summary` 塞进上下文会被模型原样复述进答案（第三人称摘要腔穿帮）。摘要只喂改写器。
+
+### 角色名识别：单字名走分词判据
+
+角色名提取（`entities.find_mentions`）是整条链路的入口，三处共用同一判据：`nlu.extract_characters`（意图/槽位）、`entities._rule_candidates`（自动爬取名册）、`graph._inject_far_characters`（远指代注入）。
+
+- **多字名**：正则子串匹配（长度降序，防「秧秧」抢走「秧秧·玄翎」）
+- **单字名**（心 / 椿）：要求**独立成词**才算提及。裸子串匹配会让「核心玩法」「我很关心剧情」误命中角色「心」；而 `len >= 2` 的一刀切过滤又会让单字角色名**永远识别不出来**——两者都错，分词判据才对
+  - ⚠️ 必须 `HMM=False`：HMM 新词发现会把「心配队」臆造成 `['心配','队']`（`心配` 根本不在词典里），单字名与相邻字粘连后就整轮识别不到。关掉后「核心/关心/开心/中心思想」这些词典真词仍完整不拆
+  - ⚠️ 用 `jieba.Tokenizer()` **独立实例**，绝不 `jieba.add_word` 污染全局——BM25 索引的 pickle 内含自定义词典快照，全局词典变了会让已建索引与查询侧分词不一致，召回静默劣化
+  - 回归用例见 `tests/test_entity_names.py`（正负样本成组参数化），全量离线
+
+**这个 bug 的表现**：单字角色名（如「心」Hsin）即使已爬取入库，提问仍会一路升级到**联网兜底**——因为 `characters` 为空，`verify_node` 的「按角色重爬」分支不触发、图谱事实也为空，资料空 → verifier 判不匹配 → 额度耗尽 → `verify_stage="web"`。
+
+### 闲聊分流：纯自我介绍不检索
+
+`is_identity`（问「你」的名字/台词/身份）与 `is_self_intro`（陈述「我」的名字/水平）两条规则硬信号，都直接判 chitchat、**不调 LLM**。
+
+为什么必须有 `is_self_intro`：「我是颗粒」这类纯自我介绍，`classify()` 兜底给 `hybrid` → 触发全量检索 → 查无资料 → `characters` 为空不重爬 → **落到联网兜底**（实测复现）。而它唯一的正确出口是「闲聊 + 写画像」。回归基线 30 条（20 正 + 10 负）实测 BAD=0；把主题分类器 stub 成恒判 `game` 时，6 条自我介绍句仍全部走 chitchat——规则信号独立兜住，不依赖 LLM。
+
+⚠️ 复合句不被抢走靠双保险：昵称用排除句读的字符类（「我是萌新，守岸人怎么玩」在第一个逗号处断掉），分流条件再带 `and not slots`。实测该句仍走 `semantic` + `chars=[守岸人]`。
+
+### 用户画像：同类可更新 + 闲聊分支也注入
+
+问答后 fire-and-forget 抽取「稳定偏好事实」入 `user_facts`，下次提问注入 prompt（**每轮都抽都注入，无轮数阈值**；但本轮说的话下一轮才生效——抽取在 `finally` 里，为的是不与生成抢 LLM）。
+
+- **同类覆盖（可更新）**：`category` 列区分事实类别。称呼/昵称、玩家水平这两类天然单值的，新值**软删**旧值后入库（`valid_to=now()`，不物理删除）；主玩角色/配队等可多值的**刻意不覆盖**，仍叠加保留——强行覆盖等于静默删掉用户的真实信息。实测连说 3 个昵称 + 2 个水平 + 2 个主玩角色 → 收敛为最新昵称 1 条 + 最新水平 1 条，两个主玩角色都留着
+- **闲聊分支也注入画像**：`user_context` 原先只在 `generate_node` 注入，而闲聊走 `_chat_turn` 完全拿不到画像——于是「我是颗粒」的昵称确实入了库，下一句「你好呀」却用不上。现已补上，措辞与位置经 5 方案实测选型（档案放用户原话**之后**的近因位，命中率 7/8 vs 放之前的 4/8）
+
 
 ### 防复读：三道闸 + 两类退化检测
 
@@ -129,11 +158,31 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 ### 流式：SSE + 节点级事件过滤
 
-- `chain.astream_events(version="v2")`，从 `on_chat_model_stream` 抽 token
+- `graph.ask_stream` 走 `chain.astream_events(version="v2")`，从 `on_chat_model_stream` 抽 token
 - ⚠️ **必须按 `metadata.langgraph_node` 过滤**只留 generate/chitchat——intent_node 里的主题分类器也调 LLM，其流式事件同样挂在 `on_chat_model_stream` 上，不过滤会把 `{"topic":"chitchat"}` 当答案吐给前端（实测发生过）
 - 节点内部调用其它 LLM（如历史摘要）必须打 tag，由流式侧按 tags 丢弃，否则摘要整句会拼进答案尾巴
 - **阶段进度事件**：检索+重排实测约 19s 而生成仅 1–2s，静默期是用户焦虑主因，故额外下发 `{"stage", "label"}`
 - SSE 响应头发出后全局异常处理器接不住，`/ask/stream` 必须**流内** try/except 转 error 事件下发
+
+### 限流与跨域（`api/ratelimit.py`）
+
+基于 `slowapi`（底层 `limits`），默认开启、计数存进程内存。四档限额见 `config.py` 的 `RATE_LIMIT_*`：
+
+| 档 | 限额 | 计数主体 | 为什么要限 |
+| --- | --- | --- | --- |
+| `auth` | 10/minute | **客户端 IP** | 登录/注册时还没有用户身份；种子账号是公开的 `admin/123456`，必须挡暴力枚举 |
+| `ask` | 20/minute | **登录用户** | 一轮 20s 量级，且与 Ollama 抢同一块 GPU（`OLLAMA_NUM_PARALLEL=1`） |
+| `tts` | 10/minute | 登录用户 | 每次合成都是真实费用 |
+| `outbound` | 20/hour | 登录用户 | `/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，是 SSRF 面 |
+
+- **`/ask` 与 `/ask/stream` 共享同一个计数器**（`shared_limit(scope="ask")`）。用 `limit()` 的话计数键含路由名，两个端点各算一份，等于给同一能力开了双倍配额——换个端点就能绕过。
+- **`/health` 已豁免**：`scripts/start.ps1` 靠轮询它判就绪，被限流会让启动脚本误判失败。
+- **按用户限速的前提**：`get_current_user` 会把 `user_id` 写进 `request.state`。slowapi 的装饰器包在端点函数外层，而 FastAPI 依赖在端点之前解析，所以装饰器执行时身份已就绪；取不到时回落 IP。
+- ⚠️ **`rl.install(app)` 必须在 `add_middleware(CORSMiddleware, ...)` 之前调**：Starlette 里后添加的中间件在最外层，CORS 必须在限流外面，否则 429 响应拿不到跨域头，前端只会看到一个说不清的跨域错误。
+- 多实例部署把 `RATE_LIMIT_STORAGE` 设成 `redis://…`（项目已有 Redis）即可跨实例共享计数。已开 `in_memory_fallback_enabled` + `swallow_errors`：Redis 挂了自动回落内存、限额检查出错时放行——**限流是保护性设施，它自己不该把问答弄挂**。
+- 实测：`auth` 档 10/minute 下第 11 次起返回 429（且请求根本没碰到 PG，暴力枚举正是这样被挡住的），响应带 `Retry-After: 60` 与中文错误体。
+
+**CORS**：默认允许任意源（前后端分端口开发便利），但通配符时自动关掉 `allow_credentials`——`*` + credentials 等于允许任意站点带凭据跨域调用。本项目鉴权走 `Authorization: Bearer` 请求头、不依赖 Cookie，通配符场景不需要 credentials。生产环境用 `CORS_ORIGINS` 收窄。
 
 ---
 
@@ -141,7 +190,7 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 > **分层设计、各包职责、依赖规则**（含分层图与可执行的依赖守卫）见 **[ARCHITECTURE.md](ARCHITECTURE.md)**。
 > 一句话概括：`src/wuwa_rag` 分 7 层，依赖**只向下**，同层可互调，内部导入一律用绝对路径；
-> 跑 `uv run python scripts/check_layers.py` 可校验（当前 120 条依赖边、0 违规、0 环）。
+> 跑 `uv run python scripts/check_layers.py` 可校验（当前 132 条依赖边、0 违规、0 环）。
 >
 > 下面只讲各组件的**数据角色**与链路。
 
@@ -261,11 +310,14 @@ graph_character    正则抽事实 → Neo4j MERGE
 
 ## 数据规模
 
+数值为 **2026-10-06 四方对账实测**（`chunks.jsonl` / PG `chunks` / Chroma / `bm25.pkl`
+四方一致 = 6,741）。`data/` 是 gitignore 的派生数据，会随爬取漂移，故标注时点。
+
 | 项 | 值 |
 | --- | --- |
-| 角色语料 | 57 个（`data/raw/*.md`） |
-| chunk 数 | 6,572（distinct hash 6,448） |
-| 向量索引 | Chroma 6,572 + bm25.pkl 6,572（三方同步） |
+| 角色语料 | 58 个（`data/raw/*.md`） |
+| chunk 数 | 6,741（distinct hash 6,608） |
+| 向量索引 | Chroma 6,741 + bm25.pkl 6,741（四方同步） |
 | 图谱 | 6 类节点 / 6 类关系 |
 | SFT 语料 | 3,294 人设 + 800 通用 + 470 验证 |
 
@@ -273,14 +325,16 @@ graph_character    正则抽事实 → Neo4j MERGE
 
 ## 技术栈
 
-**后端**：Python 3.13 · FastAPI · LangGraph · SQLAlchemy · psycopg3 · Celery · uv
+**后端**：Python 3.13 · FastAPI · LangGraph · SQLAlchemy · psycopg3 · Celery · slowapi(限流) · uv
 **检索**：Chroma · bge-m3 · bge-reranker-v2-m3 · sentence-transformers · jieba · rank_bm25
 **存储**：PostgreSQL (pgvector) · Neo4j 5.26 · Redis · RustFS (S3)
 **模型**：Qwen3-8B · ms-swift LoRA · Ollama · vLLM · bitsandbytes
 **前端**：React · TypeScript · Vite · Zustand · react-router-dom（SSE 流式聊天、知识库五步进度可视化、设置、认证、历史）
-**部署**：Docker Compose（PG / Neo4j / Redis / RustFS）· tenacity 重试 · loguru
+**部署**：Docker Compose（PG / Neo4j / Redis / RustFS，四者均已设 CPU/内存上限）· tenacity 重试 · loguru
 
-代码量：后端约 4,500 行 Python（39 个模块），前端约 2,000 行 React/TSX。
+代码量（2026-10-06 实测，`src/wuwa_rag` 下不含 `__init__.py`）：后端 **40 个模块 / 10,198 物理行**，
+其中纯代码 **7,840 行**（用 `tokenize` 去掉注释与空行；本项目注释占比高，两个数都给才有参考价值）。
+前端 **4,645 行** TS/TSX（18 文件）+ **2,520 行** CSS（10 文件）。
 
 ---
 
@@ -311,7 +365,22 @@ QIANFAN_API_KEY=...      # 留空 = 联网兜底整体关闭，优雅降级不�
 
 # 可选：用户自定义云端 LLM
 # 无需任何密钥配置 —— 加密密钥由用户的登录密码/加密口令派生，服务端不保存
-CLOUD_ALLOW_PRIVATE_NET=true   # 公网部署/开放注册时必须设为 false（防内网探测）
+CLOUD_ALLOW_PRIVATE_NET=false  # ⚠️ 代码默认已是 false（防内网探测/SSRF）。
+                               #   仅当你要把云端 base_url 指向本机 Ollama/vLLM 时才设 true。
+
+# 可选：跨域（前后端分端口开发时才需要；同源部署留空即可）
+# 留空/不设 = 允许任意源（开发便利）。生产环境务必收窄成具体源，逗号分隔。
+# ⚠️ 通配符 * 时自动关闭 allow_credentials，避免「任意站点带凭据跨域调用」。
+CORS_ORIGINS=
+
+# 可选：限流（默认开启；见下方「限流」一节）
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_STORAGE=            # 留空=进程内存（单实例够用）；多实例填 redis://… 跨实例共享计数
+RATE_LIMIT_AUTH=10/minute      # 登录/注册，按 IP —— 挡 admin/123456 暴力枚举
+RATE_LIMIT_ASK=20/minute       # /ask 与 /ask/stream，按登录用户（两者共享同一计数器）
+RATE_LIMIT_TTS=10/minute       # 语音合成，按用户（有真实费用）
+RATE_LIMIT_OUTBOUND=20/hour    # /llm/models、/llm/config/test —— 会向外发请求，SSRF 面收紧
+RATE_LIMIT_DEFAULT=200/minute  # 其余端点兜底；/health 已豁免（启动脚本轮询用）
 
 # 可选：语音朗读（Qwen-Audio-3.1-TTS-Flash，北京地域）
 # 密钥由**用户自持**：留空下面两项时，用户在设置页填自己的凭据即可，问答不受影响。
@@ -323,6 +392,11 @@ TTS_WORKSPACE_ID=             # 百炼「业务空间」ID，拼端点必需（�
 DASHSCOPE_API_KEY=            # 必须与上面同一个北京地域业务空间（可留空，由用户自填）
 EMOTION_ENABLED=true          # 情绪标签；关闭则语音统一用默认语气
 ```
+
+> ⚠️ **`DEBUG` 与 `HF_HOME` 的代码默认值已调整**：`DEBUG` 默认 `false`
+> （生产友好，需要时在 `.env` 显式开）；`HF_HOME` 不再硬编码本机路径，
+> 默认 `~/.cache/huggingface`，可用环境变量 `HF_HOME` 覆盖。若你本机设了系统级
+> `HF_HOME` 环境变量，仍以它为准（pydantic-settings 优先级：环境变量 > `.env` > 代码默认）。
 
 ### 3. 一键启动（Windows）
 
@@ -363,24 +437,37 @@ uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价�
 ### 6. 验证
 
 ```bash
-uv run python -m wuwa_rag.dialog.graph      # RAG 冒烟：跑 3 个内置问题
+uv run pytest                            # 单元测试（139 条，**全量离线**，约 1s）
+uv run python -m wuwa_rag.dialog.graph   # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
 ```
 
+`tests/` 是回归基线，**不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络**——
+容器没起也能跑，所以它可以当提交门禁用（不会因为环境没起来而「假失败」）。
+它守的是那些「功能没坏、只是没被验证」的高危判据：单字角色名识别、意图分流、
+画像分类、限流档位、prompt 模块拆分、架构分层方向。改这几处前后都跑一次。
+
+> 跑 `uv run pytest -q` 前需先 `uv sync --extra dev`（pytest 在 `dev` extra 里）。
+
 ### API 端点
 
-| 端点 | 权限 | 说明 |
-| --- | --- | --- |
-| `POST /auth/register` `POST /auth/login` | 公开 | 注册 / 登录（Bearer token） |
-| `POST /ask` | 登录 | 同步问答 |
-| `POST /ask/stream` | 登录 | SSE 流式问答（含 stage 进度事件） |
-| `GET /tts/status` `POST /tts` | 登录 | 语音可用性与合成（含生效来源、模型/音色展示名） |
-| `GET/PUT/DELETE /tts/config` | 登录 | **用户自持的语音凭据**（只读回掩码；与云端模型共用一套解锁口令） |
-| `GET /llm/config` `PUT /llm/config` `GET /llm/providers` | 登录 | 个人云端模型配置（只读回掩码） |
-| `POST /llm/unlock` `POST /llm/lock` `POST /llm/passphrase` | 登录 | 云端密钥：解锁（密码/口令）/ 锁定 / 换口令 |
-| `POST /auth/password` | 登录 | 改登录密码（自动重绑云端密钥） |
-| `POST /ingest` | 管理员 | 触发角色摄取 `{"character":"忌炎"}` |
-| `GET /ingest/status?character=xxx` | 管理员 | 查询五步流水线进度 |
+| 端点 | 权限 | 限流 | 说明 |
+| --- | --- | --- | --- |
+| `GET /health` | 公开 | **豁免** | 就绪探针（`start.ps1` 轮询用） |
+| `POST /auth/register` `POST /auth/login` | 公开 | 10/min·按 IP | 注册 / 登录（Bearer token） |
+| `POST /ask` | 登录 | 20/min·按用户 | 同步问答 |
+| `POST /ask/stream` | 登录 | 同上（**共享计数**） | SSE 流式问答（含 stage 进度事件） |
+| `GET /tts/status` | 登录 | 兜底 200/min | 语音可用性状态 |
+| `POST /tts` | 登录 | 10/min·按用户 | 语音合成（含生效来源、模型/音色展示名） |
+| `GET/PUT/DELETE /tts/config` | 登录 | 兜底 200/min | **用户自持的语音凭据**（只读回掩码；与云端模型共用一套解锁口令） |
+| `GET /llm/config` `PUT /llm/config` `GET /llm/providers` | 登录 | 兜底 200/min | 个人云端模型配置（只读回掩码） |
+| `GET /llm/models` `POST /llm/config/test` | 登录 | **20/hour**·按用户 | 会向用户填的地址发出站请求（SSRF 面，故最紧） |
+| `POST /llm/unlock` `POST /llm/lock` `POST /llm/passphrase` | 登录 | 兜底 200/min | 云端密钥：解锁（密码/口令）/ 锁定 / 换口令 |
+| `POST /auth/password` | 登录 | 兜底 200/min | 改登录密码（自动重绑云端密钥） |
+| `POST /ingest` | 管理员 | 兜底 200/min | 触发角色摄取 `{"character":"忌炎"}` |
+| `GET /ingest/status?character=xxx` | 管理员 | 兜底 200/min | 查询五步流水线进度 |
+
+超限返回 `429` + `Retry-After` 秒数 + 中文错误体。限额与开关全部可经 `.env` 覆盖（见「配置环境变量」一节）。
 
 ---
 
@@ -396,7 +483,7 @@ psycopg / neo4j 的异步实现在 uvicorn 自起的 Proactor loop 上会报 `In
 
 诚实列出，避免过度宣称：
 
-- **无测试套件**。pytest 在 dev extras 里但没有 `tests/` 目录。当前质量保证依赖代码内详尽的实测记录与架构文档。若是团队项目，RRF 权重、rerank 阈值、意图路由这几处必须有单测与回归集——参数改动会影响全链路效果
+- **测试分两层**。`tests/` 有 139 条**离线单测**（见「6. 验证」），守规则层判据；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
 - **`agent.py` 的 ToolNode 自主选工具路径默认未启用**，主链路走规则条件路由。本项目是 LangGraph DAG 编排，不是多 Agent 系统
 - **图谱抽取是正则规则，不是 LLM 抽取**（这是有意的设计选择，理由见上文）
 - **VLM 链路预留但未接入**：`config.py` 有 qwen3-vl 配置，主链路未使用
@@ -418,16 +505,18 @@ src/wuwa_rag/          # ✅ 已入库
 │                retrieve(双路召回+RRF) entities(角色名册与别名) s3(对象存储抽象)
 ├── tasks/       L3 任务：worker.py —— Celery 5 步流水线 + 进度上报
 ├── services/    L4 服务：persona emotion tts verify websearch profile
-├── dialog/      L5 对话：graph(主编排) state nlu(意图/改写) tools agent guard memory
-└── api/         L6 接口：app(路由) auth(登录/token/RBAC) server(uvicorn 入口)
+├── dialog/      L5 对话：graph(主编排) prompt(提示词构建) state nlu(意图/改写)
+│                tools agent guard memory
+└── api/         L6 接口：app(路由) auth(登录/token/RBAC) ratelimit(限流) server(uvicorn 入口)
 
 front/                 # ✅ 已入库   React + TS + Vite 前端
 pgsql/                 # ✅ 已入库   建表 SQL（幂等）
 scripts/               # ✅ 已入库   start.ps1 / stop.ps1 / check_layers.py（架构守卫）
+tests/                 # ✅ 已入库   139 条离线单测（回归基线，可当提交门禁）
 
 data/                  # ⚠️ gitignore，未入库（需自行采集生成）
-├── raw/          57 个角色 wiki markdown（由 wuwa-mcp 爬取）
-├── chunks/       chunks.jsonl（6,572 块）
+├── raw/          角色 wiki markdown（由 wuwa-mcp 爬取）
+├── chunks/       chunks.jsonl（同上时点 6,741 块）
 ├── chroma/       稠密向量库 + bm25.pkl（派生索引，可全量重建）
 └── sft/          LoRA 训练数据、评估脚本、训练记录
 
@@ -437,7 +526,7 @@ logs/ .runtime/ .env   # ⚠️ gitignore，运行时产物与密钥
 
 > **关于未入库的部分**：`data/`、本地开发笔记与 `.env` 被 `.gitignore` 排除，因此**仓库里看不到**本文提到的语料、训练记录与向量库。这是有意为之——语料版权归官方、`.env` 含密钥、向量库属可重建的派生产物。想复现数据侧，跑 `.\dev.bat` 或第 5 节的离线流水线即可从 wiki 重新采集生成。
 >
-> 本文引用的评测数值（chunk 6,572 / distinct hash 6,448 / 四维 9.17）均来自这些本地文件，**已在本文正文中原样记录**，无需访问原文件即可复核口径。
+> 本文引用的评测数值（chunk 6,572 / distinct hash 6,448 / 四维 9.17）均来自这些本地文件，**已在本文正文中原样记录**，无需访问原文件即可复核口径。⚠️ 这组是**评测当时的语料快照**（四维评分 9.17 就测在这批语料上），与上文「数据规模」表的当前值（2026-10-06 实测 6,741）**不是同一时点**——`data/` 会随新角色爬取增长，两个数字都对，别当成前后矛盾。
 
 ---
 

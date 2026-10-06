@@ -85,6 +85,10 @@ async def verify_knowledge(question: str, graph_facts: str, docs: list[dict]) ->
         refined = str(data.get("refined") or "").strip()[:120]
         log.info("资料审查: 判不匹配 refined=%r", refined or question)
         return False, refined or question
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— fail-open 闸门，宽捕获是有意的
+        # ⚠️ 这里**不要**收窄成具体异常类型。本函数是生成前的 fail-open 闸门，
+        # 「任何异常都降级为匹配」是它的承重不变量：一旦有意料外的异常从这里冲出去，
+        # 会打断整张 LangGraph（用户直接收不到答案）—— 那比「放行一份跑题的资料」严重得多。
+        # 降级方向的代价是不对称的：误放行只是答得不够准，抛异常是整轮问答失败。
         log.warning("资料审查失败，放行: %s", exc)
         return True, ""

@@ -83,7 +83,7 @@ async def login(username: str, password: str) -> dict:
     # 都不是登录失败的理由。
     try:
         await unlock_with_password(row["id"], password)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 解锁失败不影响登录本身
         log.warning("user=%s 登录时自动解锁云端密钥失败（忽略）：%s", row["id"], exc)
     return {"id": row["id"], "username": row["username"], "role": row["role"],
             "token": await create_token(row["id"])}
@@ -105,7 +105,7 @@ async def change_password(user_id: int, old: str, new: str) -> None:
             raise AuthError(status_code=400, detail="原密码不正确")
         try:
             await rebind_password(user_id, old, new)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 —— 重绑失败不影响改密码本身
             log.warning("user=%s 改密码时重绑云端密钥失败（改用加密口令解锁即可）：%s",
                         user_id, exc)
         await conn.execute(
@@ -179,7 +179,12 @@ async def get_current_user(request: Request) -> AuthUser:
     user = await resolve_token(token)
     if user is None:
         raise _ERR_UNAUTHORIZED
-    return AuthUser(**user, token=token)
+    auth_user = AuthUser(**user, token=token)
+    # 把主体身份挂到 request.state，供限流按用户计数（见 api/ratelimit.py）。
+    # ⚠️ 必须写在这里而不是端点函数里：slowapi 的限额装饰器包在端点外层，
+    # 而 FastAPI 的依赖在端点之前解析，写在这儿装饰器才取得到。
+    request.state.user_id = auth_user.id
+    return auth_user
 
 
 async def require_admin(user: AuthUser = Depends(get_current_user)) -> AuthUser:

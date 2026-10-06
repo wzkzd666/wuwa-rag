@@ -9,10 +9,14 @@
 - 只抽**稳定的长期偏好**，不抽一次性问题（「今汐几级突破」这种不能进画像）；
 - 每条 ≤40 字，单次最多 3 条，防止低质量事实堆积；
 - **角色名必须有原文依据**（`_grounded`，双检）：① 句式正则抓「主玩/本命/主力 + 名字」，
-  ② 名册（`rag/characters.py` 的 57 个角色名 + 别名）抓「已知角色名无依据出现」。
+  ② 名册（`knowledge/entities.py` 的库内角色名 + 别名，Neo4j 实时查、带 TTL 缓存）
+  抓「已知角色名无依据出现」。
   模型会照模板编造用户没提过的角色，而事实一旦入库就会注入之后每一轮 prompt，
   编造代价远大于漏抽一条，所以两道检查都偏严（宁可丢，不可留）。
 - 同文去重：活跃事实（valid_to IS NULL）里已有完全相同的就跳过；
+- **同类覆盖（可更新）**：称呼/昵称、玩家水平这两类天然单值的事实，新值软删旧值后入库
+  （`category` 列），不会像「只增不改」那样堆出自相矛盾的多个昵称；
+  主玩角色/配队等可多值的事实**刻意不覆盖**，仍叠加保留（见 `_fact_category`）；
 - 删除是软删（valid_to=now），与表设计的「不物理删除」一致；
 - 抽取走 get_tool_llm()（qwen3:8b，temperature=0）；模型挂了/解析失败一律回落 []，
   画像失败绝不影响问答主链路。
@@ -57,7 +61,8 @@ _EXTRACT_SYSTEM = (
 #   固定对应关系）。本次一度以为「召回从 18/21 掉到 6/21」是 prompt 丢了信息，打印原始
 #   输出才发现元凶在下游：解析器只认字符串，把对象形态整批静默丢掉。所以**改 prompt
 #   必须连解析链路一起重验**，只看 prompt 效果会得出完全错误的结论。
-# 注意：本项目 prompt 一致**不写反例**（反例会被当成样本照抄，见 chain.py 的实测结论）。
+# 注意：本项目 prompt 一致**不写反例**（反例会被当成样本照抄，见 `dialog/prompt.py`
+# 的 SYSTEM_PROMPT 注释里记录的实测结论）。
 
 # 「某个角色是这位用户的主力」这类断言。断言里的角色名必须能在用户原话里找到，
 # 否则判定为模型编造。只拦角色身份，不拦配队/水平等其它类别——那些常需要归纳
@@ -107,6 +112,7 @@ async def extract_facts_safe(question: str) -> list[str]:
     if not question or len(question.strip()) < 4:
         return []
     q = question[:500]
+    # 调用层：LLM 不可用（Ollama 没起/网络断）不能挡住问答主链。
     try:
         rsp = await get_tool_llm().ainvoke(
             [("system", _EXTRACT_SYSTEM), ("user", q)]
@@ -118,6 +124,12 @@ async def extract_facts_safe(question: str) -> list[str]:
                 p.get("text", "") for p in content if isinstance(p, dict)
             )
         text = str(content or "")
+    except Exception as exc:  # noqa: BLE001 —— 画像是增益，任何失败都不能阻塞问答
+        log.warning("画像抽取调用失败（不影响问答）：%s", exc)
+        return []
+
+    # 解析层单独收窄：只认「输出畸形」这几类可预期异常。
+    try:
         m = re.search(r"\[.*\]", text, re.S)
         if not m:
             return []
@@ -151,17 +163,96 @@ async def extract_facts_safe(question: str) -> list[str]:
         if arr and not out:
             log.warning("画像抽取结果全部未采用（形态变化或均无依据）：%r", text[:200])
         return out
-    except Exception as exc:
-        log.warning("画像抽取失败（不影响问答）：%s", exc)
+    except (ValueError, TypeError, AttributeError) as exc:
+        # 只认「模型输出畸形」这几类：JSON 解析失败（JSONDecodeError 是 ValueError 子类）、
+        # 元素形态非预期导致的取值错误。其余异常属编程错误 —— 而且外层
+        # `api/app._spawn_profile_task` 的 job 已有 `except Exception` 兜底（画像是
+        # fire-and-forget，绝不挡问答），所以这里漏掉的异常也不会影响用户。
+        log.warning("画像抽取输出无法解析（不影响问答）：%s", exc)
         return []
 
 
+# ---------- 同类事实的「可更新」覆盖 ----------
+#
+# 需求来源（实测复现）：用户先后说「我是颗粒」「我叫小明」「其实我是阿星」，
+# 三条事实全部入库并一起注入 prompt，得到自相矛盾的
+# `用户自称是阿星；用户姓名：小明；用户自称是颗粒` —— 画像是**只增不改**的。
+# 用户要的是「可更新的那种」：同类事实新值覆盖旧值。
+#
+# 实现：给 `user_facts` 加 `category` 列（见 authdb._DDL 与 pgsql/001_init.sql，
+# 老库靠 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 幂等补列）。入库时先按 category
+# 软删旧的活跃事实（`valid_to=now()`），再插新的 —— **沿用既有的软删设计**，
+# 不物理删除，历史可追溯。
+#
+# ⚠️ 分类用**规则**而不是让抽取模型多输出一个字段：`_EXTRACT_SYSTEM` 的措辞是
+# 多轮实测换来的（见下方注释），动它就得连解析链路一起重验；而分类只依赖事实文本
+# 自身的形态，规则完全够用且零额外延迟、零模型不确定性。
+#
+# ⚠️ **只对语义上天然单值的类别做覆盖**，其余一律返回 None（= 退回叠加）：
+#   · `nickname` 称呼/昵称/游戏ID —— 一个人同一时刻只有一个称呼，覆盖显然正确；
+#   · `level`    玩家水平（萌新/老玩家/回归） —— 会随时间演进，新值就是当前值。
+# 刻意**不**覆盖「主玩角色」「常用配队」：一个人可以有多个本命、多支常用队，
+# 强行覆盖等于静默删掉用户的真实信息 —— 丢数据的代价远大于多留一条。
+#
+# 匹配顺序敏感：「用户自称是萌新」同时含「自称是」与「萌新」，必须先判 level
+# 再判 nickname，否则会被归到昵称类，与真正的昵称互相覆盖。
+_RE_LEVEL = re.compile(
+    r"(?:萌新|新人|新手|新来的|老玩家|回归玩家|刚入坑|入坑不?久|玩了\s*\d+\s*年)")
+# 昵称/称呼类：自称是X、名叫X、叫做X、姓名：X、称呼为X、游戏ID是X、叫我X
+# ⚠️ 词表必须覆盖抽取模型的**全部**实际输出形态。实测漏了「名叫」这一支：
+#    `extract_facts_safe('我叫小明')` 会输出「用户名叫小明」，若正则不认「名叫」，
+#    该事实就归到 None（不参与覆盖），用户改昵称时旧的仍然留着 —— 正是要修的那个 bug。
+_RE_NICKNAME = re.compile(
+    r"(?:自称|名字|姓名|昵称|称呼|网名|游戏名|名叫|叫做|名字叫|ID|id|Id)"
+    r"\s*(?:是|为|：|:|=)?|"
+    r"(?:叫我|喊我|称呼我)\s*"
+)
+# ⚠️ 两个分支都必须**停在昵称之前**：`_fact_category` 是用 `s[m.end():]` 取昵称的。
+#    第二分支早先写成 `叫我[^，。]{1,12}`，把昵称一起吞进匹配 → `tail` 恒为空 →
+#    「叫我小星」判成 None（实测漏网）。停在「叫我」之后，昵称才落在 tail 里，
+#    并且顺带让 `_RE_NICKNAME_NOISE` 对它生效（「叫我玩家」应判 None）。
+# 明确排除：这些词出现在昵称位说明它是「水平自述」而非真昵称（如「我是玩家」）。
+_RE_NICKNAME_NOISE = re.compile(r"^(?:玩家|人|萌新|新人|新手|老玩家|回归玩家)$")
+
+
+def _fact_category(fact: str) -> str | None:
+    """推断一条事实的「同类覆盖」分类键；返回 None 表示不参与覆盖（叠加保留）。
+
+    ⚠️ 宁可不分类，也不要错分类：错分类会让两条**本该并存**的事实互相覆盖，
+    静默丢掉用户信息 —— 而漏分类最多只是多留一条旧事实（原行为，无害）。
+    """
+    s = (fact or "").strip()
+    if not s:
+        return None
+    if _RE_LEVEL.search(s):
+        return "level"
+    m = _RE_NICKNAME.search(s)
+    if not m:
+        return None
+    # 取「自称是/名叫/称呼为/ID是」后面那段作为昵称候选，挡掉「我是玩家」这类。
+    tail = s[m.end():].strip()
+    tail = tail.strip("，。：:、 ")
+    if not tail or _RE_NICKNAME_NOISE.match(tail):
+        return None
+    return "nickname"
+
+
 async def save_facts(user_id: str, session_id: str, facts: list[str]) -> int:
-    """去重入库。返回实际新增条数。同文活跃事实已存在则跳过。"""
+    """去重入库，**同类覆盖**。返回实际新增条数。
+
+    三道处理，顺序不可换：
+      ① 同文去重：活跃事实里已有完全相同的就跳过（连 `created_at` 都不刷新，
+         避免用户重复说同一句话就把事实顶到列表最前）；
+      ② 同类覆盖：`category` 非空时，先把该用户同 category 的活跃事实软删
+         （`valid_to=now()`）—— 这就是「可更新」；`category` 为 None 则跳过本步，
+         行为与旧版一致（叠加）；
+      ③ 插入新事实。
+    """
     if not facts:
         return 0
     pool = await get_pool()
     added = 0
+    replaced = 0
     async with pool.connection() as conn:
         for fact in facts:
             cur = await conn.execute(
@@ -170,23 +261,39 @@ async def save_facts(user_id: str, session_id: str, facts: list[str]) -> int:
             )
             if await cur.fetchone() is not None:
                 continue
+            cat = _fact_category(fact)
+            if cat:
+                cur = await conn.execute(
+                    "UPDATE user_facts SET valid_to = now()"
+                    " WHERE user_id = %s AND category = %s AND valid_to IS NULL",
+                    (user_id, cat),
+                )
+                if cur.rowcount:
+                    replaced += cur.rowcount
+                    log.info("画像同类覆盖 user=%s category=%s 软删旧事实 %d 条",
+                             user_id, cat, cur.rowcount)
             await conn.execute(
-                "INSERT INTO user_facts (user_id, session_id, fact, confidence, source)"
-                " VALUES (%s, %s, %s, %s, 'chat')",
-                (user_id, session_id, fact, 0.8),
+                "INSERT INTO user_facts (user_id, session_id, fact, category, confidence, source)"
+                " VALUES (%s, %s, %s, %s, %s, 'chat')",
+                (user_id, session_id, fact, cat, 0.8),
             )
             added += 1
     if added:
-        log.info("画像入库 user=%s 新增 %d 条", user_id, added)
+        log.info("画像入库 user=%s 新增 %d 条%s", user_id, added,
+                 f"（覆盖旧 {replaced} 条）" if replaced else "")
     return added
 
 
 async def get_facts(user_id: str, limit: int = 100) -> list[dict]:
-    """某用户的活跃画像事实，新的在前。"""
+    """某用户的活跃画像事实，新的在前。
+
+    `category` 一并返回：`/profile` 端点会把它透给前端，排查「同类覆盖是否生效」
+    时不必再直连库。为 None 表示这条不参与覆盖（可多值事实，如主玩角色）。
+    """
     pool = await get_pool()
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT id, fact, confidence, source, created_at FROM user_facts"
+            "SELECT id, fact, category, confidence, source, created_at FROM user_facts"
             " WHERE user_id = %s AND valid_to IS NULL"
             " ORDER BY created_at DESC LIMIT %s",
             (user_id, limit),
@@ -223,7 +330,12 @@ async def all_users_stats() -> list[dict]:
 
 
 def facts_to_context(facts: list[dict]) -> str:
-    """把画像事实拼成注入生成 prompt 的一段话（供 chain._build_prompt 使用）。"""
+    """把画像事实拼成注入生成 prompt 的一段话。
+
+    两处消费：`prompt.build_prompt`（generate_node 主链路）与 `graph._chat_turn`
+    （闲聊/时间分支的注入）。category 是给 `save_facts` 的覆盖逻辑用的，
+    **不参与**拼接（模型不需要知道分类）。
+    """
     lines = [str(f["fact"]) for f in facts[:MAX_FACTS_IN_PROMPT]]
     if not lines:
         return ""

@@ -49,6 +49,7 @@ _DDL = [
         user_id    TEXT,
         session_id TEXT,
         fact       TEXT        NOT NULL,
+        category   TEXT,
         confidence REAL,
         source     TEXT,
         valid_from TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -56,6 +57,11 @@ _DDL = [
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # 老库补列（幂等）：category 是「同类事实覆盖」的分类键（见 services/profile.py）。
+    # CREATE TABLE IF NOT EXISTS 对已存在的表不生效，所以老库必须靠这句补列，
+    # 否则 save_facts 的 INSERT 会报 column "category" does not exist。
+    # NULL = 不参与覆盖，历史事实按叠加原样保留，不丢数据。
+    "ALTER TABLE user_facts ADD COLUMN IF NOT EXISTS category TEXT",
     "CREATE INDEX IF NOT EXISTS ix_facts_user ON user_facts(user_id, valid_to)",
 ]
 

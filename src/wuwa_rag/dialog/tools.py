@@ -8,7 +8,9 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -20,6 +22,18 @@ from wuwa_rag.ww_logger import get_logger
 
 s = get_settings()
 log = get_logger("rag")
+
+# 有界线程池：供同步阻塞调用（Chroma 客户端、reranker 等）使用。
+# asyncio.to_thread 用的是默认 ThreadPoolExecutor（max_workers=40），
+# 并发高时会占满线程资源，与 Celery worker / Ollama 抢线程。
+# 限 8 个线程足够（检索不是高并发场景），且避免隐性资源争抢。
+_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="rag-io")
+
+
+async def _run_in_executor(func, *args):
+    """把同步阻塞函数放到有界线程池跑，替代 asyncio.to_thread。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_EXECUTOR, func, *args)
 
 
 class GraphSearchInput(BaseModel):
@@ -52,8 +66,8 @@ async def vector_search_tool(query: str, topk: int = 6) -> list[dict]:
     """在攻略原文里检索（稠密向量 + BM25 融合，再经 bge-reranker 精排）。
     问「怎么玩」「为什么」「思路」「强吗」这类需要原文描述支撑的问题时用。
     每条含 text / breadcrumb / rerank_score。"""
-    docs = await asyncio.to_thread(vector_search, query)
-    docs = await asyncio.to_thread(rerank, query, docs, topk)
+    docs = await _run_in_executor(vector_search, query)
+    docs = await _run_in_executor(rerank, query, docs, topk)
     log.info("tool vector_search '%s' -> %d 条", query, len(docs))
     return docs
 
@@ -81,9 +95,12 @@ def _local_now() -> datetime:
     name = (getattr(s, "TZ_NAME", "") or "").strip()
     if name:
         try:
-            from zoneinfo import ZoneInfo
             return datetime.now(ZoneInfo(name))
-        except Exception as exc:
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            # 两类都是「时区配置不可用」的可预期情形：
+            #   ZoneInfoNotFoundError（KeyError 子类）——系统没有 tz 数据库，
+            #     Windows 上缺 tzdata 包就是这种；
+            #   ValueError —— TZ_NAME 填了非法值（含 `..` 或绝对路径）。
             log.warning("时区 %r 不可用，回落系统本地时区：%s", name, exc)
     return datetime.now().astimezone()
 

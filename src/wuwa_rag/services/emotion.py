@@ -105,13 +105,15 @@ def _parse_emotion(text: str) -> str:
         log.warning("情绪判定：值不在白名单（%r），回落 %s", emo, DEFAULT_EMOTION)
         return DEFAULT_EMOTION
     # 兜底再试宽松 JSON（strict=False 容忍控制字符）
+    # 缩窄异常：json.loads 的文档化异常是 JSONDecodeError（ValueError 子类），
+    # 只有它会从这里抛出；其余异常属于编程错误，应该让它冒出来暴露问题。
     try:
         obj = json.loads(raw, strict=False)
         if isinstance(obj, dict):
             emo = str(obj.get("emotion", "")).strip().lower()
             if emo in EMOTION_TAGS:
                 return emo
-    except Exception:
+    except json.JSONDecodeError:
         pass
     log.warning("情绪判定：输出无法解析，回落 %s：%r", DEFAULT_EMOTION, raw[:60])
     return DEFAULT_EMOTION
@@ -149,7 +151,7 @@ async def detect_emotion(answer: str, chat_client: Runnable | None = None) -> st
         client = chat_client or get_tool_llm()
         resp = await client.ainvoke(msgs, config={"tags": ["wwa:emotion"]})
         return _parse_emotion(str(resp.content or ""))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 情绪只是语音佐料，任何失败都不能阻塞问答主链
         log.warning("情绪判定失败，回落 %s: %s", DEFAULT_EMOTION, exc)
         return DEFAULT_EMOTION
 

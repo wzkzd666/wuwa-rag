@@ -104,7 +104,7 @@ _DDL = [
     "ALTER TABLE user_llm_configs ADD COLUMN IF NOT EXISTS pwd_salt TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE user_llm_configs ADD COLUMN IF NOT EXISTS dek_by_pwd TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE user_llm_configs ADD COLUMN IF NOT EXISTS dek_by_pp TEXT NOT NULL DEFAULT ''",
-    # ---------- 语音合成（TTS）凭据（2026-09-30）----------
+    # ---------- 语音合成（TTS）凭据 ----------
     # 为什么与云端 LLM 塞进同一张表、共用同一把 DEK，而不是另起一张：
     #   · DEK 的建立 / 绑定密码 / 换口令逻辑全部锚在这张表（`_PENDING` → `_bootstrap`
     #     → `_take_pending`）。另建表会遇到「用户只配了 TTS，DEK 该存哪」的两难；
@@ -235,6 +235,17 @@ async def list_models(base_url: str, api_key: str) -> list[str]:
 # ---------- 双层密钥（DEK / KEK）----------
 # 延迟导入 cryptography：未启用云模型时不该因为缺这个包而崩。
 
+# 解密失败的可预期异常。⚠️ 实测（cryptography 44）：`InvalidToken` **不是** `ValueError`
+# 子类，而是直接继承 `Exception` —— 想当然按 ValueError 捕获会漏掉「口令/密码不对」这个
+# **最常见**的场景，登录时自动解锁会抛未捕获异常把登录整个弄挂。
+# 所以必须显式取到 `InvalidToken`。cryptography 是可选依赖，缺失时只留 ValueError
+# （密文畸形/非法 base64），此时 crypto_ready() 已判 False，云模型功能整体降级。
+try:
+    from cryptography.fernet import InvalidToken as _InvalidToken
+    _DECRYPT_ERRORS: tuple[type[BaseException], ...] = (ValueError, _InvalidToken)
+except ImportError:      # pragma: no cover —— 未装 cryptography 时的降级路径
+    _DECRYPT_ERRORS = (ValueError,)
+
 # user_id → DEK 的原始密钥字节。**仅进程内存**：不落库、不写日志、
 # 不进 LangGraph state（checkpointer 会把 state 持久化进 PostgreSQL）。
 # 进程重启即清空 —— 用户重新登录即可自动恢复（KEK_pwd 通道）。
@@ -250,7 +261,7 @@ def crypto_ready() -> bool:
     """加密库是否可用（`cryptography` 为可选依赖，缺失则云模型功能整体降级）。"""
     try:
         from cryptography.fernet import Fernet  # noqa: F401
-    except Exception as exc:
+    except ImportError as exc:
         log.error("凭证加密不可用（云模型配置将被禁用）：%s", exc)
         return False
     return True
@@ -305,8 +316,8 @@ async def unlock_with_password(user_id: int, password: str) -> bool:
         return False                       # 未启用密码通道
     try:
         raw = _derive(pw, salt).decrypt(enc.encode())
-    except Exception:
-        return False                       # 密码不一致（InvalidToken）
+    except _DECRYPT_ERRORS:
+        return False                       # 密码不一致（InvalidToken / 密文畸形）
     _DEK_RAW[user_id] = raw
     return True
 
@@ -328,8 +339,8 @@ async def unlock_with_passphrase(user_id: int, passphrase: str) -> bool:
         kek = _derive(pp, salt)
         kek.decrypt(check.encode())        # 解不开 = 口令错
         raw = kek.decrypt(enc.encode())
-    except Exception:
-        return False
+    except _DECRYPT_ERRORS:
+        return False                       # 口令不一致（InvalidToken / 密文畸形）
     _DEK_RAW[user_id] = raw
     return True
 
@@ -426,7 +437,7 @@ async def rebind_password(user_id: int, old_password: str, new_password: str) ->
         try:
             raw = _derive(old_password, row["pwd_salt"]).decrypt(
                 row["dek_by_pwd"].encode())
-        except Exception as exc:
+        except _DECRYPT_ERRORS as exc:
             log.warning("user=%s 改密码时旧密码解不开 DEK（需重新登录或用加密口令解锁）：%s",
                         user_id, type(exc).__name__)
             return False
@@ -577,7 +588,7 @@ async def get_runtime(user_id: int) -> dict | None:
         return None
     try:
         key = f.decrypt(row["api_key_enc"].encode()).decode()
-    except Exception as exc:
+    except _DECRYPT_ERRORS as exc:
         log.warning("user=%s 云端 key 解密失败（需重新填写）：%s",
                     user_id, type(exc).__name__)
         return None
@@ -769,7 +780,7 @@ async def get_tts_runtime(user_id: int) -> dict | None:
         return None                     # 只配了云端 LLM、没配语音
     try:
         key = f.decrypt(row["tts_api_key_enc"].encode()).decode()
-    except Exception as exc:
+    except _DECRYPT_ERRORS as exc:
         log.warning("user=%s TTS key 解密失败（需重新填写）：%s", user_id, type(exc).__name__)
         return None
     if not key.strip():

@@ -14,15 +14,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from wuwa_rag.api import auth as authn
+from wuwa_rag.api import ratelimit as rl
 from wuwa_rag.config import get_settings
 from wuwa_rag.core import conversations as conv
 from wuwa_rag.core import llmstore
@@ -68,6 +71,30 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="wuwa-rag", version="0.9", lifespan=lifespan)
+
+# ── 限流 ─────────────────────────────
+# ⚠️ 必须在 CORS **之前**安装：Starlette 里后添加的中间件位于**最外层**，
+# 而限流产生的 429 需要再经过 CORS 中间件才能带上跨域响应头 —— 顺序反了，
+# 前端在浏览器里看到的就是一个没有 CORS 头的模糊跨域错误，而不是真正的「请求过于频繁」。
+rl.install(app)
+
+# CORS 配置：支持前后端分端口开发（Vite 5173 / FastAPI 8000）。
+# 生产环境用环境变量 CORS_ORIGINS 收窄允许的源（逗号分隔）：
+#   CORS_ORIGINS=http://localhost:5173,https://yourdomain.com
+#
+# ⚠️ allow_credentials 只在**显式配了源**时才开：通配符 `*` + credentials=True 等于
+# 允许任意站点带凭据跨域调用本 API（浏览器规范也拒绝这种组合，Starlette 会退化成回显
+# 请求 Origin，效果同样是全放行）。本项目鉴权走 `Authorization: Bearer <token>`
+# 请求头，不依赖 Cookie，通配符场景下根本不需要 credentials。
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+_wildcard = "*" in _cors_origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=not _wildcard,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── 全局异常处理 ─────────────────────────────
@@ -189,6 +216,7 @@ class CredentialsIn(BaseModel):
 
 
 @app.get("/health")
+@rl.limiter.exempt
 async def health() -> dict:
     return {"ok": True}
 
@@ -196,13 +224,15 @@ async def health() -> dict:
 # ── 鉴权（无需登录） ─────────────────────────────
 
 @app.post("/auth/register")
-async def api_register(body: CredentialsIn) -> dict:
+@rl.limit_auth()
+async def api_register(request: Request, body: CredentialsIn) -> dict:
     """游客注册（注册即登录，直接发 token）。"""
     return await authn.register(body.username, body.password)
 
 
 @app.post("/auth/login")
-async def api_login(body: CredentialsIn) -> dict:
+@rl.limit_auth()
+async def api_login(request: Request, body: CredentialsIn) -> dict:
     return await authn.login(body.username, body.password)
 
 
@@ -262,7 +292,7 @@ async def _user_context(user: authn.AuthUser) -> str:
     """取该用户的画像事实拼注入串；查库失败回落空（画像只增益、绝不挡问答）。"""
     try:
         return facts_to_context(await get_facts(user.username))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 画像只增益，查库失败回落空串，绝不挡问答
         log.warning("读取画像失败（忽略）：%s", exc)
         return ""
 
@@ -285,7 +315,7 @@ def _spawn_profile_task(username: str, session_id: str, question: str) -> None:
             facts = await extract_facts_safe(question)
             if facts:
                 await save_facts(username, session_id, facts)
-        except Exception:
+        except Exception:  # noqa: BLE001 —— fire-and-forget 后台任务，异常只记日志不外抛
             log.exception("画像任务异常（忽略）")
 
     task = asyncio.create_task(job())
@@ -335,7 +365,7 @@ async def _drop_memory(key: str) -> None:
     try:
         saver = await get_checkpointer()
         await saver.adelete_thread(key)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 清记忆失败不该让用户删不掉会话
         log.warning("清理会话记忆失败（忽略）：%s", exc)
 
 
@@ -369,9 +399,12 @@ async def _stream_answer(user: authn.AuthUser, tid: str, question: str,
                 # 回给前端的必须是**短 id**（它只认自己的 id，不认 u<id>: 前缀）
                 evt["thread_id"] = tid
             yield evt
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 见下：SSE 响应头已发出，此处**必须**宽捕获
         # SSE 一旦开始流式，响应头已发出，全局异常处理器接不住这里的异常——
         # 必须就地捕获并转成 {'error'} 事件下发（前端 store 有对应处理）。
+        # ⚠️ 绝不能收窄成具体异常类型：这条流里可能出任何错（LLM 断连、检索异常、
+        # 编码错误……），漏掉一种就等于让用户的流式回答中途裸崩、前端收不到收口事件，
+        # 界面永远停在「生成中」。宁可宽捕获把一切转成 error 事件。
         rid = uuid.uuid4().hex[:8]
         log.exception("[%s] SSE 流中途异常 thread=%s", rid, key)
         yield {"error": f"生成中断（编号 {rid}）", "detail": str(exc)[:300]}
@@ -381,7 +414,9 @@ async def _stream_answer(user: authn.AuthUser, tid: str, question: str,
 
 
 @app.post("/ask", response_model=AskOut)
-async def api_ask(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_user)) -> AskOut:
+@rl.limit_ask()
+async def api_ask(request: Request, body: AskIn,
+                  user: authn.AuthUser = Depends(authn.get_current_user)) -> AskOut:
     tid = _client_thread_id(body.thread_id)
     key = conv.thread_key(user.id, tid)
     await conv.ensure_conversation(user.id, tid, body.question)
@@ -415,7 +450,9 @@ async def api_ask(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_
 
 
 @app.post("/ask/stream")
-async def api_ask_stream(body: AskIn, user: authn.AuthUser = Depends(authn.get_current_user)):
+@rl.limit_ask()
+async def api_ask_stream(request: Request, body: AskIn,
+                         user: authn.AuthUser = Depends(authn.get_current_user)):
     tid = _client_thread_id(body.thread_id)
     return StreamingResponse(
         _sse(_stream_answer(user, tid, body.question)),
@@ -579,7 +616,9 @@ async def api_tts_status(user: authn.AuthUser = Depends(authn.get_current_user))
 
 
 @app.post("/tts")
-async def api_tts(body: TtsIn, user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+@rl.limit_tts()
+async def api_tts(request: Request, body: TtsIn,
+                  user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """把文本合成语音，返回音频 URL（24h 有效）。
 
     未开启或配置不全时返回 200 + ok=false + 可读原因，而不是 503：
@@ -735,7 +774,8 @@ async def api_llm_config_put(body: LlmConfigIn,
 
 
 @app.post("/llm/config/test")
-async def api_llm_config_test(body: LlmConfigIn,
+@rl.limit_outbound()
+async def api_llm_config_test(request: Request, body: LlmConfigIn,
                               user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """保存前连通性测试：拉一次 /models 验证 base_url + key 是否可用。
 
@@ -759,7 +799,8 @@ async def api_llm_config_test(body: LlmConfigIn,
 
 
 @app.get("/llm/models")
-async def api_llm_models(base_url: str,
+@rl.limit_outbound()
+async def api_llm_models(request: Request, base_url: str,
                          user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """拉取指定 base_url 的可选模型列表（**模型自选**）。
 

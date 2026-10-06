@@ -126,7 +126,6 @@ def main() -> int:
     cycles = find_cycles(graph)
 
     by_layer: dict[int, list[str]] = defaultdict(list)
-    unclassified: list[str] = []
     for m in sorted(mods):
         lv = layer_of(m)
         (by_layer[lv] if lv is not None else by_layer.setdefault(-1, [])).append(m)

@@ -15,6 +15,8 @@ import json
 import re
 import time
 
+import jieba
+import psycopg
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from wuwa_rag.core.db import get_cursor
@@ -69,7 +71,9 @@ async def get_roster() -> set[str]:
             await cur.execute(
                 "SELECT DISTINCT character FROM documents WHERE deleted_at IS NULL")
             in_db = {r[0] for r in await cur.fetchall() if r[0]}
-    except Exception as exc:
+    except psycopg.Error as exc:
+        # 只吞数据库层故障（连接断、超时、SQL 错）——名册查不到时回落种子名册，
+        # 问答链路不该因为一次名册查询挂掉。其余异常属编程错误，应如实暴露。
         log.warning("读取库内角色失败（本轮回落种子名册）: %s", exc)
         return set(SEED_CHARACTER_NAMES)
     full = frozenset(SEED_CHARACTER_NAMES | in_db)
@@ -90,6 +94,109 @@ def invalidate_roster() -> None:
     """让下一次 `get_roster()` 立刻重采（入库/删除角色后调用，不必等 TTL）。"""
     global _roster_snap
     _roster_snap = (0.0, frozenset())
+
+
+# ---------- 角色名提及判定（单字名必须走分词） ----------
+#
+# 为什么需要它：角色「心」(Hsin) 与「椿」都是**单字名**，而「心」是高频汉字。
+# 原先 `nlu.extract_characters` 用 `len(n) >= 2` 一刀切滤掉单字名，后果是这两个角色
+# **永远识别不出来**：`characters` 恒空 → `graph.verify_node` 的「按角色清库重爬」分支
+# 要求 `chars` 非空、永不触发 → 额度耗尽后落到**联网兜底**（用户报的现象）。
+# 而 `entities._rule_candidates` 反向也不安全：它用裸子串匹配（`n in question`），
+# 「核心玩法是什么」会命中「心」——若该角色不在库，就会触发一次无谓的爬取并阻塞等待。
+#
+# 解法：单字名要求「**独立成词**」才算提及，多字名沿用子串匹配（行为已实测稳定，
+# 且 `漂泊者-男-衍射` 这类带连字符的名字会被分词器切开，不适合走分词）。
+# 实测（jieba 独立实例 + 角色名词典，16/16 全对）：
+#   命中：心的声骸怎么配 / 心的突破材料 / 椿怎么玩 / 心和椿谁强
+#   不误判：核心玩法 / 中心思想 / 我很关心剧情 / 开心 / 心情不错 / 决心要练她 / 用心练她
+#   多角色比较句也对：「卡卡罗和心谁强」-> {卡卡罗, 心}、「鉴心和心谁强」-> {鉴心, 心}
+#
+# ⚠️ **绝不能用全局 `jieba.add_word`**：BM25 稀疏路的 pickle 内含**自定义词典快照**，
+#    建索引与查询必须分词一致（见 knowledge/index/bm25.py）。污染全局词典会让
+#    已建好的 BM25 索引与查询侧分词不一致，召回质量静默劣化。故用独立 Tokenizer 实例。
+_TOK_CACHE: tuple[frozenset[str], jieba.Tokenizer] | None = None
+
+
+def _name_tokenizer(names: frozenset[str]) -> jieba.Tokenizer:
+    """按名册构建（并缓存）一个独立分词器。名册不变就复用，变了一次重建。
+
+    ⚠️ 必须缓存：每个 `jieba.Tokenizer` 实例各自持有词典状态，新建实例要重新加载
+    默认词典（约 1s 量级的阻塞 CPU 开销）。名册只在角色入库/删除时才变，
+    用 `frozenset(names)` 做缓存键即可，正常问答路径命中缓存、零开销。
+    """
+    global _TOK_CACHE
+    if _TOK_CACHE is not None and _TOK_CACHE[0] == names:
+        return _TOK_CACHE[1]
+    tok = jieba.Tokenizer()
+    for n in names:
+        if n:
+            # 高频权重确保整名成词：否则「卡卡罗和心谁强」会被切成
+            # ['卡卡','罗和心','谁','强']（实测），单字名与相邻字粘连。
+            tok.add_word(n, freq=100000)
+    tok.initialize()                 # 预热：把词典加载的阻塞开销挪到构建这一次
+    _TOK_CACHE = (names, tok)
+    log.info("角色名分词器已重建（词典 %d 词）", len(names))
+    return tok
+
+
+def find_mentions(text: str, known) -> list[tuple[int, str]]:
+    """返回 `(起始位置, 角色名)`，按文本位置升序。同一角色只保留**首次**出现。
+
+    位置信息是给 `graph._inject_far_characters` 用的——「开头聊的那位」要取摘要里
+    **最靠前**的名字，只给一个无序集合就实现不了。
+
+    两类判据并存，各取所长：
+      - 多字名：正则子串匹配（长度降序拼接，防「秧秧」抢走「秧秧·玄翎」的匹配）；
+      - 单字名：分词后要求**整词等于**该名字。
+    """
+    if not text:
+        return []
+    names = {n for n in known if n}
+    if not names:
+        # known 为空时必须挡：空正则在每个位置都能匹配出无意义片段
+        return []
+    single = {n for n in names if len(n) == 1}
+    multi = names - single
+
+    found: dict[str, int] = {}
+    if multi:
+        pattern = "|".join(re.escape(n) for n in sorted(multi, key=len, reverse=True))
+        for m in re.finditer(pattern, text):
+            found.setdefault(m.group(0), m.start())
+    if single:
+        tok = _name_tokenizer(frozenset(names))
+        # ⚠️ **必须 HMM=False**。HMM 是 jieba 的新词发现，会把「单字角色名 + 紧邻的
+        # 普通字」当成一个未登录词合成出来。实测：「心配队」被切成 ['心配','队']，
+        # 「心和椿配队」被切成 ['心和椿','配队'] —— 而 `心配` **根本不在词典里**
+        # （FREQ 查无），纯属 HMM 臆造。角色名一旦和相邻字粘连，单字名就整轮识别不到。
+        # 关掉后：「心配队」-> ['心','配','队']、「心和椿配队」-> ['心','和','椿','配','队']，
+        # 同时「核心/关心/开心/中心思想/决心」这些**词典里的真词**仍然完整不拆
+        # （它们靠 FREQ 权重切分，不依赖 HMM），负样本一个都没退化。
+        # 代价：未登录的领域词（如「声骸」不在词典）会被拆成 ['声','骸']，但无影响——
+        # 本函数只关心「切出来的词是否**恰好等于**某个单字角色名」，多字角色名走上面的
+        # 正则子串路径，压根不经过分词。
+        for word, start, _end in tok.tokenize(text, HMM=False):
+            if word in single:
+                found.setdefault(word, start)
+
+    # 子串消歧：仅用于**多字名之间**（「秧秧」是「秧秧·玄翎」的前缀，同句命中时留长的）。
+    # ⚠️ 分词命中的单字名**不参与**消歧：`鉴心` 含 `心`，若参与会把
+    # 「鉴心和心谁强」里的 `心` 误删（实测：两个角色都在比较句里，应同时命中）。
+    # 单字名由「独立成词」这条判据保证精确，无需再靠消歧。
+    drop = {
+        a for a in found
+        if len(a) > 1 and any(b != a and a in b for b in found if len(b) > 1)
+    }
+    return sorted(
+        ((pos, n) for n, pos in found.items() if n not in drop),
+        key=lambda t: t[0],
+    )
+
+
+def mentioned_names(text: str, known) -> list[str]:
+    """文本里提到的角色名（按出现顺序）。`find_mentions` 的只取名版本。"""
+    return [n for _pos, n in find_mentions(text, known)]
 
 
 # 漂泊者：性别维度归一为[男]
@@ -235,13 +342,23 @@ async def _llm_candidates(question: str) -> list[str]:
                 "不要编造，不要多余文字。")),
             HumanMessage(content="问题：" + question),
         ])
-        txt = resp.content.strip()
+    except Exception as exc:  # noqa: BLE001 —— LLM 不可用（Ollama 没起/网络断）不能挡住问答主链
+        log.warning("LLM 角色抽取调用失败: %s", exc)
+        return []
+
+    # 解析层单独收窄：模型输出畸形属可预期情形，只认这几类。
+    # `.get` 在解析出列表而非字典时会抛 AttributeError，一并挡掉。
+    try:
+        txt = (resp.content or "").strip()
         m = re.search(r"\{.*\}", txt, re.S)
         if not m:
             return []
-        return [str(c) for c in json.loads(m.group(0)).get("characters", []) if c]
-    except Exception as exc:
-        log.warning("LLM 角色抽取失败: %s", exc)
+        data = json.loads(m.group(0))
+        if not isinstance(data, dict):
+            return []
+        return [str(c) for c in data.get("characters", []) if c]
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError) as exc:
+        log.warning("LLM 角色抽取输出无法解析: %s", exc)
         return []
 
 
@@ -249,18 +366,22 @@ async def _llm_candidates(question: str) -> list[str]:
 async def _rule_candidates(question: str) -> list[str]:
     """名册规则匹配，吃的是**动态名册**（种子 ∪ 库内角色，见 `get_roster`）。
 
-    漂泊者走特例（性别归男）；其余按名册 / `CHARACTER_ALIASES` 匹配。
+    漂泊者走特例（性别归男）；其余经 `find_mentions` 判定（单字名要求独立成词，
+    见该函数注释——裸子串匹配会让「核心玩法」误命中角色「心」，而 `len>=2` 的
+    旧过滤又会让「心」「椿」永远匹配不到）。
+
     命中结果按名排序：`hits` 是 set，不排的话多角色问句的候选顺序每轮都不同，
-    日志和后续自动爬取的入队顺序都跟着飘。
+    日志和后续自动爬取的入队顺序都跟着飘。⚠️ 这里刻意**不用** `find_mentions`
+    的位置序：本函数的产物是「待爬取角色集合」，顺序只影响日志与入队次序，
+    按名排序才稳定可复现。
     """
     names = await get_roster()
     hits: set[str] = set()
     p = _pover_resolve(question)
     if p:
         hits.add(p)
-    for n in names:
-        if n and n in question:
-            hits.add(n)
+    hits.update(mentioned_names(question, names))
+    # 别名都是 2 字以上（光主/风主/暗主/电主/卡提），子串匹配安全，不必走分词。
     for alias, std in CHARACTER_ALIASES.items():
         if alias in question:
             hits.add(std)

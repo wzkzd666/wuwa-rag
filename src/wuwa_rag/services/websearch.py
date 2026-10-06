@@ -78,6 +78,12 @@ async def web_search(query: str) -> tuple[bool, str]:
                 return False, ""
             log.info("千帆联网搜索成功: %d 字 / 溯源 %d 条", len(text), len(sources))
             return True, text
-    except Exception as exc:
+    except httpx.HTTPError as exc:
+        # 只吞网络/超时/协议类故障——联网兜底本就是「有就加分、没有就降级」，
+        # 不该因为千帆挂了而中断问答。响应体解析失败（KeyError/ValueError）属
+        # 可预期，也一并降级；其余编程错误应如实暴露。
         log.warning("千帆联网搜索失败(%s): %s", type(exc).__name__, str(exc)[:160])
+        return False, ""
+    except (KeyError, IndexError, ValueError) as exc:
+        log.warning("千帆联网搜索响应解析失败(%s): %s", type(exc).__name__, str(exc)[:160])
         return False, ""

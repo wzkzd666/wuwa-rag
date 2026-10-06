@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS user_facts (            -- 软删除，不物理删�
     user_id    TEXT,
     session_id TEXT,
     fact       TEXT        NOT NULL,
+    category   TEXT,                               -- 同类覆盖的分类键；NULL = 不参与覆盖（叠加保留）
     confidence REAL,
     source     TEXT,                               -- 'chat' / 'doc'
     valid_from TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -124,6 +125,8 @@ CREATE TABLE IF NOT EXISTS user_facts (            -- 软删除，不物理删�
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_facts_user ON user_facts(user_id, valid_to);
+-- 老库补列（幂等）。category 为 NULL 的历史事实不参与同类覆盖，仍按叠加保留 —— 不丢数据。
+ALTER TABLE user_facts ADD COLUMN IF NOT EXISTS category TEXT;
 
 CREATE TABLE IF NOT EXISTS sessions (
     id         BIGSERIAL PRIMARY KEY,

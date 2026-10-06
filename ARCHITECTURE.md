@@ -68,7 +68,17 @@ uv run python scripts/check_layers.py --dot    # 额外输出 Graphviz DOT
 ```
 
 它按上面的分层表扫描全部内部导入，报告**分层方向违规**与**循环依赖**。
-改完结构跑一次；接 CI 后可以作为提交门禁。当前状态：120 条依赖边，0 违规，0 环。
+改完结构跑一次；接 CI 后可以作为提交门禁。当前状态：**49 个模块，132 条依赖边，0 违规，0 环**。
+
+> 📌 2026-10-06：清掉了 2026-09-30 重构遗留的 5 个空壳包（`rag/` `graph/` `ingest/`
+> `retrieval/` `storage/`，均只含 `__init__.py`、贡献 0 条依赖边，无任何代码引用），
+> 守卫的模块计数因此由 54 回落到真实的 **49**（边数 132 不变）。
+> 清理后已核验：9 个活跃包完好（含与旧 `wuwa_rag/graph` **同名但不同物**的
+> `knowledge/graph`）、49 个模块全部可导入、5 个旧包名确认不可再导入、
+> 42 个 py 文件语法编译通过。
+>
+> ⚠️ 脚本的模块数会把**只含 `__init__.py` 的空包**也计入，所以将来若再看到
+> 「模块数 > 分层小计之和」，先查是不是又留下了空壳目录。
 
 ---
 
@@ -105,6 +115,8 @@ knowledge/
 ├── graph/    结构化事实：    neo4j_client.py · extract.py（正则抽取） · build_graph.py
 ├── index/    检索索引：      bm25.py · embeddings.py（bge-m3） · rerank.py · build_index.py
 ├── entities.py   角色名册与别名归一（图谱名、队伍串都走这里）
+│                 + **角色名提及判定的唯一实现** `find_mentions`（单字名走分词、多字名走正则；
+│                   nlu / entities / graph 三处共用，别再各写一套）
 ├── retrieve.py   混合召回：dense(30) + sparse(30) → RRF(k=60) → rerank → top6
 └── s3.py         RustFS/S3 抽象层（换后端只改这一层）
 ```
@@ -130,7 +142,7 @@ Windows 必须 `--pool=solo` 且并发 1：`chunk` 任务按角色整写 `chunks
 | `tts.py` | Qwen-Audio-TTS 合成；`resolve(user_id)` 是凭据解析唯一入口（用户自持 > `.env` 兜底） |
 | `verify.py` | 检索后校验「资料能否回答问题」，给不匹配分级升级 |
 | `websearch.py` | 百度千帆联网兜底；`QIANFAN_API_KEY` 留空即整体关闭 |
-| `profile.py` | 用户画像（userfacts）读写 |
+| `profile.py` | 用户画像（user_facts）读写；同类事实**可更新**（`category` 列，昵称/水平覆盖，主玩角色等可多值事实叠加保留） |
 
 ### L5 对话 `dialog`
 
@@ -139,8 +151,9 @@ LangGraph 编排层，也是全项目最厚的一层。
 | 模块 | 内容 |
 |---|---|
 | `graph.py` | **主编排**：`StateGraph` 定义、各节点、路由 `_route` / `_after_graph`、`ask` / `ask_stream`、确定性补料 |
+| `prompt.py` | 提示词与上下文构建：`SYSTEM_PROMPT` 常量、`build_context`、`build_prompt`、`doc_sources` |
 | `state.py` | `RagState` 类型定义（每轮必须清零的字段在这里注明） |
-| `nlu.py` | 意图/槽位/属性/阶段正则（零 LLM）+ 追问改写 + 闲聊判定 |
+| `nlu.py` | 意图/槽位/属性/阶段正则（零 LLM）+ 追问改写 + 闲聊判定（`is_identity` 问助手身份 / `is_self_intro` 陈述用户自己，两条规则硬信号） |
 | `tools.py` | 三个 `@tool`：`graph_search` / `vector_search` / `current_time` |
 | `agent.py` | LLM 自主选工具（`bind_tools`）——**路径保留，主链未启用** |
 | `guard.py` | 运行时行级复读检测与截断（含周期块循环判定） |
@@ -152,6 +165,7 @@ LangGraph 编排层，也是全项目最厚的一层。
 |---|---|
 | `app.py` | 全部路由：`/ask` `/ask/stream`(SSE) `/ingest` `/ingest/status` `/llm/*` `/tts` `/profile` `/admin/users` … |
 | `auth.py` | 注册/登录/token 校验、`get_current_user` / `require_admin` 依赖 |
+| `ratelimit.py` | 限流（slowapi）：`limit_auth` / `limit_ask` / `limit_tts` / `limit_outbound` 四档 + `install(app)` |
 | `server.py` | uvicorn 启动入口（**唯一**需要 `SelectorEventLoop` 的 async 入口之一） |
 
 ---
@@ -245,3 +259,9 @@ crawl_character → chunk_character → ingest_character → index_character →
 | | | `retrieval/build_index.py` | `knowledge/index/build_index.py` |
 
 `git mv` 搬迁，历史完整保留。
+
+> 📌 上表**左列的旧路径现已全部不存在**：搬迁时留下的 5 个空壳包（`rag/` `graph/`
+> `ingest/` `retrieval/` `storage/`，只余 `__init__.py`）已于 2026-10-06 清理。
+> 在此之前它们让架构守卫的模块计数虚增 5（54 vs 真实的 49）。
+> ⚠️ 注意 `wuwa_rag/graph`（旧空壳，已删）与 `wuwa_rag/knowledge/graph`（现役 L2 子包，
+> 含 `extract.py` / `neo4j_client.py` / `build_graph.py`）**同名但完全不同物**。

@@ -8,6 +8,11 @@ services:
       POSTGRES_PASSWORD: ${PG_PASSWORD}
     ports: ["5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U wuwa -d wuwa"]
       interval: 5s
@@ -23,13 +28,29 @@ services:
       NEO4J_server_memory_pagecache_size: 512M
     ports: ["7687:7687", "7474:7474"]
     volumes: ["neo4jdata:/data"]
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "1.0"
 
   redis:
     image: redis:7-alpine
     container_name: wuwa-redis
-    command: ["redis-server", "--appendonly", "yes"]   # AOF 持久化
+    # maxmemory 与上面的容器内存上限对齐；淘汰策略必须是 noeviction。
+    # 这一个 Redis 同时是 Celery 的 broker + result backend（db0），
+    # 若改成 allkeys-lru，内存触顶时会连排队中的任务消息和任务结果一起淘汰，
+    # AOF 也拦不住（淘汰发生在内存里，落盘的是淘汰后的结果）——
+    # 表现是「提交了入库却永远不跑、进度卡住」且没有任何报错。
+    # noeviction 的好处是触顶时 Redis 直接返回 OOM 错误，故障是响亮的。
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]   # AOF 持久化 + 内存上限
     ports: ["6379:6379"]
     volumes: ["redisdata:/data"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
 
   rustfs:
     image: rustfs/rustfs:latest
@@ -39,6 +60,11 @@ services:
       RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
     ports: ["9000:9000", "9001:9001"]   # 9000=S3 API, 9001=控制台
     volumes: ["rustfsdata:/data"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
 
 volumes:
   pgdata:

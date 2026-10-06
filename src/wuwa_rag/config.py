@@ -26,8 +26,8 @@ class Settings(BaseSettings):
         return self.CHUNKS_DIR / self.CHUNKS_FILENAME
 
     # ---------- 日志设置 ----------
-    LOG_LEVEL:str = "INFO"
-    DEBUG:bool =True
+    LOG_LEVEL: str = "INFO"
+    DEBUG: bool = False
 
     # ---------- 时区（时间工具 current_time 用） ----------
     # 为什么单独配置：时间回答必须与服务端真实时钟一致，而容器/云主机的系统时区
@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     # 默认 True（开发者自用是主流场景，预设里就有本地服务）；
     # 约束：公网部署或开放注册时必须设为 False，否则等于给注册用户开放内网探测能力。
     # 云元数据端点（169.254.169.254 等）无论此项如何都无条件拦截。
-    CLOUD_ALLOW_PRIVATE_NET: bool = True
+    CLOUD_ALLOW_PRIVATE_NET: bool = False
 
     # ---------- 采样 / 防复读（aemeath 是 8B 角色扮演模型，容易陷入整句复读）----------
     # 约束：调回 1.3 会让模型回避相似内容而提前收尾——
@@ -194,7 +194,7 @@ class Settings(BaseSettings):
     # TTS_ENABLED=False 或 DASHSCOPE_API_KEY 为空时 /tts 直接返回「功能未开启」，
     # 不报错、不影响问答主链。dashscope SDK 为可选依赖（extras: tts），缺失同样降级。
     EMOTION_ENABLED: bool = True
-    TTS_ENABLED: bool = True           # 2026-09-30 开启；未配 key/WorkspaceId 时自动降级
+    TTS_ENABLED: bool = True           # 默认开启；未配 key/WorkspaceId 时自动降级
     # 与 QIANFAN_API_KEY 同一个坑同一个解法：用 AliasChoices 让 .env 与进程环境都能配。
     DASHSCOPE_API_KEY: str = Field(
         "", validation_alias=AliasChoices("DASHSCOPE_API_KEY", "BAILIAN_API_KEY")
@@ -246,19 +246,54 @@ class Settings(BaseSettings):
     CHUNK_COLLECTION: str = "wuwa_chunks"
 
     # ---------- HF本地目录 ----------
-    HF_HOME: str = "D:/hf_cache/huggingface"
+    # 不再硬编码路径：优先读环境变量 HF_HOME，否则用 ~/.cache/huggingface（跨平台通用）
+    HF_HOME: str = str(Path.home() / ".cache" / "huggingface")
 
     # ---------- 重排 ----------
     RERANK_MAX_LENGTH: int = 512     
     RERANK_BATCH_SIZE: int = 8       # 实测 bs=8 比 bs=32 快 35%
     RERANK_THREADS: int = 8          # 实测 8 线程最快，16 反而慢（线程抢资源）
     RERANK_MIN_SCORE: float = 0.1    # logit，超低分=明显不相关，直接丢
-    TOPK_RERANK_IN: int = 20         # 送进 reranker 的候选数（不是全部 30 条）
+    # 送进 reranker 的候选数（不是全部 30 条）。
+    #
+    # 为什么维持 20：`tests/ab_topk_rerank_in.py` 的 A/B（固定 topk=TOPK_RERANK=6、
+    # 只变本参数）显示 25 只换来 +0.012 合计 recall，**真缺口一条没少**，却多花 13s；
+    # 30 与 25 同分，40 反而退化。逐条看是「一升一降」而非净改善——候选变多会把噪声
+    # 喂给 CrossEncoder，挤掉真相关块。唯一稳定的收益是 MRR 0.82→0.88（首位命中
+    # 排名略好），代价是延迟，权衡后不划算。
+    #
+    # ⚠️ 改这个参数前务必确认评测脚本没把两个参数搞混：`TOPK_RERANK_IN` 是候选池
+    # 大小（要变的量），`TOPK_RERANK` 是送进 LLM 的条数（必须固定的对照量）。
+    # 混淆过一次：脚本把前者当后者传出去，于是「返回 20 条」被当成 topk，
+    # 9 个相关块的 recall 算出 1.00（topk=6 时上限只有 0.667），
+    # 结论完全失真，险些据此改掉生产值。
+    TOPK_RERANK_IN: int = 20
 
     # ---------- API（Step 9） ----------
     API_HOST: str = "127.0.0.1"
     API_PORT: int = 8000
     MAX_HISTORY_TURNS: int = 3      # 带进 prompt 的历史轮数
+
+    # ---------- 限流（slowapi，见 api/ratelimit.py）----------
+    # 为什么必须有：/ask 一轮要跑检索+重排+生成（实测 20s 量级），且与 Ollama 抢同一块
+    # GPU（OLLAMA_NUM_PARALLEL=1）；/tts 每次合成都是真实费用；/auth/login 面对的是
+    # 种子管理员 admin/123456 这种公开弱口令，必须挡暴力枚举。
+    # 限额用 limits 库的标准写法（`<次数>/<单位>`，单位 minute/hour/day，可写 `5 per minute`）。
+    RATE_LIMIT_ENABLED: bool = True
+    # 计数存储：留空 = 进程内存（单实例够用）；填 Redis DSN 则跨实例共享、重启不丢计数。
+    # 项目已有 Redis（Celery broker），多实例部署时把它设成 REDIS_URL 即可。
+    # ⚠️ 填了 Redis 但 Redis 挂了，限流会抛错 → 所以默认留空，宁可少一层保护也别自伤。
+    RATE_LIMIT_STORAGE: str = ""
+    # 登录/注册：按**客户端 IP**（此时还没有用户身份）—— 挡暴力枚举。
+    RATE_LIMIT_AUTH: str = "10/minute"
+    # 问答：按**登录用户**。
+    RATE_LIMIT_ASK: str = "20/minute"
+    # 语音合成：按用户，额度最紧（有真实费用）。
+    RATE_LIMIT_TTS: str = "10/minute"
+    # 会发起**出站请求**的配置类接口（/llm/models、/llm/config/test）：SSRF 面要收窄。
+    RATE_LIMIT_OUTBOUND: str = "20/hour"
+    # 兜底：未显式加限额的端点统一适用（/health 已单独豁免）。
+    RATE_LIMIT_DEFAULT: str = "200/minute"
 
     @property
     def PG_DSN_LG(self) -> str:

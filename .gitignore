@@ -19,6 +19,7 @@ logs/
 .vscode/
 .ruff_cache/
 .uv-cache/
+.pytest_cache/
 
 # Frontend caches（包管理器缓存不得入库）
 front/.npm-cache/

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
@@ -22,14 +23,20 @@ from wuwa_rag.dialog.nlu import (
     detect_stage,
     extract_characters,
     is_identity,
+    is_self_intro,
     is_time_question,
     mentions_time,
     rewrite_query,
     summarize_turns,
 )
+from wuwa_rag.dialog.prompt import (
+    build_context,
+    build_prompt,
+    doc_sources,
+)
 from wuwa_rag.dialog.state import RagState
 from wuwa_rag.dialog.tools import current_time_tool, graph_search_tool, vector_search_tool
-from wuwa_rag.knowledge.entities import resolve_candidates
+from wuwa_rag.knowledge.entities import find_mentions, resolve_candidates
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.retrieve import fetch_chunks
 from wuwa_rag.services import persona, tts
@@ -47,7 +54,6 @@ from wuwa_rag.text import (
     chunk_text,
     dedup_list_items,
     fix_percent_units,
-    lock_focus,
     strip_ref_marks,
 )
 from wuwa_rag.ww_logger import get_logger
@@ -55,53 +61,17 @@ from wuwa_rag.ww_logger import get_logger
 setting = get_settings()
 log = get_logger("rag")
 
-# 注意：人设由 aemeath 模型自带（Modelfile 的 SYSTEM），这里不再引导口吻——
-# 叠加人设指令会让模型把注意力放在「表演」而非「答题」上，是复读独白的诱因之一。
-# 本提示词只负责三件事：术语对照、答题约束、防重复。
-# 另：Ollama 的 system 参数会覆盖 Modelfile 内置 SYSTEM，所以这些约束必须拼在
-# HumanMessage 里，不能改成 SystemMessage 传，否则人设会丢。
-#
-# 硬约束：本提示词只描述正面要求，不要在示例中给出反例（哪怕是否定句式）。
-# aemeath 会把提示词里点名的反例**当成要模仿的样本照抄**——即 negative-example
-# contamination。三条实证：
-#   ① 原文写了「不要自行补充『没有提到其他/更多』」→ 输出结尾**稳定**出现
-#      「资料里没有提到其他组合啦。」（用户现场 + 本地复现各命中，字面级一致）。
-#   ② 原文写了「不许给条目编序号或计数器（如『守岸人 + 尤诺*5』）」→ 输出开始出现
-#      `[1]`~`[7]` 形式的来源编号噪声。
-#   ③ 原文写了「开场就是『我呀~』」→ 该开场概率性复现。
-# 对照实验（直连 Ollama、固定 seed=42、同一资料）：
-#   · prompt 里**点名** `[1] [2]` 禁止 → 仍写 `[1]`；放在末尾时**更糟**（自编到 `[5]`）。
-#   · 改用**泛化措辞**「不要标注来源序号或引用标记」→ 完全不出现（基线组则写 `[1][2]`）。
-#   · 纯问题、不给资料的基线组**不会**写 `[n]` → 说明 `[n]` 是「有资料可依」这件事诱发的
-#     模型微调习惯，不是它天生爱写；也**不是**语料里的 `[图]` 诱发（去掉方括号照样写）。
-# 反例与历史记录请写进项目文档，**不要进 _SYSTEM**。
-#
-# 补充：「家人问的是哪位，那位所在的那个『或』组只列他」这条**不在
-# _SYSTEM 里写**（写过，实测完全不生效：问守岸人时答案照旧输出 `守岸人 / 维里奈 / 白芷`）。
-# 它已改由 `text.lock_focus` 在**数据侧确定性落实**：图谱（retrievers.graph_search）与
-# 参考文档（chain._lock_focus）进 prompt 之前，含本次角色的「或」组就已收窄成他本人。
-_SYSTEM = """依据下面的资料作答。你是爱弥斯（《鸣潮》里那个爱笑、话多的女孩），资料是
-存档记录，要用你自己的口吻把它讲给家人听。
+# 有界线程池：供 fetch_chunks 等同步阻塞调用使用。
+# asyncio.to_thread 用默认 ThreadPoolExecutor（max_workers=40），并发高时占满线程资源。
+# 限 8 个线程足够（检索不是高并发场景），避免与 Celery worker / Ollama 抢线程。
+_IO_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="rag-io")
 
-术语对照（资料用词和提问可能不同，按下表理解）：
-- 声骸 = 角色装备，资料里也写作「套装」；COST 是声骸的费用点数组合
-- 共鸣链 = 相当于命座，序号 1~6 对应一链到六链
-- 贝币 = 游戏货币
-- 突破阶段：一阶~六阶
-- 配队写法「守岸人+吟霖/长离/散华+卡卡罗」：`/` 之间是「或」（同一个位置三选一，
-  不是三个人一起上），`+` 之间是「和」（不同位置）。鸣潮一支队伍只有 3 个人。
 
-作答要求：
-- 讲到爱弥斯本人时用第一人称「我」，活泼亲切；讲到其他角色时用角色名或「她/他」称呼。
-- 先用自己的话把要点讲清楚，再按下面的格式要求列数据。
-- 用中文，简洁、要点化；资料里有几个要点就讲几个要点。
-- 凡是资料里带单位或符号的数字（`%`、`+`、`*`、`×`、`倍`、`秒`、`层`、`点`），
-  一律照原样抄回：百分号必须跟着数字，不省略、不换算、不改成中文数字、不擅自加
-  「万」「亿」这类量纲。
-- 事实严格依据资料，只讲资料里有的内容；资料里没有的，用一句话说不知道就停住。
-- 同一句话、同一段落、同一口头禅只说一次，讲完即止。
-- 列表、配队这类条目每条只出现一次，直接平铺列出即可。
-- 直接把内容讲出来即可，不要给内容加来源序号或引用标记。"""
+async def _run_io(func, *args, **kwargs):
+    """把同步阻塞函数放到有界线程池跑，替代 asyncio.to_thread。"""
+    from functools import partial
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_IO_EXECUTOR, partial(func, *args, **kwargs))
 
 # 流式阶段文案：只收真正干活的节点。LangGraph / _route / _after_graph 是图容器与
 # 路由函数（实测 astream_events 也会为它们发 on_chain_start），对用户无意义，排除。
@@ -162,9 +132,9 @@ async def _chat_client(state: RagState, strict: bool = False) -> tuple[Runnable,
 
     返回值 is_cloud 决定人设注入方式，两条规则相反（判断错误会丢失作答效果）：
       - 本地 aemeath：人设烧在 Modelfile SYSTEM，**不得**发 SystemMessage（会覆盖人设），
-        `_SYSTEM` 走 HumanMessage 前缀（现状，逐字节不变）；
+        `prompt.SYSTEM_PROMPT` 走 HumanMessage 前缀（现状，逐字节不变）；
       - 云端通用模型：不认识爱弥斯，**必须**发 `SystemMessage(persona.cloud_system())`，
-        且 prompt 不再前缀 `_SYSTEM`（避免术语表/作答要求重复两遍）。
+        且 prompt 不再前缀 `SYSTEM_PROMPT`（避免术语表/作答要求重复两遍）。
 
     明文 key 只存在于返回的 client 实例中，不得写入 state —— checkpointer 会把
     state 持久化进 PG，写进去等于把用户密钥落盘到另一张表。
@@ -177,7 +147,7 @@ async def _chat_client(state: RagState, strict: bool = False) -> tuple[Runnable,
     if uid:
         try:
             cfg = await llmstore.get_runtime(int(uid))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 —— 配置读不出来就回落本地默认，不因配置问题中断问答
             log.warning("读取云端模型配置失败，回落本地默认：%s", exc)
             cfg = None
         if cfg:
@@ -214,6 +184,7 @@ async def _commit_history(state: RagState, answer: str) -> dict:
 # 而名册只在入库时变化——60s 缓存直接省掉一次往返。入库成功后主动失效。
 _KNOWN_TTL = 60.0
 _known_cache: tuple[float, list[str]] = (0.0, [])
+_known_lock = asyncio.Lock()   # 防并发竞态：多个请求同时判空→同时查 Neo4j→同时写缓存
 
 
 async def _known_characters() -> list[str]:
@@ -221,12 +192,17 @@ async def _known_characters() -> list[str]:
     now = time.monotonic()
     if _known_cache[1] and now - _known_cache[0] < _KNOWN_TTL:
         return _known_cache[1]
-    async with get_session() as s:
-        rows = await (await s.run("MATCH (c:Character) RETURN c.name AS n")).data()
-    names = [r["n"] for r in rows]
-    if names:                      # 空结果（Neo4j 抖动）不缓存，避免脏 60s
-        _known_cache = (now, names)
-    return names
+    async with _known_lock:
+        # double-check：等锁期间可能已有另一个协程刷新了缓存
+        now = time.monotonic()
+        if _known_cache[1] and now - _known_cache[0] < _KNOWN_TTL:
+            return _known_cache[1]
+        async with get_session() as s:
+            rows = await (await s.run("MATCH (c:Character) RETURN c.name AS n")).data()
+        names = [r["n"] for r in rows]
+        if names:                  # 空结果（Neo4j 抖动）不缓存，避免脏 60s
+            _known_cache = (now, names)
+        return names
 
 
 def _invalidate_known_cache() -> None:
@@ -251,16 +227,21 @@ def _inject_far_characters(
     - 「开头聊的那位」= 摘要里**最先**出现的名字（摘要按谈话顺序保留角色名），
       取法与 focus_anchors 的最近优先相反，按摘要文本位置排序。
     - 改写成功时远指代词已被替换掉，sq 不再命中 → 天然 no-op；已在 chars 中也不重复。
+
+    ⚠️ 名字匹配一律走 `entities.find_mentions`，**不要**在这里另写一套正则：
+    本函数原先自建「长度降序 + re.finditer」，与 `nlu.extract_characters` 是同一语义
+    的两处判据（本项目对这种重复已有大量踩坑记录）。更要紧的是它有实际缺陷——
+    裸子串匹配会让摘要里的「核心词条」「关心剧情」误命中单字角色「心」，
+    注入一个用户从没聊过的角色。find_mentions 对单字名要求独立成词，
+    并且**返回值本身就是按文本位置升序**的，「最靠前」直接取第一个即可。
     """
     if not summary or not known or not _FAR_REF_RE.search(sq):
-        # known 为空时空正则会在每个位置匹配出无意义片段，必须挡
+        # known 为空时 find_mentions 会直接返回 []（内部有挡），此处一并短路省一次调用
         return chars
-    # 名字长度降序：「秧秧」是「秧秧·玄翎」的前缀，短的在前会误抢匹配
-    pattern = "|".join(re.escape(n) for n in sorted(known, key=len, reverse=True) if n)
-    hits = [m.group(0) for m in re.finditer(pattern, summary)]
+    hits = find_mentions(summary, known)
     if not hits:
         return chars
-    name = hits[0]
+    name = hits[0][1]          # (位置, 名字)；按摘要文本位置取最靠前那个
     if name in chars:
         return chars
     log.info("前角色注入: %s（远指代=%r 摘要=%r）", name, sq[:24], summary[:40])
@@ -273,7 +254,7 @@ async def intent_node(state: RagState) -> dict:
     # 追问改写（A+B 输入）：滚动摘要（窗口外压缩记忆）+ 焦点锚点（全量文本提角色，
     # 不怕 120 字截断丢名）+ 最近 2 轮短原文。检索信号全部吃改写句——
     # 「那她配什么声骸」单拿原句必落空，补出角色名才能命中。
-    # 生成侧仍用原句+history（_build_context 里有对话历史），展示不受影响。
+    # 生成侧仍用原句+history（prompt.build_context 里有对话历史），展示不受影响。
     history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
     summary = state.get("context_summary", "")
     sq = await rewrite_query(q, history, known=known, summary=summary)
@@ -311,6 +292,14 @@ async def intent_node(state: RagState) -> dict:
     #    是问人格不是查资料，直接判 chitchat。用**原句 q** 判：改写 sq 已把「你」补成
     #    角色名（「你的台词」→「爱弥斯的台词」），第二人称信号会丢。aemeath 人设由模型
     #    自带，走 RAG 反而召回大段角色剧情文案整段倾倒（实测「你的台词是什么」→ 809 字）。
+    # ①′ 自我介绍硬信号（「我是颗粒」「叫我小星就行」）——同判 chitchat，与①方向相反
+    #    （①问助手自己，①′陈述用户自己）。为什么必须走规则、不能只靠②的主题分类器：
+    #    纯自我介绍句 `classify()` 兜底给 `hybrid`，会触发全量检索 → 查无资料 →
+    #    `characters` 空、`verify_node` 的按角色重爬不触发 → 一路升级到**联网兜底**
+    #    （用户实测「我是颗粒」走了联网查知识）。这类句子的正确出口只有「闲聊 + 写画像」，
+    #    检索必然空手。判据同样用**原句 q**（改写器可能把它改得面目全非）。
+    #    ⚠️ 带 `not slots`：复合句「我是萌新，守岸人怎么玩」虽被 is_self_intro 挡在
+    #    句尾逗号处（不会命中），这里再加 not slots 是双保险——真游戏提问绝不被抢走。
     # ② qwen3:8b 主题 agent：仅在「无角色名 且 无槽位 且 无属性/阶段」时才调用。
     #    槽位非空几乎必然是游戏提问（实测「秧秧怎么玩」这类靠语义命中；真闲聊句槽位为空）。
     #    不能用 SEMANTIC_PATTERNS 当判据——「怎么」会误命中闲聊句（「怎么这么晚才来」）。
@@ -322,7 +311,7 @@ async def intent_node(state: RagState) -> dict:
 
     if pure_time:
         intent = "time"
-    elif is_identity(q) and not slots:
+    elif (is_identity(q) or is_self_intro(q)) and not slots:
         intent = "chitchat"
     elif not chars and not slots and not stage and not element:
         topic = await classify_topic(sq)
@@ -478,14 +467,17 @@ async def _refresh_and_wait(chars: list[str], timeout: int) -> bool:
     t0 = time.perf_counter()
     try:
         for r in results:
-            await asyncio.to_thread(r.get, timeout=timeout)
+            await _run_io(r.get, timeout=timeout)
     except CharacterNotFound:
         log.warning("资料刷新: 角色 %s wiki 上不存在，刷新终止", chars)
         return False
     except CeleryTimeout:
         log.warning("资料刷新: 等待超时(%ss)，按失败处理", timeout)
         return False
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— r.get() 会透传流水线任务内的**任意**异常
+        # 上面已单独接住 CharacterNotFound（wiki 上没这个角色）与 CeleryTimeout（等待超时）；
+        # 这里兜的是五步链里真实抛出的各种错误（抓取失败、入库约束冲突、索引写坏……）。
+        # 刷新的定位是「尽力重爬一次」，失败就降级走重检索/联网，不该让整轮问答崩掉。
         log.warning("资料刷新失败: %s", exc)
         return False
     log.info("资料刷新: %s 重建完成，耗时 %.1fs", chars, time.perf_counter() - t0)
@@ -500,7 +492,7 @@ async def verify_node(state: RagState) -> dict:
     不匹配且已识别角色且没刷过 → 清库重爬（刷新即一次重检索机会）；
     不匹配但还有重试额度（无角色可刷 / 刷过仍歪）→ 用 refined 重检索；
     额度用尽 → 千帆联网（key 空/失败则跳过）；都没有 → exhausted 直接生成
-    （空/不匹配材料由 _build_context 的「一句话不知道」约束兜底）。
+    （空/不匹配材料由 prompt.build_context 的「一句话不知道」约束兜底）。
     防死循环：retry_count 上限 VERIFY_MAX_RETRY + refreshed 只一次 + used_web 只一次，
     verify 最多进两次。
     """
@@ -704,7 +696,7 @@ def _max_level_material(text: str) -> list[str]:
 
 async def _skill_value_block(char: str, sq: str, docs: list[dict]) -> str:
     """技能数值表 -> 满级(Lv 10)数值块；取不到返回空串。"""
-    chunks = await asyncio.to_thread(fetch_chunks, char, "技能介绍")
+    chunks = await _run_io(fetch_chunks, char, "技能介绍")
     if not chunks:
         return ""
     tabs = sorted(
@@ -750,7 +742,7 @@ async def _skill_value_block(char: str, sq: str, docs: list[dict]) -> str:
 
 async def _material_block(char: str) -> str:
     """角色突破材料（一阶~六阶）+ 技能突破材料（满级一档）材料表；取不到返回空串。"""
-    chunks = await asyncio.to_thread(fetch_chunks, char, "角色突破材料")
+    chunks = await _run_io(fetch_chunks, char, "角色突破材料")
     by_stage: dict[str, list[str]] = {}
     for d in chunks:
         stage = (d.get("breadcrumb") or "").split("›")[-1].strip()
@@ -758,7 +750,7 @@ async def _material_block(char: str) -> str:
         if items:
             by_stage[stage] = items
 
-    skill_chunks = await asyncio.to_thread(fetch_chunks, char, "技能突破材料")
+    skill_chunks = await _run_io(fetch_chunks, char, "技能突破材料")
     by_tab: dict[str, list[str]] = {}
     for d in skill_chunks:
         tab = (d.get("tab") or "").strip()
@@ -800,205 +792,12 @@ async def _value_blocks(state: RagState) -> list[str]:
             b = await _material_block(chars[0])
             if b:
                 blocks.append(b)
-    except Exception as exc:               # 补料是增益不是依赖，失败只记日志
+    except Exception as exc:  # noqa: BLE001 —— 补料是增益不是依赖，失败只记日志
+        # ⚠️ 这里刻意保持宽捕获：补料块（满级数值表 / 突破材料表）依赖 Chroma 元数据查询
+        # + 正则读表，任一环节形态变化都可能抛新异常。它只是让答案更完整，
+        # **绝不能**因为它失败就让整轮问答崩掉（用户至少还能拿到检索结果）。
         log.warning("补数值/材料表失败，跳过: %s", exc)
     return blocks
-
-
-def doc_sources(docs: list[dict]) -> list[str]:
-    """从召回文档里提取「引用来源」面包屑，给前端折叠面板用。
-
-    格式 `角色 › 模块 › 组件[ › 页签]`（chunker 写入时生成，见 ingest/chunker.py），
-    同一来源只留一条、保持召回顺序。**只回面包屑字符串、不回全文**：SSE 体积可控，
-    前端要的也只是「这条答案查了哪几页」，用于建立信任与排查。
-    """
-    out: list[str] = []
-    seen: set[str] = set()
-    for d in docs:
-        bc = (d.get("breadcrumb") or "").strip()
-        if not bc or bc in seen:
-            continue
-        seen.add(bc)
-        out.append(bc)
-    return out
-
-
-def _lock_focus(text: str, characters: list[str]) -> str:
-    """把正文里含「本次问到的那位角色」的配队「或」组收窄成他本人（见 text.lock_focus）。
-
-    图谱侧已在 graph_search 里就地锁过；这里补**参考文档**侧——两处形态必须一致，
-    否则图谱给 `守岸人+吟霖/长离/散华+卡卡罗`、文档给 `守岸人/维里奈/白芷+吟霖/长离/散华+卡卡罗`，
-    8B 会挑文档那份抄回去，锁定等于白做（这正是「提示词规则 + 文档原样」组合失效的原因）。
-    """
-    out = text
-    for c in characters:
-        if c:
-            out = lock_focus(out, c)
-    return out
-
-
-def _build_context(state: RagState, extra: list[str] | None = None) -> str:
-    parts: list[str] = []
-    # 注意：不要把 context_summary 塞进生成上下文——实测 aemeath 会把摘要句
-    # 原样复述进答案（「…讨论声骸选择及毕业配装…」这种第三人称腔调穿帮）。
-    # 摘要只喂给 rewrite_query 消解指代；生成侧靠窗口内 history + 改写后的检索结果。
-    history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
-    if history:
-        parts.append("## 对话历史\n" + "\n".join(
-            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content']}" for m in history
-        ))
-    if state.get("graph_facts"):
-        parts.append("## 图谱事实\n" + state["graph_facts"])
-    docs = state.get("docs") or []
-    if docs:
-        # 变更说明：早期给每份资料加 [1] [2] 前缀以引导溯源，实测模型会把
-        # 把它当引用标记**抄进正文**——「- 守岸人 + 尤诺 [1][4]」「- 莫宁 + 琳奈 [1][5]」，
-        # 答案尾部因此混入纯数字噪声（三轮复现稳定出现）。前端引用面板走的是 SSE
-        # `done.sources`（`doc_sources`），**不依赖模型在正文写 `[n]`**，去掉零损失：
-        # 每块自带 breadcrumb 开头，来源照样可辨。
-        # 若将来真要做「正文引用徽章」，请改用 `（资料1）` 这类非方括号标记，别退回 `[n]`。
-        # 同时在这里做「问谁锁谁」的文档侧收窄（见 _lock_focus）：图谱与文档必须同形。
-        focus = [c for c in (state.get("characters") or []) if c]
-        parts.append("## 参考文档\n" + "\n\n".join(
-            _lock_focus(chunk_text(d), focus) for d in docs))
-    web_facts = state.get("web_facts") or ""
-    if web_facts:
-        parts.append("## 联网搜索资料\n（实时搜索结果，本地资料不足时以本段为准）\n" + web_facts)
-    # 确定性补料排在最后（紧贴 ## 问题）。真凶其实不在位置：实测把这张满级数值表
-    # 放在 ## 资料 第一节时，aemeath 会「只抄前几行就收尾」并补一句「其他参数未在该
-    # 列表中」，换表格/纯文本/编号/中文数值都无效——根因是 repeat_penalty=1.3 把彼此
-    # 高度相似的表行罚到写不下去（降到 1.15 即 7 行全出，见 config.LLM_REPEAT_PENALTY）。
-    # 位置只是第二道保险：同样的坏参数下，块放末尾确实能抄全，放开头会截断。
-    for b in extra or ():
-        parts.append(b)
-    # 「有没有资料」必须看图谱事实/文档/联网结果/确定性补料，不能用 join 结果是否为空
-    # 来判断：多轮对话时 history 非空，join 永远有内容，原先的 or 兜底就永远不触发，
-    # 零资料信号被吞掉 → 模型收不到约束 → 退化成自由发挥（人设独白 + 复读）。
-    if not (state.get("graph_facts") or docs or web_facts or extra):
-        # 这里不要再写「## 资料」标题：_build_prompt 已经加了，重复标题会干扰模型
-        # 约束：只要求「说明你不清楚」会得到公文式干瘪回答，因此这里明确要求用自己的口吻，
-        # 「不知道」这条分支会整体丢失角色口吻。明确要求**用自己的口吻**说，并给一个
-        # 口径示例，人设才在「答不出来」这条路上也保住。
-        parts.append(
-            "（本次没有检索到任何资料。请用你自己的口吻、一句话说明你手里没有这份记录——"
-            "可以俏皮一点、带点小遗憾（就像「这个我记不太清了呀……」），然后立刻停住；"
-            "不要解释检索过程，不要重复这句话，不要补充任何其他内容。）"
-        )
-    return "\n\n".join(parts)
-
-
-def _build_prompt(context: str, question: str, blocks: list[str] | None = None,
-                  characters: list[str] | None = None,
-                  team_focus: bool = False,
-                  user_context: str = "",
-                  now: str = "",
-                  cloud: bool = False) -> str:
-    """拼最终 prompt。
-
-    参数 cloud 决定人设来源（见 persona.py 模块文档）：
-      - 本地 aemeath（cloud=False）：人设烧在 Modelfile SYSTEM 里，所以 `_SYSTEM`
-        只补「资料是存档记录、用你的口吻讲」这句衔接 + 术语对照 + 作答要求，
-        整条塞进 HumanMessage（**不能**另发 SystemMessage，会覆盖人设）。
-      - 云端通用模型（cloud=True）：模型不认识爱弥斯，人设改由调用侧
-        `SystemMessage(persona.cloud_system())` 注入，故这里**不再**前缀 `_SYSTEM`
-        （否则术语表/作答要求会重复两遍，白白吃 token 且稀释指令）。
-      两条路径的 `## 资料 / ## 问题 / tail / 输出格式` 部分完全一致。
-
-    参数 now 非空表示「这句里顺带问了时间」（intent.mentions_time + chain._now_if_needed）：
-    它是一句**附带**信息，所以放近因位、与 user_context 同级，措辞明确只要求顺带提一句。
-    """
-    # 不在这里注入 /no_think：实测它对 aemeath 无效（仍 38s + 'v' 泄漏前缀 + 触发
-    # Ollama 500）。思考模式由 llm.py 的 .bind(think=False) 统一关闭。
-    prefix = "" if cloud else f"{_SYSTEM}\n\n"
-    prompt = f"{prefix}## 资料\n{context}\n\n## 问题\n{question}"
-    # 人称硬要求压在 prompt **最末**（近因位）：_SYSTEM 里那条通用规则实测压不住——
-    # 同一条 prompt 换 seed 重跑，第一人称开场仍会**概率性**冒出来（把被问的角色
-    # 当成了自己）。点名具体角色 + 放末尾，比在长 _SYSTEM 里写通用规则强得多。
-    # 问爱弥斯自己（characters 只含「爱弥斯」）时不加，否则会把人设本身顶掉。
-    others = [c for c in (characters or []) if c and c != "爱弥斯"]
-    # 这两条硬要求必须压在 prompt **最末**（近因位），写进前面的 _SYSTEM 等于白写——
-    # 实测：同一条「不要标注来源序号或引用标记」放在 _SYSTEM 里，配队答案照样出现
-    # `[1]`~`[10]`；末尾泛化措辞则完全不出现。
-    # 约束：措辞必须保持泛化，点名 [1] [2] 反而会诱发编号（置于末尾时更明显）。
-    tail = ("\n\n## 表达（硬要求）\n"
-            "资料没有编号，直接陈述内容即可，不要标注来源序号或引用标记。")
-    if others:
-        tail += ("\n本次问的是「" + "、".join(others) + "」，不是你——"
-                 "正文里一律用角色名或「她/他」称呼，不要冒充成她。")
-    if team_focus:
-        # 指名具体队伍时（见 _named_team，≥3 个角色名）：把注意力钉在那一支上。
-        # 约束：措辞用「围绕这一支展开」而非「只介绍这一支」，原因见本文件前述说明：
-        # 「只」字会让模型把介绍性口吻整个砍掉、退化成机械罗列，人设直接丢失。
-        tail += ("\n用户已经点名了一支具体队伍，本轮就围绕这一支展开："
-                 "成员是谁、怎么打（出手顺序 / 循环）、为什么这么配。")
-    if user_context:
-        # 用户画像（rag/profile.py，user_facts 表）：注入到近因位。措辞是「可参考」
-        # 而非硬要求——画像只是个性化佐料，答错资料比忽略画像严重得多；且不写
-        # negative-example（本文件铁律：反例会被当成样本照抄）。
-        tail += ("\n\n## 这位用户的小档案\n"
-                 f"{user_context}\n"
-                 "回答时可以自然贴合这位玩家的情况（比如TA主玩的角色、熟悉程度），"
-                 "与资料冲突时以资料为准。")
-    if now:
-        # 顺带问了时间（见 intent.mentions_time / chain._now_if_needed）：
-        # 服务端真值放近因位，与「小档案」同级——它只是附带一句，不能挤掉资料主体。
-        # 措辞只写「怎么做」（本文件铁律：不写否定式反例，模型会照抄反例）。
-        tail += ("\n\n## 现在的时间（服务端真实时钟）\n"
-                 f"{now}\n"
-                 "家人这句话里也问了现在的时间，讲资料的同时顺带把它说一句即可。")
-    blocks = blocks or []
-    # 指令必须压在 prompt **末尾**：_SYSTEM 里那条规则实测只能让模型「带上几个数」，
-    # 面对长表仍会概括成「各需不同数量」而不逐行列（实测）。近因位置 + 点名禁止的
-    # 采用保守写法，才能让它回到逐行照抄的状态。
-    #
-    # 注意：不要写成「只照抄那两张表」，该措辞有两个反作用——
-    #  ①「只」字会让模型把技能介绍/人设口吻整个砍掉，退化成纯数据倾倒（实测：
-    #    人设丢失、答案变成机械罗列）；
-    #  ② 点名「突破材料表」会让模型以为该有材料表，于是跑去「## 参考文档」里翻材料
-    #    表一起列出来——问技能却蹦出材料就是这么来的（实测）。
-    # 正确写法：先保住「说人话的介绍」，再只点名**本轮真正补了的那几张表**，
-    # 并显式禁止主动扩列没被问到的内容。
-    #
-    # 变更说明：早先这里有个 `if not blocks: return prompt + tail` 的短路，导致
-    # **无补料场景（共鸣链、剧情、机制问答）拿不到任何格式约束** —— 六链答出
-    # 「暴击伤害80万」那次正是这个场景（blocks 为空，输出格式块整块没进 prompt）。
-    # 现在无论有没有补料都要注入：表格条目按需增减，正文那条（%）是**无条件**的。
-    has_value = any("满级数值表" in b for b in blocks)
-    has_mat = any("突破材料表" in b for b in blocks)
-    lines = ["\n\n## 输出格式（硬要求）"]
-    lines.append("1) 先用你自己的口吻把内容讲清楚（这是什么、怎么打、什么手感），正常说话，"
-                 "不要只丢数字，也不要写成机械报表；")
-    step = 2
-    if has_value:
-        lines.append(f"{step}) 然后把「满级数值表」里每一行都列出来，写成「- 名称：数值」，"
-                     "一行都不许省；")
-        step += 1
-    if has_mat:
-        lines.append(f"{step}) 再把「突破材料表」里每一条都列出来，写成「- 材料名×数量」，"
-                     "一条都不许省；")
-        step += 1
-    # 非表格内容（共鸣链、技能描述、声骸词条都属这块）单独点名：原文是「暴击固定为
-    # 80%，暴击伤害固定为275%」这种带百分号的散文，缺了这条约束就会被复述成
-    # 「八十万暴击伤害」「两百七十五」（实测，见 text.fix_percent_units）。
-    # 表述只写「怎么做」，不写任何反例（本文件铁律：反例会被当成样本照抄）。
-    lines.append(f"{step}) 讲正文（共鸣链、技能、声骸词条等内容）时，原文里的数字连同它"
-                 "后面的单位一起照抄过来，百分号、加号、乘号、倍、秒、层这些都不省略，"
-                 "也不要把数字换成另一种写法。")
-    lines.append("禁止写成「各需不同数量」「材料如上」「数值都在资料里」这类概述，"
-                 "禁止换算、合并、四舍五入或改成中文数字。")
-    if has_mat:
-        lines.append("「## 参考文档」里分等级展开的长表不要照抄，更不要把不同等级、不同技能的"
-                     "材料拼成一张混在一起的清单——数值与材料一律以上面两张表为准，"
-                     "且不要主动列出没被问到的内容。")
-    elif has_value:
-        lines.append("「## 参考文档」里分等级展开的长表（尤其是各种材料表）一律不要照抄，"
-                     "更不要主动列出没被问到的内容——数值只以「满级数值表」为准。")
-    else:
-        # 无补料（共鸣链 / 剧情 / 机制问答）：**绝不能**在这里点名「满级数值表」，
-        # 否则模型会以为该有那张表，跑去「## 参考文档」里翻找并凭空扩列（实测过同类）。
-        # 只保留「按资料原文讲、不扩列」这一条通用约束。
-        lines.append("只讲资料里已有的内容，不要主动扩列没被问到的部分。")
-    return prompt + "\n".join(lines) + tail
 
 
 async def generate_node(state: RagState):
@@ -1013,7 +812,7 @@ async def generate_node(state: RagState):
     """
     # 确定性补料：技能问题补满级数值表、培养问题补突破材料表（见 _value_blocks）
     blocks = await _value_blocks(state)
-    context = _build_context(state, blocks)
+    context = build_context(state, blocks)
     if blocks:
         log.info("补料 %d 块（%s）", len(blocks),
                  " + ".join(b.splitlines()[0].lstrip("# ") for b in blocks))
@@ -1021,7 +820,7 @@ async def generate_node(state: RagState):
     client, is_cloud, emotion_via_cloud = await _chat_client(state, strict=bool(blocks))
     # 混合时间问句（既查资料又问时间，见 intent.mentions_time）：把服务端真值补进 prompt
     now = await _now_if_needed(state)
-    prompt = _build_prompt(context, state["question"], blocks=blocks,
+    prompt = build_prompt(context, state["question"], blocks=blocks,
                            characters=state.get("characters"),
                            team_focus=_named_team(state),
                            user_context=state.get("user_context") or "",
@@ -1052,7 +851,10 @@ async def generate_node(state: RagState):
             # 不再逐 token yield 中间态：前端 token 取自 on_chat_model_stream
             # （llm.astream 自带回调），逐 token yield 只产生无人消费的
             # on_chain_stream 事件；str 字段本就覆盖非拼接，中间值无意义。
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 流式生成必须宽捕获，见下
+        # ⚠️ 绝不能收窄：astream 期间可能出任何错（Ollama 500 / 连接中断 / 解码失败 /
+        # 模型返回畸形 chunk）。这里是**最后一道用户可见兜底**——漏掉一种异常类型，
+        # 用户就会收到一个裸崩而不是「模型服务暂时不可用」。宁可宽捕获保住兜底话术。
         log.error("LLM 调用失败: %s", exc)
         answer_ok = False
         if not full:
@@ -1114,12 +916,34 @@ _TIME_HINT = (
     "把上面的年月日、星期三和括号里的口语说法（上午/下午几点几分）讲出来即可。"
 )
 
-# 「顺带问时间」的场景提示（state.need_time，见 intent.mentions_time）。
+# 「顺带问时间」的场景提示（state.need_time，见 nlu.mentions_time）。
 # 与 _TIME_HINT 的区别：那边整句都在问时间，这边另有一个主诉求（查资料或闲聊），
 # 时间只是附带一句——所以措辞必须点明「别丢掉原来的话题」，否则模型容易只答时间。
 _TIME_ASIDE_HINT = (
     "家人这句话里也问了现在的时间。服务端时钟刚查到：{now}。\n"
     "顺带用你自己的口吻把这个时间讲一句就好，别丢掉上面那个话题本身。"
+)
+
+# 用户画像注入（「不检索」分支专用）。
+#
+# ⚠️ 为什么必须有这一段：`user_context` 原先只在 `generate_node` → `prompt.build_prompt`
+# 里注入，而闲聊走的是 `_chat_turn`（chitchat_node / time_node 共用），**完全拿不到画像**。
+# 后果正是用户报的现象：说「我是颗粒」后昵称确实进了 `user_facts`（实测已入库），
+# 但下一句「你好呀」走闲聊时模型对此一无所知，于是「记住了却用不上」。
+# 自我介绍被 `nlu.is_self_intro` 判进 chitchat 之后，这条注入就成了「记住 → 用得上」的
+# 关键一环，缺它则前一半修复没有意义。
+#
+# ⚠️ 措辞与位置是实测选型定的，改动时别违背这三条：
+#   ① **档案要放在用户原话之后**（近因位）。放之前命中率极低（0~4/8），放最后 7/8 ——
+#      与本模块 `_build_prompt` 把「小档案」「输出格式」压在 prompt 末尾是同一条经验。
+#   ② **措辞越强硬越差**。明确要求「用在开头、直接喊出」反而掉到 1/3，还诱发人称混淆
+#      （模型以为用户叫它「颗粒」）；强调「是这位家人自己希望的叫法」直接 0/8。
+#      当前措辞既点明了称呼归属（是用户的、不是助手的，故零混淆），又没下硬指令。
+#   ③ 仍遵守本模块铁律：只写正面要求，不写反例。
+_PROFILE_HINT = (
+    "## 这位用户的小档案\n"
+    "{profile}\n"
+    "上面这位家人希望你用档案里的称呼喊TA。"
 )
 
 
@@ -1135,7 +959,7 @@ async def _now_if_needed(state: RagState) -> str:
         return ""
     try:
         return await current_time_tool.ainvoke({})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 少说一句时间而已，绝不能让检索主链路跟着挂
         log.error("current_time 工具调用失败（混合时间问句）: %s", exc)
         return ""
 
@@ -1159,7 +983,15 @@ async def _chat_turn(state: RagState, hint: str):
             msgs.append(HumanMessage(content=m["content"]))
         else:
             msgs.append(AIMessage(content=m["content"]))
-    msgs.append(HumanMessage(content=f"{hint}\n\n家人说：{state['question']}"))
+    # 画像注入（见 _PROFILE_HINT）：顺序是「场景 hint → 用户原话 → 画像」。
+    # ⚠️ 画像必须排在**用户原话之后**（近因位）—— 这是实测选型的结果，不是风格偏好：
+    #    同一画像同一问句各抽 8 次，档案放原话之前命中率 4/8，放之后 **7/8**
+    #    （完整对比表见 _PROFILE_HINT 注释）。与本模块 `_build_prompt` 把「输出格式」
+    #    硬要求压在 prompt 末尾是同一条经验。
+    user_ctx = (state.get("user_context") or "").strip()
+    profile_block = _PROFILE_HINT.format(profile=user_ctx) if user_ctx else ""
+    parts = [p for p in (hint, f"家人说：{state['question']}", profile_block) if p]
+    msgs.append(HumanMessage(content="\n\n".join(parts)))
 
     guard = _new_loop_guard()
     full: list[str] = []
@@ -1179,7 +1011,7 @@ async def _chat_turn(state: RagState, hint: str):
             full.append(chunk.content)
             # 同 generate_node：不再逐 token yield 中间态（前端 token 走
             # on_chat_model_stream，此处中间 yield 无人消费）
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 同 generate_node：流式生成必须宽捕获保住兜底话术
         log.error("闲聊生成失败: %s", exc)
         answer_ok = False
         if not full:
@@ -1235,7 +1067,7 @@ async def time_node(state: RagState):
     now = ""
     try:
         now = await current_time_tool.ainvoke({})
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 读不到时钟就让模型如实说没拿到，不中断问答
         log.error("current_time 工具调用失败: %s", exc)
     hint = _TIME_HINT.format(now=now) if now else (
         "家人问的是现在的时间，但服务端时钟这次没读到。"
@@ -1290,7 +1122,7 @@ async def get_chain():
 
 async def _crawl_and_wait(names: list[str], timeout: int = 180) -> bool:
     """对给定角色触发全流水线并阻塞等待；任一角色抓不到(CharacterNotFound)返回 False。
-    用 asyncio.to_thread 跑阻塞的 result.get，避免卡住 FastAPI 事件循环。
+    用 _run_io 跑阻塞的 result.get，避免卡住 FastAPI 事件循环。
     """
     from celery.exceptions import TimeoutError as CeleryTimeout
     results = []
@@ -1301,7 +1133,7 @@ async def _crawl_and_wait(names: list[str], timeout: int = 180) -> bool:
     t0 = time.perf_counter()
     try:
         for r in results:
-            await asyncio.to_thread(r.get, timeout=timeout)
+            await _run_io(r.get, timeout=timeout)
     except CharacterNotFound:
         return False
     except CeleryTimeout:
@@ -1341,7 +1173,7 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "",
     的值原样带进本轮。实测后果：fact/chitchat 分支压根不跑 vector_node，却把上轮
     的 9 条旧文档当成本轮「## 参考文档」拼进 prompt —— 三个不同问题（我的技能有
     哪些 / 在游戏里有没有技能 / 爱弥斯共鸣解放）产出同样 78 字的同一套话；同时
-    _build_context 的零资料判定、verify_knowledge 的审查、前端「N 条引用」全部被
+    prompt.build_context 的零资料判定、verify_knowledge 的审查、前端「N 条引用」全部被
     污染。所以在入口显式清零，用 input_state 覆盖 checkpointer 的旧值。
 
     `history` 只在「重新生成」时传：那一步已经把转录表里要重答的那一轮删掉了，

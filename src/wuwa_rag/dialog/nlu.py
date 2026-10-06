@@ -24,6 +24,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from wuwa_rag.config import get_settings
 from wuwa_rag.core.llm import get_tool_llm
+from wuwa_rag.knowledge.entities import mentioned_names
 from wuwa_rag.ww_logger import get_logger
 
 log = get_logger("rag")
@@ -54,6 +55,95 @@ _IDENTITY_PATTERNS: tuple[str, ...] = (
     r"你的台词", r"你的语音", r"你的语录", r"你的口头禅", r"你的口头语",
     r"你是谁", r"你叫什么", r"你叫啥", r"你的名字", r"你的身份",
 )
+
+# ---------- 自我介绍硬信号 ----------
+# 需求来源：用户发「我是颗粒」这类纯自我介绍，期望走**闲聊**并把昵称写进画像；
+# 实际却因为 `classify()` 对「无槽位且无语义词」的句子兜底返回 `hybrid`，走了全量
+# 检索 → 查不到资料 → `characters` 为空、`verify_node` 的按角色重爬分支不触发 →
+# 额度耗尽落到**联网兜底**（实测复现：`verify_stage='web'`）。
+#
+# 与 `is_identity` 是同一类判据（规则硬信号、零 LLM、判 chitchat），只是方向相反：
+#   · `is_identity`    —— 问**助手自己**的身份（第二人称「你是谁」）；
+#   · `is_self_intro`  —— 陈述**用户自己**的身份（第一人称「我是X」）。
+# 两者语义不重叠，共用同一个 chitchat 分支。
+#
+# ⚠️ 判据用**原句 q**（与 is_identity 一致）：改写器可能把「我是颗粒」改得面目全非。
+# ⚠️ 昵称用**排除句读**的字符类，而不是贪婪的 `.+?`：「我是萌新，守岸人怎么玩」里
+#    `.+?` 会一路吃到句末（结尾锚定允许中间有逗号），把一句真游戏提问误判成自我介绍、
+#    整轮丢掉检索。排除句读后昵称在第一个逗号处就断掉，该句不再命中。
+# ⚠️ **必须显式排除疑问句**：`谁` / `什么` / `吗` / `哪` 都是合法昵称字符，
+#    不排除的话「我是谁」「我叫什么」「我是玩家吗」会被当成自我介绍。这类问句
+#    本身也属闲聊（该走 chitchat），但混进来会让 `is_self_intro` 的语义变得含混，
+#    且「我是导电属性的吗」是**真游戏提问**，绝不能被抢走。
+# ⚠️ 昵称字符类要含拉丁字母与数字：「我的游戏ID是颗粒」的 ID、以及英文昵称都属常见写法。
+#
+# 回归用例见 `tests/test_intent_routing.py`（正负样本成组参数化）：
+#   正样本 = 陈述用户自己（我是颗粒 / 我的游戏ID是颗粒 / 我是新来的 …）；
+#   负样本 = 真游戏提问与疑问句（我是萌新，守岸人怎么玩 / 我是导电属性的吗 / 我是谁 …），
+#   这类绝不能被抢走 —— 抢走就等于整轮丢掉检索。
+# 与 `is_identity` 无重叠：你是谁 / 你叫什么 问的是助手，is_self_intro 陈述的是用户自己。
+_INTRO_NICK = r"([^，。！？、；：?,!;\s]{1,12})"
+# ⚠️ `_INTRO_NICK` **必须是捕获组**：`is_self_intro` 靠 `m.groups()` 把昵称取出来交给
+#    下面的 `_INTRO_BAD_NICK` 过滤。写成非捕获（无括号）时 `groups()` 恒为空、
+#    过滤整段变成死代码——首版就是这么错的（实测「我是谁」「我是玩家吗」全被误判成
+#    自我介绍，而注释却写着「已排除疑问句」）。改正则时别把这层括号弄丢。
+# 昵称位不允许出现的疑问词/虚词/属性名：出现在这里说明整句是疑问或游戏提问，不是陈述。
+_INTRO_BAD_NICK = re.compile(
+    r"^(?:谁|什么|啥|哪|吗|呢|吧|玩家|人|导电|冷凝|热熔|气动|衍射|湮灭)")
+_INTRO_TAIL = r"[了呀呢啊吧嘛哦~～]*[？?。!！~～·.…]*$"
+# 陈述句尾：只收句号/感叹号/语气词，**不收问号**（「我是玩家吗」这类要靠它挡掉）
+_INTRO_TAIL_DECL = r"[了呀呢啊吧嘛哦~～]*[。!！~～·.…]*$"
+_SELF_INTRO_PATTERNS: tuple[str, ...] = (
+    # ① 我是X / 我叫X（可带「大家/你好」类招呼前缀与「记住」类动词）
+    r"^(?:大家好|你好|哈喽|嗨|记住|那个|嗯+)?[，,]?\s*"
+    r"(?:我|人家|本人)(?:就|也|还)?(?:是|叫|名叫|叫做|的?名字(?:是|叫))\s*"
+    + _INTRO_NICK + _INTRO_TAIL_DECL,
+    # ② 你可以叫我X / 叫我X就行 / 喊我X
+    r"^(?:你可以|可以|请|就)?(?:叫我|喊我|称呼我)\s*" + _INTRO_NICK +
+    r"(?:就行|吧|好了|呗)?" + _INTRO_TAIL_DECL,
+    # ③ 我的名字是X / 我的ID是X / 我的游戏ID是X / 我的游戏名是X
+    #    「游戏」是可加可不加的前缀，故写成 `(?:游戏)?`；实测漏掉它就是
+    #    「我的游戏ID是颗粒」判不出来的原因（`游戏名` 匹配不上 `游戏ID`）。
+    r"^我的(?:游戏)?(?:名字|昵称|ID|id|Id|名|网名|称呼)(?:是|叫|为)\s*"
+    + _INTRO_NICK + _INTRO_TAIL_DECL,
+    # ④ 我是新来的 / 我是新人 / 我是萌新（无昵称的水平自述，同属自我介绍）
+    r"^(?:我|人家|本人)是(?:新来的|新人|萌新|新手|老玩家|回归玩家)" + _INTRO_TAIL,
+)
+
+
+def is_self_intro(question: str) -> bool:
+    """整句是不是一个**纯自我介绍**（「我是颗粒」「叫我小星就行」）。
+
+    命中即走 chitchat：这类句子的正确答案只可能来自人设闲聊 + 画像记录，
+    检索游戏资料必然空手而归，而空手而归在 `verify_node` 里会一路升级到联网兜底
+    （用户实测报的现象）。与 `is_identity` 同理，规则能全覆盖、零 LLM 零延迟。
+
+    两段判定，顺序不可换：
+      ① 先用 `_SELF_INTRO_PATTERNS` 抓句式（**陈述句尾**，问号已被 `_INTRO_TAIL_DECL` 挡掉）；
+      ② 再取出昵称部分，用 `_INTRO_BAD_NICK` 排掉「谁/什么/吗/属性名」这类
+         看着像昵称实则是疑问词或游戏术语的命中（「我是导电属性的吗」）。
+
+    ⚠️ 复合句不命中：「我是萌新，守岸人怎么玩」在第一个逗号处就断了昵称匹配，
+    仍照常走检索（用户的主诉求是问守岸人，自我介绍只是顺带）。
+    """
+    s = (question or "").strip()
+    if not s:
+        return False
+    for p in _SELF_INTRO_PATTERNS:
+        m = re.search(p, s)
+        if not m:
+            continue
+        # 取句式末尾那段作为「昵称」候选：正则最后一个分组就是 _INTRO_NICK 或水平自述词。
+        nick = ""
+        for g in reversed(m.groups()):
+            if g:
+                nick = g
+                break
+        # ④ 分支（新来的/萌新…）没有昵称分组，`nick` 取不到，属正常命中。
+        if nick and _INTRO_BAD_NICK.match(nick):
+            continue
+        return True
+    return False
 
 # 时间类硬信号：问「现在几点 / 今天几号 / 星期几 / 当前日期」。
 # 这类问题规则能全覆盖（问法就那么几种），答案来自服务端真实时钟（tools.current_time
@@ -170,12 +260,18 @@ def classify(question: str, slots: list[str]) -> str:
 
 
 def extract_characters(question: str, known: list[str]) -> list[str]:
-    """返回所有命中的角色名（支持「卡卡罗和吟霖谁更强」这类多角色提问）。
-    包含消歧：仅当 A 是 B 的子串时才剔除 A。
-    len>=2 过滤单字，避免「他/她」这类误命中。
+    """返回问句里提到的角色名（支持「卡卡罗和吟霖谁更强」这类多角色提问）。
+
+    判据统一走 `entities.mentioned_names`：**多字名**子串匹配 + 消歧（「秧秧」是
+    「秧秧·玄翎」前缀，同句命中留长的）；**单字名**要求独立成词。
+
+    ⚠️ 这里曾写 `len(n) >= 2` 过滤单字名（注释说是防「他/她」误命中），后果是
+    单字角色名**心**（Hsin）与**椿**永远识别不出来：`characters` 恒空 →
+    `graph.verify_node` 的「按角色清库重爬」分支永不触发 → 额度耗尽落到**联网兜底**。
+    「他/她」本就是代词不在名册里，真正的单字名风险是「核心/关心」这类常用词误命中，
+    已由分词判据解决（实测：心的声骸→命中；核心玩法/关心/开心/心情→不误判）。
     """
-    hits = [n for n in known if n and len(n) >= 2 and n in question]
-    return [h for h in hits if not any(h != o and h in o for o in hits)]
+    return mentioned_names(question, known)
 
 
 # ---------- 主题分类：闲聊 vs 游戏（qwen3:8b agent）----------
@@ -221,7 +317,10 @@ async def classify_topic(question: str) -> str:
             return "game"
         topic = json.loads(m.group(0)).get("topic", "")
         return topic if topic in ("game", "chitchat") else "game"
-    except Exception as exc:
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        log.warning("主题分类：JSON 解析失败，回落 game: %s", exc)
+        return "game"
+    except Exception as exc:  # noqa: BLE001 —— LLM 调用本身的异常也回落，不能阻塞问答
         log.warning("主题分类失败，回落 game: %s", exc)
         return "game"
 
@@ -319,7 +418,7 @@ async def summarize_turns(evicted: list[dict], prev_summary: str) -> str:
             return f"{prev_summary} {_DEGRADED_MARK}".strip()
         log.info("滚动摘要: %r（窗口外 %d 条）", out, len(evicted))
         return out
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 摘要是增益，失败回落原摘要+降级标记，不得阻塞问答
         log.warning("摘要失败，标记降级待下轮修复: %s", exc)
         return f"{prev_summary} {_DEGRADED_MARK}".strip()
 
@@ -362,6 +461,6 @@ async def rewrite_query(
         if out != question:
             log.info("查询改写: %r -> %r", question, out)
         return out
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 改写是增益不是依赖，失败回落原句，不得阻塞问答
         log.warning("查询改写失败，用原句: %s", exc)
         return question

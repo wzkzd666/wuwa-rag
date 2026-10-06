@@ -1,0 +1,121 @@
+[
+  {
+    "id": "fact_echo_manual",
+    "query": "卡卡罗毕业配装用什么声骸",
+    "relevant_chunk_ids": ["卡卡罗::角色养成推荐::声骸推荐::-::3e78bb54"],
+    "scene": "fact",
+    "note": "人工标注：单目标事实型。声骸配装总表就这一块"
+  },
+  {
+    "id": "fact_mat_manual",
+    "query": "今汐一阶突破要什么材料",
+    "relevant_chunk_ids": ["今汐::角色养成::角色突破材料::一阶突破::2cc5818e"],
+    "scene": "fact",
+    "note": "人工标注：阶段限定明确，语料中恰 1 块"
+  },
+  {
+    "id": "chain_manual",
+    "query": "散华共鸣链效果",
+    "relevant_chunk_ids": ["散华::角色养成::共鸣链::-::05ec07c1"],
+    "scene": "fact",
+    "note": "人工标注：散华共鸣链仅 1 块"
+  },
+  {
+    "id": "semantic_mech_manual",
+    "query": "守岸人的核心机制是什么",
+    "relevant_chunk_ids": ["守岸人::Character Strategy::角色机制::核心机制::c712419a"],
+    "scene": "semantic",
+    "note": "人工标注：点名「核心机制」，对应唯一块"
+  },
+  {
+    "id": "multi_team_manual",
+    "query": "吟霖的主流队友有哪些",
+    "relevant_chunk_ids": ["吟霖::Character Strategy::编队&队伍轴推荐::主流队友::087e7649"],
+    "scene": "multi",
+    "note": "人工标注：点名「主流队友」小节"
+  },
+  {
+    "id": "story_manual",
+    "query": "爱弥斯在雪原上的故事",
+    "relevant_chunk_ids": ["爱弥斯::角色档案::角色故事::在雪原上::911f0495"],
+    "scene": "semantic",
+    "note": "人工标注：query 直接引用了 H4 标题「在雪原上」"
+  },
+
+  {
+    "id": "value_table_selector",
+    "query": "长离常态攻击伤害倍率",
+    "relevant_selector": {"characters": ["长离"], "components": ["技能介绍"], "tabs": ["常态攻击"]},
+    "scene": "value_table",
+    "note": "数值表场景（9 块分片）。README 记录的已知难点：11 列宽表在 reranker 眼里输给大段机制描述，生产靠 graph.py 的确定性补料兜底，不靠向量召回"
+  },
+  {
+    "id": "fact_echo_selector",
+    "query": "守岸人的声骸怎么配",
+    "relevant_selector": {"characters": ["守岸人"], "components": ["声骸"]},
+    "scene": "fact",
+    "note": "选择器标注：守岸人声骸相关 3 块（含「声骸套装推荐」）。此前 recall=0 是评测口径错误（未走精排 + topk 误用），非真实缺陷"
+  },
+  {
+    "id": "semantic_play_selector",
+    "query": "守岸人怎么玩",
+    "relevant_selector": {"characters": ["守岸人"], "components": ["角色机制", "战斗风格"]},
+    "scene": "semantic",
+    "note": "语义型：「怎么玩」对应机制与战斗风格两类"
+  },
+
+  {
+    "id": "single_char_echo",
+    "query": "心的声骸怎么配",
+    "relevant_selector": {"characters": ["心"], "components": ["声骸"]},
+    "scene": "single_char",
+    "note": "🔴 单字角色核心回归：修复前 characters=[] → 图谱空 → verify 升级到联网兜底"
+  },
+  {
+    "id": "single_char_mat",
+    "query": "心的突破材料要多少",
+    "relevant_selector": {"characters": ["心"], "components": ["角色突破材料"]},
+    "scene": "single_char",
+    "note": "单字角色 + 阶段无关的材料类"
+  },
+  {
+    "id": "single_char_play",
+    "query": "椿怎么玩",
+    "relevant_selector": {"characters": ["椿"], "components": ["角色机制", "战斗风格"]},
+    "scene": "single_char",
+    "note": "单字角色语义型"
+  },
+  {
+    "id": "single_char_mech",
+    "query": "椿的核心机制是什么",
+    "relevant_selector": {"characters": ["椿"], "components": ["角色机制"]},
+    "scene": "single_char",
+    "note": "单字角色机制类"
+  },
+  {
+    "id": "multi_single_char",
+    "query": "卡卡罗和心的声骸分别怎么配",
+    "relevant_selector": {"characters": ["卡卡罗", "心"], "components": ["声骸"]},
+    "scene": "multi_single_char",
+    "note": "多角色 + 单字名：验证每角色各补一轮召回"
+  },
+
+  {
+    "id": "neg_weather",
+    "query": "今天杭州天气怎么样",
+    "scene": "negative",
+    "note": "🔴 真域外样本：期望精排 RERANK_MIN_SCORE 闸门判空（实测 0 条，正确）"
+  },
+  {
+    "id": "neg_other_game",
+    "query": "原神里钟离的圣遗物怎么配",
+    "scene": "negative",
+    "note": "跨游戏域外：术语相近（圣遗物≈声骸）但语料里没有，实测 0 条。这是最有价值的负样本——考验闸门能否挡住「像但不是」"
+  },
+  {
+    "id": "neg_code",
+    "query": "帮我写一个快速排序",
+    "scene": "negative",
+    "note": "编程域外，实测 0 条"
+  }
+]

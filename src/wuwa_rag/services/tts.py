@@ -260,7 +260,7 @@ async def available(user_id: int | None = None) -> bool:
     """
     try:
         rt, _ = await resolve(user_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 —— 见上：可选增强不得反噬主链路
         log.warning("TTS 可用性判定失败（按不可用处理）：%s", type(exc).__name__)
         return False
     return rt is not None

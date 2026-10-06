@@ -29,7 +29,13 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, stored: str) -> bool:
-    """格式不对/参数不对一律返回 False，不抛异常（老数据兼容）。"""
+    """格式不对/参数不对一律返回 False，不抛异常（老数据兼容）。
+
+    只吞「stored 字符串格式不合法」这类可预期异常：
+      - `ValueError`：`split("$")` 解包数量不对（不是 3 段）、`bytes.fromhex` 遇非法十六进制；
+      - `AttributeError` / `TypeError`：老数据里 stored 为 None 或非字符串。
+    其余异常（如 hashlib 本身故障）属于编程/环境错误，应该冒出来而不是被当成「密码错」。
+    """
     try:
         algo, salt_hex, hash_hex = stored.split("$")
         if algo != "scrypt":
@@ -38,5 +44,5 @@ def verify_password(password: str, stored: str) -> bool:
             password.encode("utf-8"), salt=bytes.fromhex(salt_hex), n=2**14, r=8, p=1
         )
         return hmac.compare_digest(h.hex(), hash_hex)
-    except Exception:
+    except (ValueError, AttributeError, TypeError):
         return False
