@@ -35,7 +35,12 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from wuwa_rag.dialog import nlu as nlu_mod
-from wuwa_rag.dialog.nlu import is_identity, is_self_intro, veto_ambiguous_names
+from wuwa_rag.dialog.nlu import (
+    asks_about_own_nickname,
+    is_identity,
+    is_self_intro,
+    veto_ambiguous_names,
+)
 
 # (问句, 期望 intent, 期望 characters)。期望值取自 2026-10-06 实测（主题分类器 stub 成 game）。
 ROUTE_CASES = [
@@ -180,3 +185,44 @@ async def test_裁决_多字名不送去模型(monkeypatch) -> None:
     monkeypatch.setattr(nlu_mod, "get_tool_llm", lambda: llm)
     assert await veto_ambiguous_names("守岸人配队", ["守岸人"]) == ["守岸人"]
     assert llm.seen == []
+
+
+# ---------- 「问用户自己是谁」（is_self_intro 的疑问形态）----------
+
+def test_问自己是谁_只认画像里的昵称且只认疑问句() -> None:
+    """「颗粒是谁」曾走向量检索 → 答成爱弥斯自述（用户实测）。
+
+    修法是把它判进 chitchat：正确答案只可能来自画像（user_facts 里有
+    「用户自称是颗粒」），检索必然空手。昵称从画像文本里取，不硬编码任何名字。
+    """
+    ctx = "用户自称是颗粒"
+    # 疑问形态：命中
+    for q in ("颗粒是谁", "颗粒叫什么", "颗粒是谁呀", "颗粒是哪位", "颗粒是什么人"):
+        assert asks_about_own_nickname(q, ctx), q
+    # 游戏角色问句不受影响（「谁」不等于在问用户）
+    assert not asks_about_own_nickname("守岸人是谁", ctx)
+    assert not asks_about_own_nickname("心是谁", ctx)
+    # 昵称不在问句里 → 不命中（不能把「守岸人是颗粒吗」这类也拉进闲聊）
+    assert not asks_about_own_nickname("守岸人是颗粒吗", ctx)
+    # 是非问不算「问是谁」
+    assert not asks_about_own_nickname("颗粒是不是萌新", ctx)
+    # 画像为空 → 判定不了就不猜
+    assert not asks_about_own_nickname("颗粒是谁", "")
+    # 换个昵称自动生效（证明没硬编码）
+    assert asks_about_own_nickname("小星是谁", "用户自称是小星")
+
+
+async def test_问自己是谁_已在意图路由里判进闲聊(offline_intent) -> None:
+    """端到端过一遍 intent_node：必须落在 chitchat，且不指向任何游戏角色。
+
+    走 offline_intent 夹具（stub 名册/改写/主题分类器），所以这条断言证明的是
+    **规则本身**独立生效 —— 即使主题分类器被 stub 成一律 'game'（最坏情形），
+    仍然判 chitchat。
+    """
+    st = await offline_intent("颗粒是谁", user_context="用户自称是颗粒")
+    assert st["intent"] == "chitchat", st
+    assert not st.get("characters"), st
+    # 反例对照：同样带「谁」，但没指名用户昵称 → 仍走检索（游戏问题不受影响）
+    st2 = await offline_intent("守岸人是谁", user_context="用户自称是颗粒")
+    assert st2["intent"] != "chitchat", st2
+    assert st2.get("characters") == ["守岸人"], st2

@@ -27,9 +27,10 @@ from pydantic import BaseModel, Field
 
 from wuwa_rag.api import auth as authn
 from wuwa_rag.api import ratelimit as rl
+from wuwa_rag.api import usage as usage_api
 from wuwa_rag.config import get_settings
 from wuwa_rag.core import conversations as conv
-from wuwa_rag.core import llmstore
+from wuwa_rag.core import llmstore, usage
 from wuwa_rag.core.authdb import close_pool, ensure_schema
 from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
@@ -82,6 +83,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="wuwa-rag", version="0.9", lifespan=lifespan)
+# 用量看板 / 答案反馈（见 api/usage.py：普通用户只能看自己的用量）
+usage_api.install(app)
 
 # ── 限流 ─────────────────────────────
 # ⚠️ 必须在 CORS **之前**安装：Starlette 里后添加的中间件位于**最外层**，
@@ -401,6 +404,15 @@ async def _stream_answer(user: authn.AuthUser, tid: str, question: str,
     两条入口各写一遍落库逻辑，迟早会走偏（比如只有一边补了 meta）。
     """
     key = conv.thread_key(user.id, tid)
+    # 计量归属（见 api_ask）。SSE 是一次性生成器，scope 必须包住整个迭代过程：
+    # 只在「建生成器时」设一次是无效的（contextvar 不会跨任务继承给新任务）。
+    with usage.scope(user_id=str(user.id), username=user.username, thread_id=key):
+        async for evt in _stream_answer_inner(user, tid, question, key, history):
+            yield evt
+
+
+async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, key: str,
+                               history: list[dict] | None = None):
     user_ctx = await _user_context(user)
     await conv.ensure_conversation(user.id, tid, question)
     await conv.append_message(user.id, tid, "user", question)
@@ -440,7 +452,10 @@ async def api_ask(request: Request, body: AskIn,
     await conv.ensure_conversation(user.id, tid, body.question)
     await conv.append_message(user.id, tid, "user", body.question)
 
-    r = await ask(body.question, key, user_context=await _user_context(user), user_id=user.id)
+    # 计量归属：contextvar 一声明，本次问答里所有 LLM 调用（作答 + 工具任务）自动记到这个人名下
+    with usage.scope(user_id=str(user.id), username=user.username, thread_id=key):
+        r = await ask(body.question, key, user_context=await _user_context(user),
+                      user_id=user.id)
     log.info("ask thread=%s 意图=%s 角色=%s", key, r.get("intent"), r.get("characters"))
     answer = r.get("answer") or ""
     if answer:
@@ -849,29 +864,57 @@ async def api_llm_config_delete(user: authn.AuthUser = Depends(authn.get_current
 
 @app.post("/ingest")
 async def api_ingest(body: IngestIn,
-                     user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+                     user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """把一个角色塞进异步流水线，立即返回 chain_id。
 
     先建 `crawl_runs` 行再入队：**提交人只有 API 知道**（worker 只知道自己跑了什么），
     行 id 作为 run_id 交给 crawl 步复用同一行，所以这份账本刷新页面/换设备都还在。
+
+    权限：**任何登录用户**都可提交（用户四项权限之一）。
     """
-    run_id = await asyncio.to_thread(_create_crawl_run, body.character, user.username)
+    run_id = await asyncio.to_thread(_create_crawl_run, body.character, user)
     r = build_pipeline(body.character, run_id).apply_async()
     await asyncio.to_thread(_set_chain_id, run_id, r.id)
     return {"character": body.character, "chain_id": r.id, "state": r.state, "run_id": run_id}
 
 
-def _create_crawl_run(character: str, username: str) -> int:
-    """提交时建一行 crawl_runs（同步驱动，跑在线程里）。返回行 id。"""
+def _create_crawl_run(character: str, user: authn.AuthUser) -> int:
+    """提交时建一行 crawl_runs（同步驱动，跑在线程里）。返回行 id。
+
+    `submitted_by` 存 user.id（授权判定用它），`submitted_by_name` 存用户名（只给人看）。
+    """
     with psycopg.connect(get_settings().PG_DSN) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO crawl_runs (status, stats, character, submitted_by,"
                 " submitted_by_name) VALUES ('running', %s, %s, %s, %s) RETURNING id",
                 (json.dumps({"character": character}, ensure_ascii=False), character,
-                 str(username), str(username)),
+                 str(user.id), user.username),
             )
             return cur.fetchone()[0]
+
+
+def _may_control(user: authn.AuthUser, submitted_by: str | None) -> bool:
+    """能不能暂停/继续/取消/删除这条提交：admin 全可以；普通用户只限**自己提交的**。"""
+    return user.is_admin or (submitted_by is not None and submitted_by == str(user.id))
+
+
+def _require_may_control(user: authn.AuthUser, submitted_by: str | None) -> None:
+    if not _may_control(user, submitted_by):
+        raise HTTPException(status_code=403, detail="只能操作自己提交的入库任务")
+
+
+def _latest_submitter(character: str) -> str | None:
+    """该角色最近一次提交的 `submitted_by`（控制是按角色的，授权要跟着它走）。"""
+    with psycopg.connect(get_settings().PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT submitted_by FROM crawl_runs WHERE character = %s"
+                " ORDER BY started_at DESC LIMIT 1",
+                (character,),
+            )
+            row = cur.fetchone()
+    return row[0] if row else None
 
 
 def _set_chain_id(run_id: int, chain_id: str) -> None:
@@ -882,7 +925,7 @@ def _set_chain_id(run_id: int, chain_id: str) -> None:
 
 @app.get("/ingest/records")
 async def api_ingest_records(limit: int = 20,
-                             user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+                             user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """最近的抓取/入库提交记录（服务端真值，含提交人），按提交时间倒序。
 
     `status` 是**实时**流水线状态：从 Redis 进度键按角色读出来叠加。
@@ -921,20 +964,27 @@ async def api_ingest_records(limit: int = 20,
             "created_at": r["started_at"].isoformat() if r["started_at"] else None,
             "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None,
             "status": live,
+            # 前端不自己判身份（它拿不到 user.id），一律照服务端给的 can_control 显示按钮
+            "can_control": _may_control(user, r["submitted_by"]),
         })
     return {"items": items, "total": len(items)}
 
 
 @app.delete("/ingest/records/{record_id}")
 async def api_ingest_record_delete(record_id: int,
-                                   user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
-    """删掉一条提交记录（只删账本，不碰后台正在跑的流水线；要停请先 POST /ingest/control）。"""
+                                   user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
+    """删掉一条提交记录（只删账本，不碰后台正在跑的流水线；要停请先 POST /ingest/control）。
+
+    权限：admin 随便删；普通用户只能删**自己提交的**那几条。
+    """
     with psycopg.connect(get_settings().PG_DSN) as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM crawl_runs WHERE id = %s RETURNING character", (record_id,))
+            cur.execute("SELECT character, submitted_by FROM crawl_runs WHERE id = %s", (record_id,))
             row = cur.fetchone()
-    if row is None:
-        raise HTTPException(status_code=404, detail="记录不存在")
+            if row is None:
+                raise HTTPException(status_code=404, detail="记录不存在")
+            _require_may_control(user, row[1])
+            cur.execute("DELETE FROM crawl_runs WHERE id = %s", (record_id,))
     return {"id": record_id, "character": row[0]}
 
 
@@ -956,8 +1006,11 @@ def _live_status(snap: dict | None) -> str:
 
 @app.get("/ingest/status")
 async def api_ingest_status(character: str,
-                            user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+                            user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """按角色查入库进度（worker 侧 _progress_mark 写 Redis 聚合键）。
+
+    权限：**任何登录用户**可读（前端要靠它轮询五步进度；提交本身已对所有登录用户开放，
+    读不到自己的进度就没法用）。它只是进度快照，不含任何管理动作。
 
     不依赖 chain_id：/ingest 返回的 chain_id 刷新页面就丢了，而进度键按角色
     天然可查。steps 恒为五步数组（含中文标签），整体 status：
@@ -993,13 +1046,15 @@ async def api_ingest_status(character: str,
 
 @app.post("/ingest/control")
 async def api_ingest_control(body: IngestControlIn,
-                            user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+                            user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """暂停 / 继续 / 取消一条正在跑的入库链（按角色，不是按 chain_id）。
 
     实现是**每步开头自查 Redis 旗标**（见 worker.wait_if_paused），不用
     `celery revoke`：五步是 chain 串联，revoke 只能停掉单个 task_id，停链尾那一步时
     前面几步照跑，表现为「点了取消还在跑」。
     """
+    submitter = await asyncio.to_thread(_latest_submitter, body.character)
+    _require_may_control(user, submitter)
     await asyncio.to_thread(set_control, body.character, body.action)
     ctl = await asyncio.to_thread(get_control, body.character)
     return {"character": body.character, "action": body.action,

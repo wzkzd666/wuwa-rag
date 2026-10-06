@@ -61,7 +61,7 @@ def offline_intent(monkeypatch, roster):
     会话级 fixture 拿不到 monkeypatch（pytest 不提供 session 版），
     写成 session 会在收集期直接报 fixture 未找到。
 
-    返回一个可 await 的函数：(question, history=None, summary=None) -> dict
+    返回一个可 await 的函数：(question, history=None, summary=None, user_context='') -> dict
     """
 
     async def _fake_known() -> list[str]:
@@ -77,11 +77,15 @@ def offline_intent(monkeypatch, roster):
     monkeypatch.setattr(graph_mod, "rewrite_query", _fake_rewrite)
     monkeypatch.setattr(graph_mod, "classify_topic", _fake_topic)
 
-    async def _ask(question: str, history=None, summary: str = "") -> dict:
+    async def _ask(question: str, history=None, summary: str = "",
+                   user_context: str = "") -> dict:
+        # user_context 是**画像注入串**（见 services.profile.facts_to_context）：
+        # 「问用户自己是谁」这条判据要从里面取昵称，所以必须能传进来。
         state = {
             "question": question,
             "history": history or [],
             "context_summary": summary,
+            "user_context": user_context,
         }
         return await graph_mod.intent_node(state)
 

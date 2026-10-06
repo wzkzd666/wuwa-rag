@@ -29,6 +29,7 @@ from langchain_openai import ChatOpenAI
 
 from wuwa_rag.config import get_settings
 from wuwa_rag.core import llmstore
+from wuwa_rag.core.usage import UsageCollector
 from wuwa_rag.ww_logger import get_logger
 
 log = get_logger("llm")
@@ -40,6 +41,7 @@ _CLOUD_MAX_RETRIES = 1
 
 def _build_ollama(
     model: str, temperature: float, num_predict: int, repeat_penalty: float | None = None,
+    scene: str = "tool",
 ) -> Runnable:
     """构造 ChatOllama 并 bind(think=False) 固化关思考。
 
@@ -64,6 +66,9 @@ def _build_ollama(
         top_p=s.LLM_TOP_P,
         top_k=s.LLM_TOP_K,
         seed=None if s.LLM_SEED < 0 else s.LLM_SEED,
+        # 用量计量：挂在**客户端**上，这个客户端的每次 invoke/astream 都会自动上报，
+        # 归属（user/thread）由 core.usage.scope() 的 contextvar 提供，调用点无感。
+        callbacks=[UsageCollector(scene=scene, provider="local", model=model)],
     )
     # think=False 只能作为调用级参数（ChatOllama 无 think 字段），bind 固化到实例上
     return llm.bind(think=False) if s.LLM_NO_THINK else llm
@@ -73,7 +78,8 @@ def _build_ollama(
 def _chat_llm(repeat_penalty: float) -> Runnable:
     """按惩罚档位缓存实例，避免每轮重建。"""
     s = get_settings()
-    return _build_ollama(s.LLM_MODEL, s.LLM_TEMPERATURE, s.MAX_TOKENS, repeat_penalty)
+    return _build_ollama(s.LLM_MODEL, s.LLM_TEMPERATURE, s.MAX_TOKENS, repeat_penalty,
+                         scene="chat")
 
 
 _CLOUD_CACHE: dict[tuple, Runnable] = {}   # (base_url, model, key指纹, strict) → 实例
@@ -101,6 +107,8 @@ def _build_openai(cfg: dict, strict: bool) -> Runnable:
         presence_penalty=s.CHAT_CLOUD_PRESENCE_PENALTY,
         timeout=_CLOUD_TIMEOUT,
         max_retries=_CLOUD_MAX_RETRIES,
+        # 云端按 token 计价，用量必须单独记（provider=cloud），不能和本地混算
+        callbacks=[UsageCollector(scene="chat", provider="cloud", model=cfg["model"])],
     )
 
 

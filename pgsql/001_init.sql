@@ -107,6 +107,48 @@ CREATE INDEX IF NOT EXISTS ix_crawl_runs_started ON crawl_runs(started_at DESC);
 UPDATE crawl_runs SET character = stats ->> 'character'
 WHERE character IS NULL AND stats ? 'character';
 
+-- ========== LLM 用量与答案反馈（管理员看板的数据源）==========
+-- 用量：每次 LLM 调用一行。provider 分 local/cloud —— 本地 aemeath/qwen3 不烧钱、
+-- 云端按 token 计价，两者的成本口径完全不同，混在一起算等于没有。
+-- scene 标出这次调用是干什么的：chat 最终作答 / tool 工具任务 / verify 校验 / emotion 情绪…
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id                BIGSERIAL PRIMARY KEY,
+    user_id           TEXT,                    -- 未登录/无归属时为空（如 CLI）
+    username          TEXT,
+    thread_id         TEXT,
+    scene             TEXT        NOT NULL,   -- chat | tool | verify | emotion | other
+    provider          TEXT        NOT NULL,   -- local | cloud
+    model             TEXT        NOT NULL,
+    prompt_tokens     INTEGER     NOT NULL DEFAULT 0,
+    completion_tokens INTEGER     NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_llm_usage_created ON llm_usage(created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_llm_usage_user    ON llm_usage(user_id, created_at DESC);
+
+-- 反馈：点赞/点踩 + 可选文字 + 当时的问答快照。
+-- 为什么存快照而不只存 thread_id：反馈是**事后**分析用的，问答原文可能已被清理或
+-- 随会话滚动出窗口；只留 id 的话管理员点开时可能已经看不到当时答了什么。
+CREATE TABLE IF NOT EXISTS answer_feedback (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    TEXT        NOT NULL,
+    username   TEXT        NOT NULL,
+    thread_id  TEXT        NOT NULL,
+    target_id  TEXT        NOT NULL,           -- 被评价的那条回答（前端消息 id）
+    rating     SMALLINT    NOT NULL,          -- 1 满意 / -1 不满意
+    comment    TEXT,                          -- 可选补充说明
+    question   TEXT,
+    answer     TEXT,
+    provider   TEXT,
+    model      TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_feedback_created ON answer_feedback(created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_feedback_user    ON answer_feedback(user_id, created_at DESC);
+-- 同一回答重复提交时覆盖（用户改主意、或前端重试），避免看板被连点灌水
+CREATE UNIQUE INDEX IF NOT EXISTS ux_feedback_target
+    ON answer_feedback(user_id, target_id);
+
 -- ========== 记忆四表 ==========
 CREATE TABLE IF NOT EXISTS messages (              -- 只追加，永不删改
     id         BIGSERIAL PRIMARY KEY,

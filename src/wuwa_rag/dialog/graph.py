@@ -16,6 +16,7 @@ from wuwa_rag.core.llm import get_chat_llm
 from wuwa_rag.dialog.guard import LoopGuard, trim_loop
 from wuwa_rag.dialog.memory import get_checkpointer
 from wuwa_rag.dialog.nlu import (
+    asks_about_own_nickname,
     classify,
     classify_topic,
     detect_element,
@@ -322,6 +323,14 @@ async def intent_node(state: RagState) -> dict:
     if pure_time:
         intent = "time"
     elif (is_identity(q) or is_self_intro(q)) and not slots:
+        intent = "chitchat"
+    # 「颗粒是谁」= 用户在问**自己**是谁。`is_self_intro` 只认陈述句，疑问形态一条不中，
+    # 于是走向量检索 → 游戏库里没这个人 → 答案由人设编出来（实测答成了爱弥斯自述）。
+    # 昵称取自画像文本（实测 user_facts 里有「用户自称是颗粒」），画像为空则不命中 ——
+    # 判定不了就不硬猜。走 chitchat 后 `generate_node` 的 `_PROFILE_HINT` 会把昵称
+    # 点到模型眼前，答案直接来自画像，不检索、不联网。
+    elif (not slots and not chars
+          and asks_about_own_nickname(q, state.get("user_context") or "")):
         intent = "chitchat"
     elif not chars and not slots and not stage and not element:
         topic = await classify_topic(sq)

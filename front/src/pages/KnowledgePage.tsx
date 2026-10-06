@@ -217,6 +217,13 @@ export default function KnowledgePage() {
 
   // 置顶显示的提交：正在跑的 + 刚失败的（含提交本身就失败的）。
   // 「已取消」不置顶 —— 那是我自己点的，落回下面的提交记录即可。
+  // 哪些角色的任务**当前登录者**能控：服务端逐行给了 can_control（前端拿不到 user.id，
+  // 自己按用户名/角色猜必然出现「按钮能点但后端 403」）。
+  const controllable = useMemo(
+    () => new Set(records.filter((r) => r.can_control).map((r) => r.character)),
+    [records],
+  )
+
   const pinnedIngests = useMemo(
     () =>
       ingests.filter((r) => {
@@ -368,10 +375,12 @@ export default function KnowledgePage() {
         </div>
       )}
 
-      {/* ============ 收录新角色（仅管理员，置顶） ============
+      {/* ============ 收录新角色（所有登录用户，置顶） ============
           放在「已收录列表」之上：列表会长到需要翻页，收新角色是这页最常用的动作，
-          不该被压在几十行表格下面。 */}
-      {isAdmin ? (
+          不该被压在几十行表格下面。
+          权限：提交 / 暂停 / 取消 / 删除**自己**提交的记录 —— 四项对所有登录用户开放；
+          「重爬」与「删除知识库」仍是 admin 专属（按钮各自按 isAdmin 渲染）。 */}
+      {(
         <section className="card kb-form">
           <label className="kb-label">收录新角色（可输入名册外的任意角色名，会自动去 wiki 抓取）</label>
           <div className="kb-form-row">
@@ -418,10 +427,6 @@ export default function KnowledgePage() {
             ))}
           </div>
         </section>
-      ) : (
-        <div className="kb-warn">
-          <Info size={15} /> 收录 / 重爬 / 删除需要管理员账号（admin）登录。你当前是游客，可以正常问答。
-        </div>
       )}
 
       {/* ============ 已收录角色（核心） ============ */}
@@ -463,6 +468,7 @@ export default function KnowledgePage() {
             {pinnedIngests.map((r) => {
               const st = progress[r.character]
               const busy = pendingChars.includes(r.character)
+              const mine = controllable.has(r.character)
               const why = failureOf(st) || r.error || ''
               return (
                 <div className="kb-pin-row" key={r.id}>
@@ -472,7 +478,11 @@ export default function KnowledgePage() {
                     {why && <span className="kb-pin-why">{why}</span>}
                   </div>
                   <div className="kb-pin-ctl">
-                    {st?.status === 'failed' && !busy ? (
+                    {!mine ? (
+                      <span className="kb-pin-ro" title="这条是别人提交的，只有本人或管理员能操作">
+                        只读
+                      </span>
+                    ) : st?.status === 'failed' && !busy ? (
                       <button
                         className="btn btn-ghost btn-sm"
                         onClick={() => submit(r.character)}
@@ -651,7 +661,7 @@ export default function KnowledgePage() {
                   <td>{renderRecordStatus(r, progress[r.character])}</td>
                   <td className="kb-time">{fmtTime(r.created_at)}</td>
                   <td className="kb-act-col">
-                    {isAdmin && (
+                    {r.can_control && (
                       <div className="kb-actions">
                         <button
                           className="btn btn-ghost btn-sm kb-btn-danger"

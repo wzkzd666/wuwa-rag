@@ -14,6 +14,7 @@ import {
   LogOut,
   ShieldCheck,
   User as UserIcon,
+  BarChart3,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { pickImageFile, fileToDataUrl, formatBytes, dataUrlBytes } from '../lib/image'
@@ -22,6 +23,8 @@ import './Layout.css'
 const NAV = [
   { to: '/', label: '问答', icon: MessageSquare, end: true, title: '智能问答' },
   { to: '/knowledge', label: '知识库', icon: Library, title: '角色知识库' },
+  { to: '/usage', label: '用量', icon: BarChart3, title: 'token 用量' },
+  { to: '/feedback', label: '反馈', icon: MessageSquare, title: '答案反馈' },
   { to: '/history', label: '历史', icon: History, title: '历史会话' },
   { to: '/settings', label: '设置', icon: Settings, title: '设置' },
 ]

@@ -1,7 +1,8 @@
 import type {
-  AskOut, ConversationDetail, ConversationMeta, IngestOut, IngestRecordRow, IngestStatus, KnowledgeOut, LlmConfig,
+  AskOut, ConversationDetail, ConversationMeta, FeedbackList, IngestOut, IngestRecordRow,
+  IngestStatus, KnowledgeOut, LlmConfig,
   LlmConfigIn, LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus,
-  UserFact,
+  UsageSummary, UserFact,
 } from '../types'
 
 /**
@@ -400,4 +401,49 @@ export function askStream(
   base?: string,
 ): { controller: AbortController; done: Promise<void> } {
   return sseStream('/ask/stream', { question, thread_id: threadId }, onEvent, base)
+}
+
+/** GET /usage/summary —— 近 N 天 token 用量。普通用户只会拿到自己那一行（后端强制） */
+export function usageSummary(days: number, user?: string, base?: string): Promise<UsageSummary> {
+  const q = user ? `&user=${encodeURIComponent(user)}` : ''
+  return request(`/usage/summary?days=${days}${q}`, { method: 'GET' }, base)
+}
+
+/** POST /feedback —— 对一条回答点赞/点踩（可带文字），重复提交视为改主意 */
+export function feedbackSubmit(
+  body: {
+    thread_id: string
+    target_id: string
+    rating: 1 | -1
+    comment?: string
+    question?: string
+    answer?: string
+    provider?: string
+    model?: string
+  },
+  base?: string,
+): Promise<{ id: number; rating: number }> {
+  return request('/feedback', { method: 'POST', body: JSON.stringify(body) }, base)
+}
+
+/** GET /feedback —— 反馈列表（普通用户只看自己的，管理员看全员） */
+export function feedbackList(days: number, base?: string): Promise<FeedbackList> {
+  return request(`/feedback?days=${days}`, { method: 'GET' }, base)
+}
+
+/** GET /feedback/mine —— 我点过哪些回答（避免重复弹窗） */
+export function feedbackMine(
+  targetIds: string[],
+  base?: string,
+): Promise<{ ratings: Record<string, number> }> {
+  const q = targetIds.slice(0, 200).join(',')
+  return request(`/feedback/mine?target_ids=${encodeURIComponent(q)}`, { method: 'GET' }, base)
+}
+
+/** DELETE /feedback/{id} —— 删掉一条反馈（管理员任意 / 普通用户仅自己的） */
+export function feedbackDelete(
+  id: number,
+  base?: string,
+): Promise<{ id: number; character: string | null }> {
+  return request(`/feedback/${id}`, { method: 'DELETE' }, base)
 }

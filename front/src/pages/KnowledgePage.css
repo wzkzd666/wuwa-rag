@@ -386,3 +386,10 @@
   font-size: 12.5px;
   white-space: nowrap;
 }
+
+/* 别人的提交：只读标记（中性色，别用失败红） */
+.kb-pin-ro {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}

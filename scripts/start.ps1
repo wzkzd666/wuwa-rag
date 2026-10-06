@@ -8,7 +8,8 @@
       3) 幂等应用建表 SQL               —— pgsql/001_init.sql（全 IF NOT EXISTS）
       4) Celery worker                  —— 独立窗口，--pool=solo（Windows 必须）
       5) FastAPI                        —— 独立窗口，:8000
-      6) 前端 Vite                      —— 独立窗口，:5173
+      6) 等待 /health 200 后再起前端      —— 顺序反了会刷一片 ECONNREFUSED
+      7) 前端 Vite                      —— 独立窗口，:5173
       7) 轮询 /health 就绪 + 检查 Ollama aemeath 模型
     各后台窗口 PID 记录到 .runtime/dev.pids.json，供 stop.ps1 精准关闭。
     生成模型由 Ollama 承载（LLM_URL=:11434，模型名 aemeath），无需另起本地推理服务。
@@ -203,7 +204,22 @@ try {
     Start-ServiceWindow -Name 'api' -Title '潮声智库 · FastAPI :8000' -WorkDir $Root `
         -Command '$env:WUWA_LOG_ROLE=''api''; uv run python -m wuwa_rag.api.server' | Out-Null
 
-    # ========== 5. 前端 Vite ==========
+    # ========== 5. 等后端就绪，再开前端 ==========
+    # ⚠️ 顺序很关键：**必须先等 /health 返回 200 再启动前端**。
+    # 反过来的话 vite 秒级就绪，浏览器（以及早就开着的旧标签页）立刻开始轮询
+    # /health、/auth/me、/conversations…，而后端还在启动 —— 那 2~3 秒的空窗里
+    # 代理会刷出一片 ECONNREFUSED（用户实测「问题依旧存在」的根因）。
+    Write-Step '等待后端 /health 就绪'
+    $apiReady = Wait-Until -TimeoutSec 120 -IntervalMs 1500 -What 'API' -Test {
+        try {
+            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 3
+            return ($r.StatusCode -eq 200)
+        } catch { return $false }
+    }
+    if ($apiReady) { Write-Ok 'FastAPI /health 返回 200' }
+    else { Write-Warn2 'API 未在 120s 内就绪，请看「FastAPI :8000」窗口日志（首次加载模型较慢）' }
+
+    # ========== 6. 前端 Vite ==========
     if (-not $NoFront) {
         Write-Step '启动前端 Vite（:5173）'
         if (Test-Path (Join-Path $FrontDir 'node_modules')) {
@@ -219,17 +235,6 @@ try {
     }
 
     Save-Pids
-
-    # ========== 6. 等待 API 就绪 ==========
-    Write-Step '等待后端 /health 就绪'
-    $apiReady = Wait-Until -TimeoutSec 120 -IntervalMs 1500 -What 'API' -Test {
-        try {
-            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 3
-            return ($r.StatusCode -eq 200)
-        } catch { return $false }
-    }
-    if ($apiReady) { Write-Ok 'FastAPI /health 返回 200' }
-    else { Write-Warn2 'API 未在 120s 内就绪，请看「FastAPI :8000」窗口日志（首次加载模型较慢）' }
 
     # ========== 7. Ollama 模型检查 ==========
     Write-Step '检查 Ollama 生成模型（aemeath）'

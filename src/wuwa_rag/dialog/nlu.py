@@ -145,6 +145,38 @@ def is_self_intro(question: str) -> bool:
         return True
     return False
 
+# ---- 「问用户自己是谁」（与 is_self_intro 同族的**疑问**形态）----
+#
+# 为什么需要：`is_self_intro` 只认**陈述句**（「我是颗粒」「叫我小星」），
+# 疑问形态「颗粒是谁」一条都不命中 → 走向量检索 → 游戏库里没有这个人 → 答案只可能
+# 由人设编出来。用户实测到的正是这个：问「颗粒是谁」，答的却是爱弥斯自述
+# （「粉发金瞳、话多又爱笑的女孩」）。
+#
+# 昵称从**画像文本**里取（`facts_to_context` 的输出，形如「用户自称是颗粒」），
+# 而不是硬编码任何名字：换个用户、换个昵称都自动生效，没有维护成本。
+# 昵称为空（还没画像）时返回 False —— 此时判定不了也不该硬猜。
+_PROFILE_NICK_RE = re.compile(
+    r"用户(?:自称|的名字)?(?:是|叫做?|叫)\s*([^\s，。！？、,!?：:]{1,12})"
+)
+# 疑问形态：问身份/称呼。刻意**不**收「是不是」「对不对」这类是非问 —— 那是确认，
+# 不是问「你是谁」。
+_ASK_NICK_RE = re.compile(r"(是谁|叫什么|怎么称呼|是哪位|是什么人|什么身份|本人是谁)")
+
+
+def asks_about_own_nickname(question: str, profile_context: str = "") -> bool:
+    """问句是不是在问「<画像里的昵称> 是谁」——也就是在问**用户自己**。
+
+    命中即走 chitchat：正确答案只可能来自画像（实测 `user_facts` 里存着
+    「用户自称是颗粒」），检索游戏资料必然空手，而空手在 `verify_node` 里会一路
+    升级到联网兜底。判据零 LLM 零延迟，与 `is_self_intro` 同族。
+    """
+    s = (question or "").strip()
+    if not s or not _ASK_NICK_RE.search(s):
+        return False
+    nick = next(iter(_PROFILE_NICK_RE.findall(profile_context or "")), "")
+    return bool(nick) and nick in s
+
+
 # 时间类硬信号：问「现在几点 / 今天几号 / 星期几 / 当前日期」。
 # 这类问题规则能全覆盖（问法就那么几种），答案来自服务端真实时钟（tools.current_time
 # 工具），既不检索也不该让模型猜——模型没有时钟，凭空作答必然给出训练期附近的日期。

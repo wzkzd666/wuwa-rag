@@ -88,12 +88,19 @@
 
 .msg-actions {
   display: flex;
+  /* ⚠️ 必须允许换行：反馈面板（flex-basis:100%）要能换到下一行独占整宽，
+     否则它会被挤在按钮右边并溢出气泡 —— 鼠标移上去时 .msg-row 的 :hover 断开，
+     整条操作栏（含面板）淡出，表现为「输入时反馈框突然消失」。 */
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
   opacity: 0;
   transition: opacity 0.18s;
 }
-.msg-row:hover .msg-actions {
+.msg-row:hover .msg-actions,
+/* 点面板里的 textarea 会让它处于 focus，用 :focus-within 保持操作栏可见 ——
+   只靠 :hover 的话，「点开面板 → 鼠标移向输入框」这一步就可能把面板带走。 */
+.msg-actions:focus-within {
   opacity: 1;
 }
 .msg-action {
@@ -311,4 +318,62 @@
 }
 .src-list li {
   white-space: normal;
+}
+
+/* ---------- 满意度反馈（👍/👎 + 可选说明） ---------- */
+.fb-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;   /* 面板换行独占整宽，不溢出气泡 */
+  gap: 2px;
+  width: 100%;
+}
+.fb-btn.fb-on {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.fb-btn.fb-bad {
+  color: var(--err);
+  border-color: var(--err);
+}
+.fb-panel {
+  flex: 1 0 100%;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  min-width: 260px;
+}
+.fb-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  margin-bottom: 6px;
+}
+.fb-textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+.fb-panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+}
+/* 告知文案：反馈会被管理员看到，必须显眼而不是塞在角落 */
+.fb-notice {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
 }

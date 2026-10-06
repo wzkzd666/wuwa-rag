@@ -1,9 +1,10 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, User, AlertTriangle, RefreshCw, Copy, Check, Target, Layers, Users, FileText, Scissors, ChevronDown, Volume2, Square } from 'lucide-react'
 import type { Message } from '../types'
 import { renderMarkdown } from '../lib/markdown'
 import * as api from '../lib/api'
 import { useStore } from '../store/useStore'
+import AnswerFeedback from './AnswerFeedback'
 import './MessageBubble.css'
 
 const INTENT_LABEL: Record<string, string> = {
@@ -159,6 +160,15 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
   const isUser = msg.role === 'user'
   const html = !isUser && msg.content ? renderMarkdown(msg.content) : ''
   // 个性化头像：设置里上传后，气泡头像用图；空则回落默认图标
+  // 反馈要连**问题**一起存：只存答案的话，管理员看到一条差评也不知道当时问的是什么。
+  const messages = useStore((st) => st.messages)
+  const prevQuestion = useMemo(() => {
+    const i = messages.findIndex((m) => m.id === msg.id)
+    for (let k = i - 1; k >= 0; k -= 1) {
+      if (messages[k].role === 'user') return messages[k].content || ''
+    }
+    return ''
+  }, [messages, msg.id])
   const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const avatarUser = useStore((s) => s.settings.avatarUser)
   // 语音开关：本机显示偏好，关闭时不渲染播放按钮（后端 TTS_ENABLED 已开启，
@@ -249,6 +259,10 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
         {!isUser && !msg.streaming && msg.content && msg.status !== 'error' && (
           <div className="msg-actions">
             <CopyBtn text={msg.content} />
+            {/* 满意度反馈：只有**已生成完整答案**的助手消息才评（流式中途/错误没有可评的内容） */}
+            {!msg.streaming && !msg.error && (
+              <AnswerFeedback msg={msg} question={prevQuestion} />
+            )}
             {ttsEnabled && <TtsBtn text={msg.content} emotion={msg.meta?.emotion} />}
             {canRegenerate && onRegenerate && (
               <button className="msg-action" title="重新生成" onClick={() => onRegenerate(msg.id)}>

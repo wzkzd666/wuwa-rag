@@ -219,6 +219,11 @@ export interface IngestRecordRow {
   finished_at: string | null
   /** 叠加 Redis 实时进度算出的活状态：unknown / running / success / failed */
   status: 'unknown' | 'running' | 'success' | 'failed'
+  /**
+   * 当前登录者能否暂停/取消/删除这条：admin 全部可以；普通用户只对**自己提交的**为 true。
+   * 由服务端判定并逐行下发 —— 前端拿不到 user.id，让它自己猜必然会出现「按钮能点但 403」。
+   */
+  can_control: boolean
 }
 
 /** 聊天背景预设；'custom' 表示使用用户上传的图片（bgImage） */
@@ -389,4 +394,59 @@ export interface TtsOut {
   model?: string
   voice?: string
   elapsed_ms?: number
+}
+
+/** GET /usage/summary 的一行：某个用户近 N 天的用量（local / cloud 分开） */
+export interface UsageRow {
+  user_id: string | null
+  username: string | null
+  local_prompt: number | null
+  local_completion: number | null
+  cloud_prompt: number | null
+  cloud_completion: number | null
+  calls: number
+  last_at: string | null
+}
+
+/** GET /usage/summary 里的按天序列（画图用；缺失的日期后端已补零） */
+export interface DailyUsage {
+  d: string
+  local_prompt: number | null
+  local_completion: number | null
+  cloud_prompt: number | null
+  cloud_completion: number | null
+  calls: number
+}
+
+export interface UsageSummary {
+  days: number
+  rows: UsageRow[]
+  daily: DailyUsage[]
+  /** all = 管理员看全员；self = 普通用户只看自己（后端强制） */
+  scope: 'all' | 'self'
+  feedback?: { up: number; down: number; total: number; down_ratio: number | null }
+}
+
+/** GET /feedback 的一条 */
+export interface FeedbackItem {
+  id: number
+  user_id: string
+  username: string
+  thread_id: string
+  target_id: string
+  rating: 1 | -1
+  comment: string | null
+  question: string | null
+  answer: string | null
+  provider: string | null
+  model: string | null
+  created_at: string | null
+  /** 管理员可删任意；普通用户仅自己的（后端逐条判定） */
+  can_delete: boolean
+}
+
+export interface FeedbackList {
+  days: number
+  items: FeedbackItem[]
+  summary: { up: number; down: number; total: number; down_ratio: number | null }
 }

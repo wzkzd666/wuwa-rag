@@ -4,6 +4,8 @@ import Layout from './components/Layout'
 import Background from './components/Background'
 import ChatPage from './pages/ChatPage'
 import KnowledgePage from './pages/KnowledgePage'
+import UsagePage from './pages/UsagePage'
+import FeedbackPage from './pages/FeedbackPage'
 import HistoryPage from './pages/HistoryPage'
 import SettingsPage from './pages/SettingsPage'
 import AuthPage from './pages/AuthPage'
@@ -93,6 +95,8 @@ export default function App() {
         <Route element={<Layout />}>
           <Route path="/" element={<ChatPage />} />
           <Route path="/knowledge" element={<KnowledgePage />} />
+          <Route path="/usage" element={<UsagePage />} />
+          <Route path="/feedback" element={<FeedbackPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

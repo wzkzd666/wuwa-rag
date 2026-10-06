@@ -1,0 +1,15 @@
+/* 用量页：把「用量与反馈」从设置页挪成独立一栏后，这里只做外框 */
+.usage-card {
+  padding: 18px 20px;
+}
+
+/* 页面标题右侧的账号标记 */
+.usage-who {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
