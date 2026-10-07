@@ -506,3 +506,44 @@
 .fb-item-c {
   color: var(--err);
 }
+
+/* ---------- 音乐播放设置 ---------- */
+.music-set {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.music-set-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.music-set-row > span:first-of-type {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.music-set-label {
+  min-width: 68px;
+  color: var(--text-secondary);
+}
+.music-set-hint {
+  font-size: 11.5px;
+  font-style: normal;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.music-set-exe {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.music-set-warn code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-deep);
+  font-size: 11px;
+}

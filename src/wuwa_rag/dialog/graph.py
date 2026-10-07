@@ -27,6 +27,8 @@ from wuwa_rag.dialog.nlu import (
     is_self_intro,
     is_time_question,
     mentions_time,
+    music_action,
+    needs_clarification,
     rewrite_query,
     summarize_turns,
     veto_ambiguous_names,
@@ -42,7 +44,7 @@ from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge.entities import find_mentions, resolve_candidates
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.retrieve import fetch_chunks
-from wuwa_rag.services import persona, tts
+from wuwa_rag.services import music, persona, tts
 from wuwa_rag.services.emotion import detect_emotion
 from wuwa_rag.services.verify import verify_knowledge
 from wuwa_rag.services.websearch import web_search
@@ -79,15 +81,19 @@ async def _run_io(func, *args, **kwargs):
 # 流式阶段文案：只收真正干活的节点。LangGraph / _route / _after_graph 是图容器与
 # 路由函数（实测 astream_events 也会为它们发 on_chain_start），对用户无意义，排除。
 # 检索+重排实测约 19s，而生成仅 1~2s —— 这段静默期正是用户焦虑的来源。
+# 阶段提示的措辞原则：**写「在替家人干什么」，不写「系统在做哪个技术动作」**。
+# 「意图识别 / 检索并重排 / 核对资料是否对题」是实现细节，用户只关心「你帮我做到哪了」；
+# 任务型动作（放歌、收录角色）同理，要写成「帮家人把事办了」而不是「调用了 XX 接口」。
 _STAGE_LABELS = {
-    "intent": "分析问题类型与角色",
+    "intent": "看看你想问什么",
     "chitchat": "陪家人聊两句",
-    "time": "查看当前时间",
-    "graph": "查询角色关系图谱",
-    "vector": "检索并重排相关资料",
-    "verify": "核对资料是否对题",
-    "web": "联网搜索补充知识",
+    "time": "帮家人看下时间",
+    "graph": "翻一下角色之间的关系",
+    "vector": "帮家人找相关资料",
+    "verify": "核对资料对不对题",
+    "web": "上网帮家人补一补",
     "generate": "整理答案中",
+    "music": "帮家人放首歌",
 }
 
 # 内部 LLM 调用的标签：这些调用的输出是**结构化中间结果**（摘要/审查/情绪），
@@ -288,6 +294,11 @@ async def intent_node(state: RagState) -> dict:
     #   **不需要、也不该在 _after_graph 里再写一条例外**（双判据必然迟早不同步）。
     # 为什么必须在这里而不是 _after_graph：_after_graph 是**路由函数**，只能返回分支名，
     # 改不了 state；而 intent 要如实落到 state 里对外。
+    # 没理解 → 反问。判据见 nlu.needs_clarification（保守：只覆盖「确实没有可答内容」）。
+    # 放在 chitchat 判定**之后**：那时 slots/chars 已知，信息最全。
+    if intent == "chitchat" and needs_clarification(q, slots, chars):
+        intent = "clarify"
+        log.info("意图不明，转澄清: %r", q[:20])
     if _is_team_overview(slots, chars):
         intent = "fact"
 
@@ -320,7 +331,13 @@ async def intent_node(state: RagState) -> dict:
     # mentions_time 是 is_time_question 的超集，所以不必再 or 一次 pure_time
     need_time = mentions_time(q)
 
-    if pure_time:
+    # 音乐指令：判成 chitchat 走**不检索**的分支，答案只能来自音乐工具的真实返回。
+    # 判据见 nlu.music_action（动词锚定，「卡卡的声骸怎么配」这类不会命中）。
+    # 带 history：多轮里「刚刚的任务你再试试看」这类**回指**只有在历史里才解析得出来
+    music = music_action(q, state.get("history"))
+    if music is not None and not slots and not chars:
+        intent = "chitchat"
+    elif pure_time:
         intent = "time"
     elif (is_identity(q) or is_self_intro(q)) and not slots:
         intent = "chitchat"
@@ -340,6 +357,7 @@ async def intent_node(state: RagState) -> dict:
              element or "-", stage or "-", " | 顺带问时间" if need_time and intent != "time" else "",
              f" | 改写={sq!r}" if sq != q else "")
     return {"search_query": sq, "intent": intent, "slots": slots,
+            "music_action": music[0] if music else "", "music_keyword": music[1] if music else "",
             "characters": chars, "element": element, "stage": stage,
             "need_time": need_time}
 
@@ -988,6 +1006,27 @@ _TIME_ASIDE_HINT = (
     "顺带用你自己的口吻把这个时间讲一句就好，别丢掉上面那个话题本身。"
 )
 
+# 音乐动作的**真实**执行结果。放在 _chat_turn 的 hint 里（近因位，贴着问题），
+# 模型据此把「正在播放 X」说成事实而不是自己编 —— 不给这一段它会直接答
+# 「好的，正在播放」，那是假的。
+# 「没理解」时的反问提示。放在 _chat_turn 的 hint 里（近因位）。
+# 措辞要点：① 承认没听懂；② 只问**一个**短问题；③ 明确不许猜着答 ——
+# 落空时模型最典型的失败就是「照着上一个话题编一段」（实测问「刚刚的任务你再试试看」，
+# 它开始讲另一个角色的故事）。
+_CLARIFY_HINT = (
+    "家人这句话你没能确定他到底想问什么。\n"
+    "请用你自己的口吻**反问一句**：说清你只听懂了哪一部分，再问一个具体、简短的问题"
+    "（不要一次列一堆选项）。\n"
+    "在你问清楚之前，**不要**猜测着回答任何内容，也不要顺着上一句话往下编。"
+)
+
+_MUSIC_RESULT_HINT = (
+    "家人点了音乐。音乐工具刚执行完，结果如下（这就是事实，照着说，别改也别加戏）：\n"
+    "{result}\n"
+    "用你自己的口吻把上面这个结果讲一句；如果结果是失败或不可用，就如实说做不到，"
+    "不要假装已经放上了。"
+)
+
 # 用户画像注入（「不检索」分支专用）。
 #
 # ⚠️ 为什么必须有这一段：`user_context` 原先只在 `generate_node` → `prompt.build_prompt`
@@ -1112,7 +1151,43 @@ async def chitchat_node(state: RagState):
     now = await _now_if_needed(state)
     if now:
         hint = f"{_CHITCHAT_HINT}\n\n{_TIME_ASIDE_HINT.format(now=now)}"
+    # 音乐指令：先**真的执行**工具，再把工具返回的原文交给模型组织成答复。
+    # 顺序不能反——模型不知道工具结果就会自己编（「好的，正在播放…」），那是假的。
+    result = await _run_music(state)
+    if result:
+        hint = f"{hint}\n\n{_MUSIC_RESULT_HINT.format(result=result)}"
     async for out in _chat_turn(state, hint):
+        yield out
+
+
+# 音乐动作 → 工具调用。返回给模型看的一句话（失败也是人话，见 services.music.call）。
+async def _run_music(state: RagState) -> str:
+    act = state.get("music_action") or ""
+    if not act:
+        return ""
+    ok, why = music.available()
+    if not ok:
+        return f"（音乐功能不可用：{why}）"
+    kw = state.get("music_keyword") or ""
+    try:
+        uid = state.get("user_id")
+        if act == "play":
+            return await music.play(kw, uid) if kw else "（没听清要放哪首）"
+        if act == "status":
+            return await music.call("player_status")
+        return await music.control(act, uid)
+    except Exception as exc:  # noqa: BLE001 —— 音乐失败绝不能带崩闲聊分支
+        log.warning("音乐动作 %s 失败: %s", act, exc)
+        return f"（音乐操作失败：{exc}）"
+
+
+async def clarify_node(state: RagState):
+    """澄清分支：判定落空时**反问**，不硬答。
+
+    为什么不复用 chitchat：那条允许模型自由发挥，落空时它会「顺着上一个话题编」，
+    用户看到的是一本正经的假答案。这里用专门的提示词把行为限定成「问一句」。
+    """
+    async for out in _chat_turn(state, _CLARIFY_HINT):
         yield out
 
 
@@ -1155,7 +1230,7 @@ def build_graph() -> StateGraph:
     g.add_edge(START, "intent")
     g.add_conditional_edges("intent", _route, {
         "fact": "graph", "semantic": "vector", "hybrid": "graph",
-        "chitchat": "chitchat", "time": "time",
+        "chitchat": "chitchat", "time": "time", "clarify": "clarify",
     })
     # 检索完先进 verify 把关（材料空/跑题在此发现），不再直达 generate
     g.add_conditional_edges("graph", _after_graph, {
@@ -1169,6 +1244,7 @@ def build_graph() -> StateGraph:
     g.add_edge("web", "generate")
     g.add_edge("generate", END)
     g.add_edge("chitchat", END)
+    g.add_edge("clarify", END)
     g.add_edge("time", END)
     return g
 
@@ -1315,10 +1391,12 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
     """
     # 阶段文案：检索+重排实测约 19s、生成仅 1~2s，所以必须让用户看到在干什么
     t0 = time.perf_counter()
-    yield {"stage": "crawl", "label": "检查角色是否在知识库中"}
-
+    # ⚠️ 这里**刻意不 yield**「检查角色是否在知识库中」：那是内部实现细节，挂在阶段提示里
+    # 会把「意图识别」这步立刻顶掉，用户只看到一闪而过的内部检查、看不到真正在做的意图识别。
+    # 真的需要爬资料时（下面 candidates and not ok）才提示「正在收录…」。
     candidates, ok, crawled = await ensure_characters(question)
     if candidates and not ok:
+        yield {"stage": "crawl", "label": "帮家人把这个角色收进来"}
         text = _unknown_text(candidates)
         yield {"token": text}
         # done 事件补齐字段：原来只 `{"done": True}`，前端 meta 全是 undefined、

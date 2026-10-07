@@ -15,11 +15,11 @@
    `wuwa_rag.dialog.prompt`）。这不是风格问题：写成带前缀的断言会**恒真通过**，
    空包回来了测试也不会红——典型假绿。本文件所有键名都是无前缀形态。
 ② 计数口径：
-   · `modules()` 返回 **53**：`__init__.py` 归到它所属的包名，所以顶层包与各子包
+   · `modules()` 返回 **56**：`__init__.py` 归到它所属的包名，所以顶层包与各子包
      （`core`、`knowledge.graph` …）都算一个模块，不是「纯 .py 文件数」；
-   · `build_graph()` 只有 **38** 个键：它用 defaultdict，**只收录有出边的模块**，
+   · `build_graph()` 只有 **41** 个键：它用 defaultdict，**只收录有出边的模块**，
      没有任何内部依赖的叶子模块不会出现在键里；
-   · 依赖边 **151** 条、违规 **0**、环 **0**。
+   · 依赖边 **164** 条、违规 **0**、环 **0**。
 2026-09-30 重构遗留的 5 个空包（rag/graph/ingest/retrieval/storage）已于
 2026-10-06 清理；在此之前它们让模块计数虚增 5（55 vs 50）。
 同日新增 `knowledge/domain_terms.py`（单字角色名消歧用的领域词表派生），
@@ -39,10 +39,10 @@ _GUARD = _ROOT / "scripts" / "check_layers.py"
 
 # 实测基线（2026-10-06）。这些数字会随正常开发变化——
 # 变化时应当**读懂为什么变了**再更新，而不是为了让测试变绿而随手改数。
-EXPECTED_MODULES = 53
-EXPECTED_EDGES = 151
-EXPECTED_GRAPH_KEYS = 38
-EXPECTED_LAYER_COUNTS = {0: 3, 1: 9, 2: 17, 3: 2, 4: 7, 5: 9, 6: 6}
+EXPECTED_MODULES = 56
+EXPECTED_EDGES = 164
+EXPECTED_GRAPH_KEYS = 41
+EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 17, 3: 2, 4: 8, 5: 9, 6: 7}
 
 # 2026-09-30 重构后遗留、2026-10-06 清理掉的空壳包（**无前缀**键名，见模块 docstring ①）。
 REMOVED_EMPTY_PACKAGES = ("rag", "graph", "ingest", "retrieval", "storage")

@@ -13,3 +13,16 @@
   font-size: 12px;
   color: var(--text-secondary);
 }
+
+/* 用量页 / 反馈页共用的自适应容器：宽度跟随、表格不出横向滚动条 */
+.usage-page,
+.feedback-page {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.usage-page .card,
+.feedback-page .card {
+  max-width: 100%;
+  overflow-x: auto;
+}

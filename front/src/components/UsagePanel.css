@@ -126,3 +126,75 @@
   font-size: 12.5px;
   cursor: pointer;
 }
+
+/* ---------- 趋势 / 明细 视图切换 ---------- */
+.view-tabs {
+  display: inline-flex;
+  gap: 4px;
+}
+
+/* ---------- 明细：本地 / 云端两张表并排，窄屏自动堆叠 ---------- */
+.usage-tables {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+/* ---------- 自适应窗口：图表与表格随宽度收缩，不出现横向滚动 ---------- */
+.usage-panel,
+.usage-card {
+  max-width: 100%;
+  min-width: 0;
+}
+.usage-panel .kb-table {
+  table-layout: fixed;
+  width: 100%;
+}
+.usage-panel .kb-table th,
+.usage-panel .kb-table td {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 860px) {
+  .usage-panel {
+    gap: 12px;
+  }
+  .usage-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .usage-filters {
+    justify-content: space-between;
+  }
+  .usage-tables {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- 反馈页与用量页共用同一套自适应规则（两页结构一致，别各写一套） ---------- */
+.fb-fold {
+  max-width: 100%;
+  min-width: 0;
+}
+.fb-fold-body,
+.fb-item {
+  min-width: 0;
+}
+.fb-item-q,
+.fb-item-a,
+.fb-item-c {
+  overflow-wrap: anywhere;   /* 长英文/URL 不再把卡片撑出横向滚动条 */
+}
+@media (max-width: 860px) {
+  .fb-fold-stats {
+    flex-wrap: wrap;
+  }
+  .fb-fold-head {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+}

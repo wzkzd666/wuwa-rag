@@ -20,7 +20,7 @@ export default function UsagePage() {
       <div className="page-head">
         <div>
           <h2 className="page-title">
-            <BarChart3 size={19} className="grad-text" /> 用量与反馈
+            <BarChart3 size={19} className="grad-text" /> 用量
           </h2>
           <p className="page-desc">
             {isAdmin ? '全员 token 用量与答案满意度' : '你的 token 用量与你提交的评价'}

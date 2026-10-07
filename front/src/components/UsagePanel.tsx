@@ -18,6 +18,10 @@ const n = (v: number | null | undefined) => (v ?? 0).toLocaleString('zh-CN')
 export default function UsagePanel() {
   const apiBase = useStore((s) => s.settings.apiBase)
   const [days, setDays] = useState(7)
+  // 趋势 / 明细 两个视图：图表在**表格之上**，按钮切换。
+  // 分开是因为两者回答的问题不同 —— 趋势看「用量是不是在涨」，
+  // 明细看「谁用得多」；挤在一屏里两边都看不清。
+  const [view, setView] = useState<'trend' | 'detail'>('trend')
   const [sum, setSum] = useState<UsageSummary | null>(null)
   const [who, setWho] = useState('')          // '' = 全员（仅管理员可用）
   const [loading, setLoading] = useState(false)
@@ -92,9 +96,16 @@ export default function UsagePanel() {
         </div>
       )}
 
-      {sum && <UsageCharts daily={sum.daily} />}
+      <div className="view-tabs">
+        <button className={`btn btn-sm ${view === 'trend' ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setView('trend')}>趋势</button>
+        <button className={`btn btn-sm ${view === 'detail' ? 'btn-primary' : 'btn-ghost'}`}
+                onClick={() => setView('detail')}>用量明细</button>
+      </div>
 
-      {sum && (
+      {sum && view === 'trend' && <UsageCharts daily={sum.daily} />}
+
+      {sum && view === 'detail' && (
         <table className="kb-table">
           <thead>
             <tr>

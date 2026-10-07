@@ -170,6 +170,19 @@ CREATE TABLE IF NOT EXISTS session_summaries (     -- 派生，可重算
 );
 CREATE INDEX IF NOT EXISTS ix_summaries_session ON session_summaries(session_id, created_at);
 
+-- ========== 个人偏好（设置页开关；与 user_facts 语义不同）==========
+-- user_facts 是**系统从对话里推断出来**的（会过期、会软删）；这里是**用户自己设的**
+-- （主题、音乐开关…），不会推断、不会软删，只有用户改写才会变。
+-- 为什么进 PG 而不是 localStorage：音乐开关决定服务端要不要加载/调用本机播放器，
+-- 只有服务端知道当前设置，「开了但没生效」是最难查的那类问题。
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id    TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS user_facts (            -- 软删除，不物理删除
     id         BIGSERIAL PRIMARY KEY,
     user_id    TEXT,

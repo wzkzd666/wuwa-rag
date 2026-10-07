@@ -238,6 +238,8 @@ export interface Settings {
   // ---------- 个性化（2026-09-22 新增） ----------
   /** 桌面端把侧边栏折叠成图标窄栏 */
   sidebarCollapsed: boolean
+  /** 会话列表（智能问答页左侧）是否收起 —— 与主侧栏独立，两个都能收 */
+  sessionListCollapsed: boolean
   /** 助手头像 dataURL；空 = 用默认图标。统一用于侧栏 logo / 欢迎页 logo / 机器人气泡头像 */
   avatarAssistant: string
   /** 我的头像 dataURL；空 = 用默认图标 */
@@ -449,4 +451,17 @@ export interface FeedbackList {
   days: number
   items: FeedbackItem[]
   summary: { up: number; down: number; total: number; down_ratio: number | null }
+}
+
+/** GET /music/status 的返回：播放条据此渲染（available=false 就整条隐藏） */
+export interface MusicState {
+  available: boolean
+  playing: boolean
+  paused: boolean
+  title: string
+  artist: string
+  volume: number | null
+  muted: boolean
+  app: string
+  reason?: string
 }

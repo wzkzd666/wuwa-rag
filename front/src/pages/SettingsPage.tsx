@@ -1,8 +1,8 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
   Settings as SettingsIcon, Sun, Moon, Zap, Type, Server, Trash2, Activity, RefreshCw,
   Camera, Image as ImageIcon, Palette, RotateCcw, User as UserIcon, Sparkles, Eraser,
-  Cpu, Volume2, AlertTriangle, Check, Smile, KeyRound, Unlock, Lock, Mic, ChevronDown,
+  Cpu, Music4, Volume2, Loader2, AlertTriangle, Check, Smile, KeyRound, Unlock, Lock, Mic, ChevronDown,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import * as api from '../lib/api'
@@ -10,6 +10,7 @@ import { pickImageFile, fileToDataUrl, formatBytes, dataUrlBytes } from '../lib/
 import type {
   BgPreset, LlmConfig, ProviderPreset, TtsConfigOut, TtsStatus, UserFact,
 } from '../types'
+import type { MusicSetting } from '../lib/api'
 import './SettingsPage.css'
 
 /** 背景预设（key 对齐 types.ts 的 BgPreset 与 global.css 的 data-preset） */
@@ -905,10 +906,38 @@ export default function SettingsPage() {
   // 各区块的折叠态：默认只展开高频项（后端连接 / 模型服务 / 外观），
   // 其余「配一次就不看」的（语音、账号、个性化、画像、数据）收起，避免一屏堆满。
   const [fold, setFold] = useState<Record<string, boolean>>({
-    backend: true, model: true, tts: false, account: false,
+    backend: true, model: true, tts: false, account: false, music: false,
     appearance: true, personal: false, profile: false, data: false,
   })
   const toggle = (k: string) => setFold((f) => ({ ...f, [k]: !f[k] }))
+
+  // ---- 音乐设置（开关 + 播放器路径）----
+  const [mset, setMset] = useState<MusicSetting | null>(null)
+  const [msetBusy, setMsetBusy] = useState(false)
+  const [exeDraft, setExeDraft] = useState<string | null>(null)
+  const loadMusicSet = useCallback(async () => {
+    try {
+      setMset(await api.musicSetting(settings.apiBase))
+    } catch {
+      /* 读不到就让开关保持禁用，不假装有设置 */
+    }
+  }, [settings.apiBase])
+  useEffect(() => {
+    if (fold.music) void loadMusicSet()
+  }, [fold.music, loadMusicSet])
+  const saveMusic = async (body: { enabled?: boolean | null; exe?: string | null }) => {
+    setMsetBusy(true)
+    try {
+      await api.musicSettingPut(body, settings.apiBase)
+      await loadMusicSet()
+      setExeDraft(null)
+      toast('ok', '音乐设置已保存，立即生效')
+    } catch (e) {
+      toast('err', e instanceof Error ? e.message : String(e))
+    } finally {
+      setMsetBusy(false)
+    }
+  }
   // 我的画像（user_facts 表，后端 /profile）
   const auth = useStore((s) => s.auth)
   const apiBase = useStore((s) => s.settings.apiBase)
@@ -1055,6 +1084,63 @@ export default function SettingsPage() {
       </Fold>
 
       {/* 账号安全：改登录密码会自动重绑云端密钥（2026-09-30） */}
+      {/* 音乐播放：开关与播放器路径都在这里改，**立即生效不用重启**。
+          路径留空的语义是「**读环境变量 QQMUSIC_EXE**」，不是「自动满世界找」——
+          路径属机器/部署级，应当由环境变量声明；这里填则覆盖环境变量。 */}
+      <Fold title="音乐播放" icon={<Music4 size={15} />} open={fold.music}
+            onToggle={() => toggle('music')}
+            hint="开启后可直接说「放首周杰伦的晴天」「暂停」「小声点」">
+        <div className="music-set">
+          <label className="music-set-row">
+            <input
+              type="checkbox"
+              checked={!!mset?.enabled}
+              disabled={msetBusy || mset === null}
+              onChange={(e) => void saveMusic({ enabled: e.target.checked })}
+            />
+            <span>
+              启用音乐播放
+              <em className="music-set-hint">
+                {mset?.source === 'deployment'
+                  ? '当前由部署配置（.env MUSIC_ENABLED）开启'
+                  : mset?.personal === true
+                    ? '已由你开启'
+                    : '关闭时问「放歌」会得到「音乐功能不可用」的提示'}
+                {mset && !mset.exe && mset.enabled && (
+                  <em className="music-set-hint music-set-warn">
+                    未设置路径：将以环境变量 <code>QQMUSIC_EXE</code> 为准
+                    （<code>setx QQMUSIC_EXE "D://path//to//QQMusic.exe"</code> 后需重启本服务）。
+                  </em>
+                )}
+              </em>
+            </span>
+          </label>
+          <div className="music-set-row">
+            <span className="music-set-label">播放器路径</span>
+            <input
+              className="input music-set-exe"
+              value={exeDraft ?? mset?.exe ?? ''}
+              placeholder="留空 = 读环境变量 QQMUSIC_EXE"
+              disabled={msetBusy || mset === null}
+              onChange={(e) => setExeDraft(e.target.value)}
+              onBlur={() => {
+                const v = (exeDraft ?? mset?.exe ?? '').trim()
+                if (v !== (mset?.exe ?? '')) void saveMusic({ exe: v })
+              }}
+            />
+            {msetBusy ? <Loader2 size={13} className="spin" /> : (
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={!mset || (exeDraft ?? mset.exe) === mset.exe}
+                onClick={() => void saveMusic({ exe: (exeDraft ?? '').trim() })}
+              >
+                保存
+              </button>
+            )}
+          </div>
+        </div>
+      </Fold>
+
       <Fold title="账号安全" icon={<KeyRound size={15} />} open={fold.account}
             onToggle={() => toggle('account')}
             hint="修改登录密码（会自动重绑云端密钥，已存的 Key 仍能自动解开）。">

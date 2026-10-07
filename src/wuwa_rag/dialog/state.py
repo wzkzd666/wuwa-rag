@@ -21,6 +21,8 @@ class RagState(TypedDict, total=False):
     docs: list[dict]       # 向量 + 稀疏召回
     context: str
     answer: str
+    music_action: str        # 音乐动作 play/pause/next/prev/stop/status；空=本轮不是音乐指令
+    music_keyword: str       # 点歌关键词（仅 music_action == "play" 用）
     truncated: bool        # 复读兜底触发、答案被截断过
     element: str
     stage: str

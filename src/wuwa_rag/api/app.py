@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from wuwa_rag.api import auth as authn
+from wuwa_rag.api import music as music_api
 from wuwa_rag.api import ratelimit as rl
 from wuwa_rag.api import usage as usage_api
 from wuwa_rag.config import get_settings
@@ -36,8 +37,10 @@ from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
 from wuwa_rag.dialog.graph import ask, ask_stream, doc_sources
 from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
+from wuwa_rag.dialog.nlu import music_action
 from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge import entities as kb
+from wuwa_rag.services import music as music_svc
 from wuwa_rag.services.emotion import EMOTION_TAGS
 from wuwa_rag.services.profile import (
     all_users_stats,
@@ -85,6 +88,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="wuwa-rag", version="0.9", lifespan=lifespan)
 # 用量看板 / 答案反馈（见 api/usage.py：普通用户只能看自己的用量）
 usage_api.install(app)
+# 音乐播放条（读/控本机播放器状态）
+music_api.install(app)
 
 # ── 限流 ─────────────────────────────
 # ⚠️ 必须在 CORS **之前**安装：Starlette 里后添加的中间件位于**最外层**，
@@ -411,12 +416,35 @@ async def _stream_answer(user: authn.AuthUser, tid: str, question: str,
             yield evt
 
 
+async def _run_music_best_effort(question: str, user_id: int,
+                                history: list[dict] | None = None) -> str:
+    """执行音乐指令，失败也只返回一句话（绝不打断问答）。"""
+    act = music_action(question, history)
+    if act is None:
+        return ""
+    action, kw = act
+    try:
+        if action == "play":
+            return await music_svc.play(kw, user_id) if kw else ""
+        if action == "status":
+            return await music_svc.call("player_status")
+        return await music_svc.control(action, user_id)
+    except Exception as exc:  # noqa: BLE001 —— 音乐是附加能力，挂了不该影响问答
+        log.warning("音乐指令 %s 执行失败: %s", action, exc)
+        return ""
+
+
 async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, key: str,
                                history: list[dict] | None = None):
     user_ctx = await _user_context(user)
     await conv.ensure_conversation(user.id, tid, question)
     await conv.append_message(user.id, tid, "user", question)
 
+    # 音乐指令：先播、先给阶段提示，再进问答流。放在 ask_stream **之前**是因为
+    # 点歌要等冷启动（实测 2.7s）+ 切歌确认，放到流里会卡住第一个 token。
+    if music_action(question, history) is not None:
+        yield {"stage": "music", "label": "帮家人放首歌"}
+        await _run_music_best_effort(question, user.id, history)
     try:
         async for evt in ask_stream(question, key, user_context=user_ctx,
                                     user_id=user.id, history=history):

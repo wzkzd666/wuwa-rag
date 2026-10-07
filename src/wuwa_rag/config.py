@@ -295,6 +295,12 @@ class Settings(BaseSettings):
     # 兜底：未显式加限额的端点统一适用（/health 已单独豁免）。
     RATE_LIMIT_DEFAULT: str = "200/minute"
 
+    # ---------- 音乐播放（QQ音乐 MCP server，默认关闭）----------
+    # 关着的时候：问「放首歌」会走正常问答并说明本功能未启用，不会去检索游戏资料。
+    MUSIC_ENABLED: bool = False
+    # QQMusic.exe 路径；留空则由 server 依次试环境变量 QQMUSIC_EXE、qqmusic.ini、自动探测
+    MUSIC_EXE: str = ""
+
     # ---------- 歧义角色名的 LLM 裁决（默认关闭）----------
     # 规则层已经覆盖绝大多数情况；剩下「单字名被分词切成独立 token、句内又无领域词证据」
     # 的一类疑难，理论上可交给 tool LLM 裁决。**实测 qwen3:8b 不可用，故默认 False**：

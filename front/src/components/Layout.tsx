@@ -17,6 +17,7 @@ import {
   BarChart3,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
+import MusicBar from './MusicBar'
 import { pickImageFile, fileToDataUrl, formatBytes, dataUrlBytes } from '../lib/image'
 import './Layout.css'
 
@@ -174,6 +175,8 @@ export default function Layout() {
             {toggleIcon}
           </button>
           <div className="topbar-title">{current?.title ?? '潮声智库'}</div>
+          {/* 音乐播放条：只在真的有歌在放时出现（组件内部按 available/title 决定） */}
+          <MusicBar />
           <div className="topbar-right">
             <span className={`health-pill health-${health}`}>
               <span className="health-dot" />

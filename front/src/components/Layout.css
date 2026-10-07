@@ -352,3 +352,59 @@
     display: inline;
   }
 }
+
+/* ---------- 音乐播放条（顶栏中间）---------- */
+.music-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 46%;
+  padding: 3px 10px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  font-size: 12.5px;
+}
+.music-bar-icon {
+  color: var(--accent-2);
+  flex-shrink: 0;
+}
+.music-bar-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+.music-bar-artist {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 96px;
+  flex-shrink: 1;
+}
+.music-bar-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.music-bar-vol {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
+}
+.music-bar-vol input[type='range'] {
+  width: 64px;
+  accent-color: var(--accent-2);
+  cursor: pointer;
+}
+.music-bar-vol input[type='range']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

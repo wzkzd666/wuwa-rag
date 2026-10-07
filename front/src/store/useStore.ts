@@ -72,6 +72,10 @@ const DEFAULT_SETTINGS: Settings = {
   theme: 'dark',
   stream: true,
   fontSize: 14,
+  // 会话栏默认**展开**：它是「切回上一轮对话」的主要入口，收起只留「新建」会让人
+  // 以为历史丢了。窗口窄时用户自己收或用下面的断点自动收。
+  sessionListCollapsed: false,
+  // 会话栏默认**展开**：它是「切回上一轮对话」的主要入口，收起只留「新建」会让人
   sidebarCollapsed: false,
   avatarAssistant: '',
   avatarUser: '',

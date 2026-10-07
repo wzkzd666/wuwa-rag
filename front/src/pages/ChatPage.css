@@ -294,3 +294,48 @@
     font-size: 22px;
   }
 }
+
+/* ---------- 会话栏独立收纳（与主侧栏两级联动）----------
+   主侧栏收起后聊天区仍可能被会话栏占掉 248px；窄屏/分屏时两级都收起才有整屏宽度。 */
+.session-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 4px;
+}
+.session-head .new-chat {
+  flex: 1;
+  justify-content: center;
+}
+.session-toggle {
+  flex-shrink: 0;
+}
+.session-list.rail {
+  width: 44px;
+  align-items: center;
+}
+.session-list.rail .session-head {
+  padding: 8px 0 4px;
+  justify-content: center;
+}
+.session-list.rail .new-chat-rail {
+  width: 36px;
+  padding: 0;
+  margin: 0 4px 6px;
+  display: grid;
+  place-items: center;
+}
+.session-list.rail .session-scroll {
+  display: none;
+}
+.session-list.rail .session-empty {
+  display: none;
+}
+@media (max-width: 860px) {
+  .session-list {
+    width: 200px;
+  }
+  .session-list.rail {
+    width: 40px;
+  }
+}

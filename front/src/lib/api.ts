@@ -3,6 +3,7 @@ import type {
   IngestStatus, KnowledgeOut, LlmConfig,
   LlmConfigIn, LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus,
   UsageSummary, UserFact,
+  MusicState,
 } from '../types'
 
 /**
@@ -446,4 +447,38 @@ export function feedbackDelete(
   base?: string,
 ): Promise<{ id: number; character: string | null }> {
   return request(`/feedback/${id}`, { method: 'DELETE' }, base)
+}
+
+/** GET /music/status —— 当前播放状态（播放条用；未启用/未运行时 available=false） */
+export function musicStatus(base?: string): Promise<MusicState> {
+  return request('/music/status', { method: 'GET' }, base)
+}
+
+/** POST /music/control —— 控制本机播放器。action 见 tools/qqmusic_mcp 的 player_control */
+export function musicControl(action: string, base?: string): Promise<{ result: string }> {
+  return request('/music/control', { method: 'POST', body: JSON.stringify({ action }) }, base)
+}
+
+/** 音乐设置（设置页用） */
+export interface MusicSetting {
+  /** 现在是否生效（个人设置 或 .env 任一为开） */
+  enabled: boolean
+  /** 个人设置里的值（null = 没设过，走默认） */
+  personal: boolean | null
+  /** .env 里的部署级默认 */
+  deployment: boolean
+  /** 当前生效的是谁：personal / deployment / default */
+  source: 'personal' | 'deployment' | 'default'
+  exe: string
+}
+
+export function musicSetting(base?: string): Promise<MusicSetting> {
+  return request('/music/setting', { method: 'GET' }, base)
+}
+
+export function musicSettingPut(
+  body: { enabled?: boolean | null; exe?: string | null; reset?: boolean },
+  base?: string,
+): Promise<{ enabled: boolean; exe: string }> {
+  return request('/music/setting', { method: 'PUT', body: JSON.stringify(body) }, base)
 }

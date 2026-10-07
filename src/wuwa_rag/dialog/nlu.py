@@ -177,6 +177,117 @@ def asks_about_own_nickname(question: str, profile_context: str = "") -> bool:
     return bool(nick) and nick in s
 
 
+# ---------- 音乐意图（纯规则，零 LLM 零延迟）----------
+#
+# 为什么不用 LLM 判：这些句式高度固定（放/播放/暂停/下一首…），规则能全覆盖；
+# 而判错的后果很糟 —— 游戏问句「卡卡的声骸」里也有「卡」，一旦误判就会去放歌。
+# 判据要求**动词或控制词明确出现**，且不含任何角色名 —— 双保险。
+_MUSIC_CTRL: tuple[tuple[str, str], ...] = (
+    (r"暂停|停一下|先停", "pause"),
+    (r"继续播放|接着放|继续放", "play"),
+    (r"下一首|换一首|下首", "next"),
+    (r"上一首|前一首|回到上一", "prev"),
+    (r"停止播放|关掉音乐|别放了", "stop"),
+    (r"现在.?在放|在听什么|放的什么|谁在唱", "status"),
+)
+# 点歌：动词 + （可选量词）+ 歌名。动词必须在**句首附近**，避免「卡的声骸怎么配」这类误判。
+_MUSIC_PLAY_RE = re.compile(
+    # ⚠️ 动词必须**按长度降序**排列：正则交替分支是从左到右第一个命中，
+    # 「播放」若写成「播」在前，「播放稻香」会被切成「播」+「放稻香」，歌名多一个「放」字。
+    r"^(?:帮我|给我|你)?\s*(?:播放|放|播|来|听|唱|点|要)\s*(?:一?[首支个]\s*)?"
+    r"(?P<kw>[^，。！？,.!?]{1,40})$"
+)
+
+
+# ---------- 「没理解」判定：该不该反问用户 ----------
+#
+# 为什么要这条：判定落空时（太短、纯指代、槽位与角色都没认出来）系统原先**照样硬答**，
+# 于是用户看到的是一本正经的编造内容（实测：问「刚刚的任务你再试试看」，助手开始讲
+# 另一个角色的故事）。反问一句成本远低于答错 —— 答错了用户还得再纠正一次。
+#
+# 判据刻意**保守**：只覆盖「明确没有可答内容」的情况。宁可漏判（照常答）也不可
+# 误判（把正常问题反问回去），后者比前者更烦人。
+
+# 纯指代/回指，句子里没有任何可答内容
+_ONLY_REF = re.compile(
+    r"^(那个|这个|它|他|她|刚刚的|刚才的|上面那个|之前那个|嗯+|啊+|额+|唔+|"
+    r"再(试|来|说|问|放|唱)(一(次|遍|下|首))?|重来|继续|还是|一样|同样|再等等)")
+
+
+def needs_clarification(question: str, slots: list[str] | None = None,
+                         characters: list[str] | None = None) -> bool:
+    """这句话是否**没有足够信息**去回答 —— 该反问而不是硬答。
+
+    只在两种情况返回 True：
+      ① 极短且识别不出槽位与角色（「卡卡呢？」这种反问，回答它需要反问）；
+      ② 纯指代/回指句（`再试`、`那个`），本身不含任何可答内容。
+    其余一律 False —— 宁可漏判也不误判。
+    """
+    q = (question or "").strip()
+    if not q:
+        return True
+    # ⚠️ 判据只覆盖**纯指代/回指/语气词**。曾经还加过「≤6 字且无槽位角色 → 澄清」，
+    # 实测立刻误判：「讲个故事」「你好」「谢谢」语义完整，却被打回去反问 ——
+    # 把「短」等同于「不明」是错的：中文里大量完整意图只有 4 个字。
+    # 宁可漏判（照常答），也不要把正常请求反问回去。
+    if _ONLY_REF.match(q):
+        return not (slots or characters)
+    return False
+
+
+# 回指/重试型说法：用户不是在点新歌，而是让你**再做一次刚才那件事**。
+# 没有它，多轮里说「刚刚的任务你再试试看」会完全落空 —— 句子里既没有动词也没有歌名，
+# 而「刚刚的任务」只有在**历史**里才解析得出来（用户实测：这个场景下音乐完全失效）。
+_MUSIC_RETRY_RE = re.compile(
+    r"(再试|再放|再来|重试|再唱|再听|那个|刚刚|刚才|上次|继续|还是|一样|同样|刚才那)")
+
+
+def music_action(question: str, history: list[dict] | None = None) -> tuple[str, str] | None:
+    """识别音乐指令，返回 `(action, keyword)`；不是音乐指令返回 None。
+
+    action ∈ play / pause / next / prev / stop / status（keyword 仅 play 用）。
+    判据是**动词锚定**：控制词必须出现；点歌句必须以播放动词开头。
+    「卡卡的声骸怎么配」这类游戏问句不含这些动词，不会命中。
+
+    `history` 用于**回指**：「刚刚的任务你再试试看」这种句子本身没有音乐动词，
+    只有回指词；此时从历史里倒着找最近一条能判成音乐的用户消息，沿用它的动作与歌名。
+    找不到就返回 None —— **不猜**。
+    """
+    q = (question or "").strip()
+    if not q:
+        return None
+    got = _music_action_direct(q)
+    if got is not None:
+        return got
+    if history and _MUSIC_RETRY_RE.search(q):
+        for m in reversed(history):
+            if m.get("role") != "user":
+                continue
+            prev = _music_action_direct((m.get("content") or "").strip())
+            if prev is not None:
+                return prev              # 沿用上一条的动作与歌名
+            break                        # 只看最近一条用户消息，不跨多轮回溯
+    return None
+
+
+def _music_action_direct(q: str) -> tuple[str, str] | None:
+    """只判当前这一句（不看历史）。"""
+    if not q:
+        return None
+    for pat, act in _MUSIC_CTRL:
+        if re.search(pat, q):
+            return act, ""
+    m = _MUSIC_PLAY_RE.match(q)
+    if m:
+        kw = m.group("kw").strip()
+        # 「放首歌」「放点音乐」这类没有具体歌名 → 只报可用性，不去瞎搜
+        # 「放首歌 / 放点音乐」这类**没有具体歌名**：返回 ("play", "")，
+        # 上层会回「没听清要放哪首」而不是拿「点音乐」去搜 —— 宁可问一句，不要瞎搜。
+        if kw and len(kw) >= 2 and not re.fullmatch(r"[点来放要]*[歌音乐节曲]+", kw):
+            return "play", kw
+    return None
+
+
 # 时间类硬信号：问「现在几点 / 今天几号 / 星期几 / 当前日期」。
 # 这类问题规则能全覆盖（问法就那么几种），答案来自服务端真实时钟（tools.current_time
 # 工具），既不检索也不该让模型猜——模型没有时钟，凭空作答必然给出训练期附近的日期。

@@ -23,7 +23,7 @@ dependencies = [
     "redis>=5.2",                           # 缓存 + Celery broker
     "boto3>=1.35",                          # S3 协议访问 RustFS
     # ================= LLM / Agent =================
-    "langchain>=0.3",
+    "langchain[mcp]>=0.3",
     "langchain-community>=0.3",
     "langchain-ollama>=0.2",                # qwen3-vl:8b：生成 + 立绘视觉
     "langchain-openai>=0.2",                # ChatOpenAI：vLLM / Ollama /v1 / 云端（内含 openai SDK）
@@ -54,9 +54,22 @@ dependencies = [
     "qianfan>=0.2.5",
     "tqdm>=4.70.1",
     "concurrent-log-handler>=0.9.29",
+    "pytest>=9.1.1",
 ]
 
 [project.optional-dependencies]
+# 音乐播放（tools/qqmusic_mcp）。QQ音乐 MCP server 依赖；
+# 不装 QQ音乐客户端 / 不启用音乐功能的人完全不需要它。
+music = [
+    "mcp>=2.0",
+    "psutil>=5.9",
+    # 应用级音量（Core Audio ISimpleAudioVolume），只改 QQ音乐不动系统音量
+    "pycaw>=20260927",
+    # SMTC：读/控系统媒体会话（确认播放是否真的发生、控制播放）
+    "winrt-Windows.Media.Control>=3.2",
+    "winrt-Windows.Foundation>=3.2",
+    "winrt-Windows.Foundation.Collections>=3.2",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -110,7 +123,6 @@ packages = ["src/wuwa_rag"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # pytest-asyncio 1.x 起默认 strict：不显式声明 asyncio_mode，异步用例会被静默跳过
-# （不是失败，是根本不跑）——那比没有测试更危险。
 asyncio_mode = "auto"
 addopts = "-q --strict-markers"
 filterwarnings = ["ignore::DeprecationWarning"]

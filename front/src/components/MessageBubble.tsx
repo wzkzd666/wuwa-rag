@@ -199,7 +199,7 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
                     <i />
                     <i />
                   </span>
-                  {msg.stageLabel ? `${msg.stageLabel}…` : '正在检索知识库…'}
+                  {msg.stageLabel ? `${msg.stageLabel}…` : '帮家人查资料…'}
                 </span>
               ) : msg.status === 'error' ? (
                 <div className="msg-error">
