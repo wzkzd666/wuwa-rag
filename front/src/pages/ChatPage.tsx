@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Plus, MessageSquare, Trash2, Pencil, Check, X, Sparkles, Library, Swords, Gem, Coins,
+  PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import MessageBubble from '../components/MessageBubble'
@@ -24,6 +25,7 @@ function SessionList() {
   const activeThreadId = useStore((s) => s.activeThreadId)
   const select = useStore((s) => s.selectConversation)
   const create = useStore((s) => s.newConversation)
+  const setSettings = useStore((s) => s.setSettings)
   const remove = useStore((s) => s.deleteConversation)
   const rename = useStore((s) => s.renameConversation)
   const busy = useStore((s) => s.busy)
@@ -53,6 +55,21 @@ function SessionList() {
 
   return (
     <div className={`session-list ${collapsed ? 'rail' : ''}`}>
+      {/* 会话列表的收纳开关：贴在会话栏**顶部**、新建对话之上 ——
+          收纳哪个面板的按钮就贴着那个面板的顶端（与侧栏里那个「导航」开关是同一规律）。
+          折叠态由 `.session-list.rail button` 统一收成 32px 图标，说明改走 data-tip。 */}
+      <button
+        className="session-toggle"
+        onClick={() => setSettings({ sessionListCollapsed: !collapsed })}
+        title={collapsed ? '展开会话列表' : '收起会话列表'}
+        data-tip={collapsed ? '展开会话列表' : '收起会话列表'}
+        aria-label={collapsed ? '展开会话列表' : '收起会话列表'}
+        aria-expanded={!collapsed}
+      >
+        {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+        <span className="session-btn-text">会话列表</span>
+      </button>
+
       <div className="session-head">
         {!collapsed && (
           <button className="btn btn-primary new-chat" onClick={() => create()}>
@@ -190,7 +207,7 @@ export default function ChatPage() {
                 </p>
                 {health === 'down' && (
                   <div className="welcome-warn">
-                    后端服务未连接（127.0.0.1:8000）。请先启动 FastAPI 与 Celery worker，或在「设置」中检查 API 地址。
+                    后端服务未连接。请确认后端已启动，或在「设置」中检查服务地址。
                   </div>
                 )}
               </div>

@@ -51,7 +51,6 @@ function useNarrow(): boolean {
 export default function Layout() {
   const health = useStore((s) => s.health)
   const collapsed = useStore((s) => s.settings.sidebarCollapsed)
-  const sessionListCollapsed = useStore((s) => s.settings.sessionListCollapsed)
   const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const setSettings = useStore((s) => s.setSettings)
   const toast = useStore((s) => s.toast)
@@ -73,7 +72,6 @@ export default function Layout() {
   const narrow = useNarrow()
 
   const loc = useLocation()
-  const showSessionToggle = loc.pathname === '/'
   const current = NAV.find((n) => (n.end ? loc.pathname === n.to : loc.pathname.startsWith(n.to)))
 
   // 落在窄屏时，把桌面折叠态清掉，避免媒体查询切换时留个「半折叠」的怪状态
@@ -139,23 +137,20 @@ export default function Layout() {
           </div>
         </div>
 
-        {/* 会话列表（问答页左侧那一列）的折叠开关：放在侧边栏**顶部**、导航之上。
-            不再塞进会话栏内部 —— 两个面板各放一个收纳按钮会让人分不清按哪个，
-            而「点标题旁的箭头收起面板」本就是标题区的惯例。 */}
-        {showSessionToggle && (
-          <button
-            className="session-fold-btn"
-            onClick={() => setSettings({ sessionListCollapsed: !sessionListCollapsed })}
-            aria-label={sessionListCollapsed ? '展开会话列表' : '收起会话列表'}
-            aria-expanded={!sessionListCollapsed}
-            title={sessionListCollapsed ? '展开会话列表' : '收起会话列表'}
-          >
-            {sessionListCollapsed
-              ? <PanelLeftOpen size={15} />
-              : <PanelLeftClose size={15} />}
-            <span>会话列表</span>
-          </button>
-        )}
+        {/* 侧栏**自身**的收纳按钮：落在「潮声智库」那一行的**下方**、导航之上 ——
+            贴着被收纳内容的顶端，点之前就知道会收起谁。
+            ⚠️ 不能塞进 .brand 与 logo 同行：折叠成图标窄栏（rail）后侧栏只有 64px，
+            38px 的 logo 已把那一行占满；独立成行，窄栏下图标才有地方居中。 */}
+        <button
+          className="sidebar-fold-btn"
+          onClick={toggleNav}
+          title={toggleLabel}
+          aria-label={toggleLabel}
+          aria-expanded={narrow ? open : !collapsed}
+        >
+          {toggleIcon}
+          <span>导航</span>
+        </button>
 
         <nav className="nav">
           {NAV.map(({ to, label, icon: Icon, end }) => (
@@ -185,15 +180,21 @@ export default function Layout() {
 
       <div className="main">
         <header className="topbar">
-          <button
-            className="btn btn-icon menu-btn"
-            onClick={toggleNav}
-            title={toggleLabel}
-            aria-label={toggleLabel}
-            aria-expanded={narrow ? open : !collapsed}
-          >
-            {toggleIcon}
-          </button>
+          {/* 顶栏最左只在**窄屏档**放按钮：那时侧栏是抽屉、平时整块藏在屏幕外，
+              开合它的按钮必须在抽屉外面，否则抽屉一关就再也打不开了。
+              桌面档这里不放按钮 —— 侧栏常驻可见，它自己的收纳按钮落在侧栏「导航」之上；
+              会话列表的收纳开关则归会话栏自己（见 ChatPage 的 .session-toggle）。 */}
+          {narrow && (
+            <button
+              className="btn btn-icon menu-btn"
+              onClick={toggleNav}
+              title={toggleLabel}
+              aria-label={toggleLabel}
+              aria-expanded={open}
+            >
+              {toggleIcon}
+            </button>
+          )}
           <div className="topbar-title">{current?.title ?? '潮声智库'}</div>
           {/* 音乐播放条：只在真的有歌在放时出现（组件内部按 available/title 决定） */}
           <MusicBar />

@@ -23,7 +23,7 @@ export default function UsagePage() {
             <BarChart3 size={19} className="grad-text" /> 用量
           </h2>
           <p className="page-desc">
-            {isAdmin ? '全员 token 用量与答案满意度' : '你的 token 用量与你提交的评价'}
+            {isAdmin ? '全员 token 用量' : '你的 token 用量与你提交的评价'}
             <span className="usage-who">{username}</span>
           </p>
         </div>

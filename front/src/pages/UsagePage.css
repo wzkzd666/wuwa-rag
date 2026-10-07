@@ -1,7 +1,7 @@
 /* 用量页：把「用量与反馈」从设置页挪成独立一栏后，这里只做外框 */
-.usage-card {
-  padding: 18px 20px;
-}
+/* ⚠️ 这里原来有 `.usage-card { padding: 18px 20px }`，它排在 global.css 的
+   「包裹层 padding 清零」规则**之后**，同权重后者胜 —— 于是那条清零一直被它覆盖，
+   表现为「改了三轮宽度都不动」（用户反馈）。宽度统一只在 global.css 里管。 */
 
 /* 页面标题右侧的账号标记 */
 .usage-who {
@@ -14,15 +14,17 @@
   color: var(--text-secondary);
 }
 
-/* 用量页 / 反馈页共用的自适应容器：宽度跟随、表格不出横向滚动条 */
+/* 用量页 / 反馈页共用的自适应容器：只保证「可收缩、不出横向滚动条」。
+   ⚠️ 这里原来写 `.usage-page .card { max-width: 100% }` —— 特异性 (0,2,0)，
+   **高过** `.page > *` 的 (0,1,0)，是整条覆盖链里最强的一环：无论把设置里的内容宽度
+   调成多少，卡片都会被它钉成满宽（实测「设置 760、卡片实测 1289」）。
+   宽度只由 global.css 的 --content-max 决定，这里不再插手。 */
 .usage-page,
 .feedback-page {
-  width: 100%;
-  max-width: 100%;
   min-width: 0;
 }
 .usage-page .card,
 .feedback-page .card {
-  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
 }

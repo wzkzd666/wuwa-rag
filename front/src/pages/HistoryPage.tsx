@@ -61,7 +61,7 @@ export default function HistoryPage() {
     try {
       const det = await fetchDetail(id)
       download(`${det.title.replace(/[\\/:*?"<>|]/g, '_')}.json`, det)
-      toast('ok', '已导出会话 JSON')
+      toast('ok', '已导出会话')
     } catch (err) {
       toast('err', '导出失败：' + (err instanceof Error ? err.message : String(err)))
     }
@@ -91,7 +91,7 @@ export default function HistoryPage() {
             <History size={19} className="grad-text" /> 历史会话
           </h2>
           <p className="page-desc">
-            共 {convs.length} 个会话，存储于服务端并按账号隔离。支持检索、续接对话与导出为 JSON。
+            共 {convs.length} 个会话，仅你本人可见。支持检索、续接对话与导出。
           </p>
         </div>
         <button className="btn btn-ghost head-btn" onClick={() => void exportAll()} disabled={convs.length === 0}>
@@ -132,7 +132,7 @@ export default function HistoryPage() {
                 <button className="btn btn-icon" title="继续对话" onClick={() => openChat(c.thread_id)}>
                   <ArrowRight size={16} />
                 </button>
-                <button className="btn btn-icon" title="导出 JSON" onClick={() => void exportOne(c.thread_id)}>
+                <button className="btn btn-icon" title="导出会话" onClick={() => void exportOne(c.thread_id)}>
                   <Download size={15} />
                 </button>
                 <button

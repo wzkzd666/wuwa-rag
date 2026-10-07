@@ -251,8 +251,45 @@
   background: rgba(248, 113, 113, 0.1);
 }
 
+/* 窄屏档的抽屉开关：只有这一档才在顶栏渲染（桌面档侧栏常驻可见，
+   它自己的收纳按钮落在侧栏内部）。flex-shrink: 0 —— 顶栏变窄时不许把它压扁。 */
 .menu-btn {
   flex-shrink: 0;
+}
+
+/* 侧栏**自身**的收纳按钮：整行一条，落在「潮声智库」那一行**之下**、导航之上，
+   与会话栏顶部那个「会话列表」开关是同一套观感 —— 两个面板各自的收纳键都贴在自家顶上。
+   为什么不放进 .brand 与 logo 同行：折叠成图标窄栏（rail）后侧栏只有 64px，
+   38px 的 logo 已把那一行占满；独立成行，窄栏下图标才放得下并居中。 */
+.sidebar-fold-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-fold-btn:hover {
+  background: var(--bg-deep);
+  color: var(--text-primary);
+}
+@media (min-width: 861px) {
+  /* 图标窄栏下只剩图标，居中 */
+  .sidebar.rail .sidebar-fold-btn {
+    justify-content: center;
+    padding: 9px 0;
+  }
+  .sidebar.rail .sidebar-fold-btn span {
+    display: none;
+  }
 }
 
 /* ---------- 桌面端折叠成图标窄栏（2026-09-22） ----------
@@ -409,34 +446,5 @@
   cursor: default;
 }
 
-/* ---------- 侧边栏里的「会话列表」折叠开关 ----------
-   放在侧边栏而不是会话栏内部：两个面板各放一个收纳按钮会让人分不清按哪个，
-   而侧边栏本就是「导航收纳」的归属地。侧栏折叠（rail）时只剩图标。 */
-.session-fold-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 18px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-.session-fold-btn:hover {
-  background: var(--bg-deep);
-  color: var(--text-primary);
-}
-@media (min-width: 861px) {
-  .sidebar.rail .session-fold-btn {
-    justify-content: center;
-    padding: 9px 0;
-  }
-  .sidebar.rail .session-fold-btn span {
-    display: none;
-  }
-}
+/* 旧的 `.session-fold-btn`（侧边栏里整行的「会话列表」开关）已随两个按钮对调一起移除：
+   那个开关挪到顶栏最左后直接用通用的 .btn.btn-icon，不再需要整套整行按钮样式。 */

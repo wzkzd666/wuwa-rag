@@ -1,7 +1,8 @@
+/* ⚠️ 与 SettingsPage 同理：`.page` 的左右内边距已经算在 border-box 里，这里再限一次宽
+   会让历史页的内容区比其他页窄一档（而且原来写的兜底值 900px 与 --content-max 的 760px
+   根本不是同一个数，切页时宽度会跳）。限宽统一交给 global.css 的 `.page > *`。 */
 .history-page {
-  max-width: 900px;
-  margin: 0 auto;
-  width: 100%;
+  min-width: 0;
 }
 
 .head-btn {

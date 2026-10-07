@@ -60,7 +60,7 @@ export default function AnswerFeedback({ msg, question }: { msg: Message; questi
       </button>
       <button
         className={`msg-action fb-btn ${rated === -1 ? 'fb-bad' : ''}`}
-        title="这条回答不对 / 没帮上忙（可补充说明）"
+        title="这条回答不准确 / 未解决问题（可补充说明）"
         disabled={busy}
         onClick={() => setOpen((v) => !v)}
       >

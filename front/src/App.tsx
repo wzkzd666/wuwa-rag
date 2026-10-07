@@ -17,13 +17,21 @@ import * as api from './lib/api'
 // 设置页滑块存的是「期望的基准字号」，在这里换算成整体缩放倍率。
 const BASE_FONT_SIZE = 14
 
-export default function App() {
-  const settings = useStore((s) => s.settings)
-  const checkHealth = useStore((s) => s.checkHealth)
-  const auth = useStore((s) => s.auth)
-  const clearAuth = useStore((s) => s.clearAuth)
-  const loadConversations = useStore((s) => s.loadConversations)
-  const toast = useStore((s) => s.toast)
+/**
+ * 把外观设置写成 :root 上的 CSS 变量。
+ *
+ * 为什么独立成组件、而不是写在 App 里：App 一旦订阅 `settings` **整个对象**，
+ * 改其中任意一个字段（哪怕只是拖「内容区宽度」滑块）都会重渲染整棵路由树
+ * （App → Routes → Layout → 当前页），而这里真正要做的不过是把几个值写进 :root。
+ * 拆出来之后，拖滑块时重渲染的只剩这个 `return null` 的组件，页面树完全不动。
+ */
+function ThemeVars() {
+  const theme = useStore((s) => s.settings.theme)
+  const fontSize = useStore((s) => s.settings.fontSize)
+  const dataFontSize = useStore((s) => s.settings.dataFontSize)
+  const contentWidth = useStore((s) => s.settings.contentWidth)
+  const panelAlpha = useStore((s) => s.settings.panelAlpha)
+  const panelBlur = useStore((s) => s.settings.panelBlur)
 
   // 应用主题与字号
   //
@@ -45,24 +53,41 @@ export default function App() {
   // 「先是 100% 再跳成缩放后」的一帧闪烁。
   useLayoutEffect(() => {
     const root = document.documentElement
-    const uiZoom = settings.fontSize / BASE_FONT_SIZE
-    root.dataset.theme = settings.theme
+    const uiZoom = fontSize / BASE_FONT_SIZE
+    root.dataset.theme = theme
     root.style.setProperty('zoom', String(uiZoom))
     root.style.setProperty('--ui-zoom', String(uiZoom))
-    // 面板磨砂（卡片 / 页面标题块统一走 --panel-* 三个变量，见 global.css）
     // 数据区字号（用量表 / 答案反馈）：单独一个变量，不跟全局 zoom 混在一起 ——
     // 那两处要的是「一屏多看几行」，与聊天区的「易读」是相反诉求。
-    root.style.setProperty('--data-font-size', `${settings.dataFontSize}px`)
-    root.style.setProperty('--panel-alpha', String(settings.panelAlpha))
-    root.style.setProperty('--panel-blur', `${settings.panelBlur}px`)
-  }, [settings.theme, settings.fontSize, settings.dataFontSize, settings.panelAlpha, settings.panelBlur])
+    root.style.setProperty('--data-font-size', `${dataFontSize}px`)
+    // 页面内容区宽度：页面标题块与所有主卡片共用同一个值（global.css 的 --content-max）。
+    // 这是**唯一**的宽度入口 —— 任何页面都不许再自己写一套 max-width，否则会以同等特异性
+    // 覆盖它，表现为「设置里调了宽度、卡片纹丝不动」。
+    root.style.setProperty('--content-max', `${contentWidth}px`)
+    // 面板不透明度 / 磨砂（卡片与页面标题块统一走 --panel-* 三个变量，见 global.css）
+    root.style.setProperty('--panel-alpha', String(panelAlpha))
+    root.style.setProperty('--panel-blur', `${panelBlur}px`)
+  }, [theme, fontSize, dataFontSize, contentWidth, panelAlpha, panelBlur])
+
+  return null
+}
+
+export default function App() {
+  const checkHealth = useStore((s) => s.checkHealth)
+  const auth = useStore((s) => s.auth)
+  const clearAuth = useStore((s) => s.clearAuth)
+  const loadConversations = useStore((s) => s.loadConversations)
+  const toast = useStore((s) => s.toast)
 
   // 启动时把 persist 恢复的 token 接回 api 层，并校验是否仍有效
   // （30 天过期 / 后端重启清库 → 静默登出，不做多余弹窗）
+  //
+  // 这里用 getState() 取值而不是订阅：只在挂载时读一次，没必要为它保持订阅 ——
+  // 订阅了就会让 App 随任意设置变化重渲染（那正是拖滑块卡顿的来源）。
   useEffect(() => {
     api.setAuthToken(auth?.token ?? '')
     if (!auth) return
-    api.me(settings.apiBase).catch((err) => {
+    api.me(useStore.getState().settings.apiBase).catch((err) => {
       if (err instanceof api.UnauthorizedError) {
         clearAuth()
         toast('info', '登录已过期，请重新登录')
@@ -93,6 +118,7 @@ export default function App() {
 
   return (
     <>
+      <ThemeVars />
       <Background />
       <Routes>
         <Route element={<Layout />}>

@@ -1,12 +1,16 @@
+/* ⚠️ 这里原来写 `.settings-page { max-width: var(--content-max); margin: 0 auto }` ——
+   但 `.page` 的左右内边距（各 28px）也算在 border-box 里，于是设置页的**内容区只有
+   704px**，比用量页卡片的 760px 窄 56px —— 这是「用量页与设置页宽度对不上」的另一半原因
+   （调设置里的内容宽度也修不掉，因为它俩的基准压根不是一回事）。
+   限宽统一交给 global.css 的 `.page > *`（它管页面的每个直接子元素，正好覆盖
+   这里的 `.page-head` 与各个 `.set-card`），这里不再重复限宽。 */
 .settings-page {
-  max-width: 760px;
-  margin: 0 auto;
-  width: 100%;
+  min-width: 0;
 }
 
-/* 与 .page-head / 知识库 .kb-* 同一档内边距（18/20），三页的主卡片看不出是三套 */
+/* 与 .page-head 共用 --card-pad：三页的主卡片看不出是三套 */
 .set-card {
-  padding: 18px 20px;
+  padding: var(--card-pad);
   margin-bottom: 16px;
 }
 
@@ -434,78 +438,13 @@
   }
 }
 
-/* ---------- 用量与反馈面板 ---------- */
-.usage-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.usage-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.usage-empty {
-  text-align: center;
-  color: var(--text-muted);
-  padding: 14px 0;
-}
-.usage-hint {
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--text-muted);
-}
-.usage-sum {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.usage-sum-note {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.fb-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 420px;
-  overflow-y: auto;
-}
-.fb-item {
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-}
-.fb-item-bad {
-  border-left: 3px solid var(--err);
-}
-.fb-item-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  font-size: 12.5px;
-}
-.fb-item-time {
-  color: var(--text-muted);
-  font-size: 11.5px;
-}
-.fb-item-q,
-.fb-item-a,
-.fb-item-c {
-  font-size: 12.5px;
-  line-height: 1.6;
-  margin-top: 4px;
-  color: var(--text-secondary);
-  word-break: break-word;
-}
-.fb-item-c {
-  color: var(--err);
-}
+/* ---------- 用量与反馈面板 ----------
+   这一整块（.usage-panel / .usage-bar / .usage-empty / .fb-list / .fb-item* 等）原本留在这里，
+   但「用量」与「答案反馈」早已拆成独立页面 —— 设置页的 TSX 里**一次都没有**用到这些类名，
+   属于纯死样式：它们只是在全局作用域里与 UsagePanel.css 的同名规则打架
+   （最典型的是 `.fb-list{max-height:420px}` 让反馈列表被限高，以及
+   `.fb-item` 的 9px 11px / 12.5px 与那边的 7px 9px / inherit 互相覆盖），
+   表现为「用量表和答案反馈表样式不统一」。现在唯一定义处是 components/UsagePanel.css。 */
 
 /* ---------- 音乐播放设置 ---------- */
 .music-set {

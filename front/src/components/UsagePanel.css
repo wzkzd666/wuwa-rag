@@ -5,11 +5,22 @@
    现在把两处钉住：
    ① 每列最多占 0.5fr —— 宽屏也不会无限拉宽；
    ② SVG 限高 170px + 保持比例 —— 超出部分留白，不会变形。 */
+/* 宽度只有一个标准：**与页面上方的标题块（.page-head）同宽**，即每个卡片独占一整行。
+   ⚠️ 曾把两个图表并排（各占一半）、两个明细表也并排 —— 于是页面上出现
+   「半宽卡 + 半宽卡」和「满宽卡」混排，右边缘参差，觀感不统一
+   （用户连续三轮反馈「宽度不一致」）。这里固定单列。 */
+/* 图表这行必须显式 min-width:0 —— **这是「图表把框撑大」的真正原因**：
+   grid 的 `1fr` = `minmax(auto, 1fr)`，而 grid item 的 min-width:auto 取 min-content。
+   里面的 <svg viewBox="0 0 640 168"> 有**固有宽度 640px**，于是卡片被撑到 ≥640px
+   并溢出容器（父层都设了 min-width:0 也没用，因为卡不住最内层这一环）。
+   修法就是给 grid item 补 min-width:0 —— grid/flex 布局的头号坑。 */
 .charts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 0.5fr));
+  grid-template-columns: 1fr;
   gap: 10px;
-  align-items: start;
+}
+.charts > * {
+  min-width: 0;          /* ← 关键：让 item 可以收缩到内容宽度以下 */
 }
 .chart-card {
   padding: 8px 10px 6px;          /* 与其它数据块同一档内边距 */
@@ -42,8 +53,8 @@
 }
 .chart-svg {
   width: 100%;
+  max-width: 100%;       /* 兜底：不许超出所在卡片 */
   height: auto;
-  max-height: 170px;   /* 钉住高度：卡片不再随窗口宽度长高 */
   display: block;
 }
 .chart-tick {
@@ -110,8 +121,8 @@
   flex-direction: column;
   gap: 6px;
   padding: 0 10px 8px;        /* 与 head 的 8px 10px 对齐 */
-  max-height: 320px;          /* 460 → 320：展开后不再比图表卡高一截 */
-  overflow-y: auto;
+  /* 不限高、不内部滚动：内容多就自然变长（限高会让长反馈被藏在滚动区里，
+     爸爸要的是「宽度统一、观感一致」，不是把内容裁掉）。 */
 }
 .fb-del {
   margin-left: auto;
@@ -145,17 +156,24 @@
 }
 
 /* ---------- 明细：本地 / 云端两张表并排，窄屏自动堆叠 ---------- */
+/* 同上：单列，每张表独占一整行，与标题块同宽。 */
 .usage-tables {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
-  align-items: start;
+  grid-template-columns: 1fr;
+  gap: 10px;
 }
 
 /* ---------- 自适应窗口：图表与表格随宽度收缩，不出现横向滚动 ---------- */
-.usage-panel,
-.usage-card {
-  max-width: 100%;
+/* ⚠️ 这里原来把 `.usage-card` 也列了进来并给了 `max-width:100%` —— 它与 global.css 的
+   `.page > *{max-width:var(--content-max)}` 同特异性（0,1,0）却定义在后，会把内容宽度
+   覆盖成满宽（同样是「设置 760、实测 1289」的成因之一）。
+   外层卡片的宽度只归 global.css；这里只管面板自身的堆叠与「可收缩」。
+   纵向堆叠（flex column）原本只写在 SettingsPage.css 的历史残留里 —— 面板挪成独立页时
+   没跟着走，必须收在本组件，否则那块一清就塌。 */
+.usage-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   min-width: 0;
 }
 /* ---------- 数据块统一样式（用量表 + 反馈列表共用）----------
@@ -193,6 +211,21 @@
   padding: 12px 9px;
   font-size: inherit;
 }
+/* 用量页 / 反馈页顶部的那一行（筛选、视图切换、折叠统计）—— 三个组件都在用
+   （UsagePanel / FeedbackPanel / FeedbackPage），基础布局**只在这里定义一次**。
+   ⚠️ 这几条原来散落在 SettingsPage.css 里（面板早已挪成独立页、样式没跟着走），
+   与这里的同名规则特异性相同、互相打架，是「用量表与反馈表样式不统一」的来源之一。 */
+.usage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.usage-empty {
+  text-align: center;
+  color: var(--text-muted);
+}
 @media (max-width: 860px) {
   .usage-panel {
     gap: 12px;
@@ -222,9 +255,25 @@
   line-height: 1.5;
   border-radius: var(--radius-sm);
 }
+/* 单条反馈的外框。这两条属性（边框 + 底色）原来只写在 SettingsPage.css 的死样式区里，
+   删掉那块后必须在这里补回来，否则反馈条目会失去边框与底色。 */
+.fb-item {
+  border: 1px solid var(--line);
+  background: var(--bg-elevated);
+}
+.fb-item-bad {
+  border-left: 3px solid var(--err);
+}
 .fb-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   font-size: inherit;
   gap: 6px;
+}
+.fb-item-time {
+  color: var(--text-muted);
+  font-size: 11.5px;
 }
 .fb-item-q,
 .fb-item-a,
@@ -232,7 +281,11 @@
   font-size: inherit;
   line-height: 1.5;
   margin-top: 3px;
+  color: var(--text-secondary);
   overflow-wrap: anywhere;   /* 长英文/URL 不再把卡片撑出横向滚动条 */
+}
+.fb-item-c {
+  color: var(--err);
 }
 @media (max-width: 860px) {
   .fb-fold-stats {

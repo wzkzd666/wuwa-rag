@@ -20,11 +20,11 @@ import './KnowledgePage.css'
  */
 
 const PIPELINE_STEPS = [
-  { name: '抓取', desc: 'wuwa-mcp 抓鸣潮 wiki 原文' },
-  { name: '分块', desc: '结构感知分块 chunks.jsonl' },
-  { name: '入库', desc: '写入 PostgreSQL + S3' },
-  { name: '索引', desc: 'BM25 稀疏 + Chroma 稠密' },
-  { name: '图谱', desc: '正则抽事实 → Neo4j' },
+  { name: '抓取', desc: '获取鸣潮 WIKI 原始资料' },
+  { name: '分块', desc: '按结构切分为知识片段' },
+  { name: '入库', desc: '持久化保存与对象存储' },
+  { name: '索引', desc: '建立关键词与语义双索引' },
+  { name: '图谱', desc: '抽取角色关系构建图谱' },
 ]
 
 /** 来源标识 -> 展示名。后端 source 目前恒为 `kurobbs`（鸣潮 WIKI）。 */
@@ -295,7 +295,7 @@ export default function KnowledgePage() {
       toast(
         'ok',
         action === 'pause'
-          ? `已暂停「${character}」：worker 停在当前这一步等你`
+          ? `已暂停「${character}」：将在当前步骤停下，恢复后继续`
           : action === 'resume'
             ? `已继续「${character}」`
             : `已取消「${character}」`,
@@ -326,8 +326,8 @@ export default function KnowledgePage() {
   const doDelete = async (character: string) => {
     const ok = window.confirm(
       `确认删除「${character}」的知识库？\n\n` +
-      `会清掉 PostgreSQL 文档与分块、向量索引、图谱节点，并重建 BM25。\n` +
-      `原始 md 对象保留在 RustFS，此操作不影响其他角色。`,
+      `将清除该角色的文档、检索索引与关系图谱。\n` +
+      `原始资料仍保留在对象存储中，此操作不影响其他角色。`,
     )
     if (!ok) return
     setBusy((b) => ({ ...b, [character]: 'delete' }))
@@ -364,14 +364,14 @@ export default function KnowledgePage() {
           </h2>
           <p className="page-desc">
             已收录角色的知识资产概览。新增角色经「抓取 → 分块 → 入库 → 索引 → 图谱」五步流水线
-            异步处理，提交后返回任务号，由后台 Celery worker 执行；角色名册与数据库保持同步。
+            异步处理，提交后返回任务号；角色名册与知识库保持同步。
           </p>
         </div>
       </div>
 
       {health === 'down' && (
         <div className="kb-warn">
-          <Info size={15} /> 后端未连接。入库/重爬/删除接口需要 FastAPI(:8000) 与 Celery worker 同时在线。
+          <Info size={15} /> 后端未连接。新增、重爬与删除功能需要后端服务在线。
         </div>
       )}
 
@@ -479,7 +479,7 @@ export default function KnowledgePage() {
                   </div>
                   <div className="kb-pin-ctl">
                     {!mine ? (
-                      <span className="kb-pin-ro" title="这条是别人提交的，只有本人或管理员能操作">
+                      <span className="kb-pin-ro" title="由其他成员提交，仅本人或管理员可操作">
                         只读
                       </span>
                     ) : st?.status === 'failed' && !busy ? (
@@ -498,7 +498,7 @@ export default function KnowledgePage() {
                           disabled={!busy}
                           title={
                             busy
-                              ? '暂停后 worker 会在当前这一步原地等待，继续后自动往下跑'
+                              ? '暂停后将在当前步骤停止，继续后自动往下执行'
                               : '该任务已结束'
                           }
                         >
@@ -509,7 +509,7 @@ export default function KnowledgePage() {
                           className="btn btn-ghost btn-sm kb-btn-danger"
                           onClick={() => doControl(r.character, 'cancel')}
                           disabled={!busy}
-                          title="取消后整条链在这一步掐断，已写入的数据不回滚"
+                          title="取消后任务将在当前步骤终止，已写入的数据不会回滚"
                         >
                           <XCircle size={13} /> 取消
                         </button>
@@ -544,7 +544,7 @@ export default function KnowledgePage() {
                   <td className="kb-char">
                     {it.character}
                     {!it.seeded && (
-                      <span className="kb-badge" title="不在内置名册里，是自动爬取发现并入库的新角色">
+                      <span className="kb-badge" title="由自动抓取发现并收录的新角色，不在初始名册中">
                         自动收录
                       </span>
                     )}
@@ -564,7 +564,7 @@ export default function KnowledgePage() {
                           className="btn btn-ghost btn-sm"
                           disabled={!!busy[it.character]}
                           onClick={() => void doRefresh(it.character)}
-                          title="清掉旧知识后重新抓取更新（wiki 改版后用）"
+                          title="清除旧数据后重新抓取更新（资料源改版后使用）"
                         >
                           {busy[it.character] === 'refresh' ? (
                             <Loader2 size={12} className="spin" />
@@ -667,7 +667,7 @@ export default function KnowledgePage() {
                           className="btn btn-ghost btn-sm kb-btn-danger"
                           onClick={() => void doDeleteRecord(r.id)}
                           disabled={ctlBusy === String(r.id)}
-                          title="只删这条账本记录；正在跑的流水线请先用上面的「取消」停掉"
+                          title="仅删除这条任务记录；如需停止进行中的任务，请先使用上方的「取消」"
                         >
                           <Trash2 size={12} /> 删除
                         </button>

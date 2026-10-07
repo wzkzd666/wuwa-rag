@@ -73,6 +73,7 @@ const DEFAULT_SETTINGS: Settings = {
   stream: true,
   fontSize: 14,
   dataFontSize: 12,
+  contentWidth: 760,
   // 会话栏默认**展开**：它是「切回上一轮对话」的主要入口，收起只留「新建」会让人
   // 以为历史丢了。窗口窄时用户自己收或用下面的断点自动收。
   sessionListCollapsed: false,
@@ -171,11 +172,99 @@ interface Store {
 let activeAbort: AbortController | null = null
 
 /** 启动时读档：先看设备级登录态，再按它取该用户的界面偏好 */
+// 设置项的**结构版本**。新增设置项时 +1，并在 _migrateSettings 里把新增项刷成新默认值。
+const SETTINGS_VERSION = 3;
+
+// 宽度类设置（contentWidth）**不靠版本号判断**，而是记「用户是否显式改过」：
+// 只有改过才用他的值，没改过一律用代码里的当前默认值。
+//
+// 为什么不用版本号兜底（踩过三次）：版本号方案依赖「先发布默认值、再改版本号」的时序，
+// 而且迁移只改内存不写回 localStorage —— 任何一次 setSettings（比如切主题、拖别的滑块）
+// 就把内存那份连同旧版本号写回存储，于是又卡回旧默认值。改成「显式改过才生效」就没有
+// 这个时序依赖：默认值永远拿新的，除非用户自己动过。
+const _WIDTH_KEYS = ['contentWidth', 'dataFontSize'] as const;
+
+function _migrateSettings(saved: Partial<Settings>): Partial<Settings> {
+  const bag = { ...saved } as Partial<Settings> & {
+    __v?: number;
+    __touched?: string[];
+  };
+  if (bag.__v !== SETTINGS_VERSION) {
+    // 新增项：先给默认值，再把「未改过」的宽度项刷成当前默认值
+    bag.contentWidth = DEFAULT_SETTINGS.contentWidth;
+    bag.dataFontSize = DEFAULT_SETTINGS.dataFontSize;
+    bag.__v = SETTINGS_VERSION;
+  }
+  const touched = bag.__touched ?? [];
+  for (const k of _WIDTH_KEYS) {
+    if (!touched.includes(k)) (bag as Record<string, unknown>)[k] = DEFAULT_SETTINGS[k];
+  }
+  return bag;
+}
+
+/** 待落盘的设置（合并写用）。`changed` 累计这一批里**所有**被改过的键。 */
+let pendingSettings: { username: string; next: Settings; changed: string[] } | null = null;
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 把设置写进 localStorage —— **合并写**，250ms 内的多次改动只落一次盘。
+ *
+ * 为什么不能每次 setSettings 都直接写：设置页那几个滑块（内容区宽度 / 字号 /
+ * 面板透明度与磨砂）的 onChange 每秒触发几十次，而原实现每次要做**两次同步
+ * localStorage I/O**（先 markTouched「读一遍再写一遍」，再写一遍完整设置），
+ * 每次都带一次整份设置的 JSON.stringify —— 全是主线程上的同步开销，
+ * 叠加全应用重渲染，表现就是「拖着卡、屏幕闪」。
+ * 现在：内存状态**立即**更新（预览照常跟手），落盘延后合并成一次。
+ *
+ * ⚠️ `__touched`（记录用户显式改过哪些键，见 _migrateSettings）必须与被改的键
+ * 合在一起写，否则连拖两次只会记下最后一次。
+ */
+function flushSettings(): void {
+  const pending = pendingSettings;
+  pendingSettings = null;
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  if (!pending) return;
+  const key = LS_SETTINGS(pending.username);
+  const prev = readJSON<{ __touched?: string[] }>(key) ?? {};
+  const touched = prev.__touched ?? [];
+  for (const k of pending.changed) {
+    if (!touched.includes(k)) touched.push(k);
+  }
+  writeJSON(key, { ...pending.next, __touched: touched });
+}
+
+function scheduleSettingsPersist(
+  username: string | undefined,
+  next: Settings,
+  changed: string[],
+): void {
+  if (!username) return;
+  const merged =
+    pendingSettings && pendingSettings.username === username
+      ? Array.from(new Set([...pendingSettings.changed, ...changed]))
+      : changed;
+  pendingSettings = { username, next, changed: merged };
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(flushSettings, 250);
+}
+
+// 关页面 / 切到后台时立刻补上待写的那一次：合并窗口有 250ms 延迟，
+// 别让「拖完就关页面」把这次调整丢掉。
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushSettings);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushSettings();
+  });
+}
+
 const bootAuth = readJSON<AuthInfo>(LS_AUTH) ?? migrateLegacy()
 const bootSettings: Settings = {
   ...DEFAULT_SETTINGS,
-  ...(bootAuth ? readJSON<Partial<Settings>>(LS_SETTINGS(bootAuth.username)) ?? {} : {}),
-}
+  ...(bootAuth ? _migrateSettings(readJSON<Partial<Settings>>(LS_SETTINGS(bootAuth.username)) ?? {}) : {}),
+};
 
 export const useStore = create<Store>()((set, get) => {
   /** 把某条消息就地打个补丁（只改当前会话的最后一条流式消息） */
@@ -595,11 +684,12 @@ export const useStore = create<Store>()((set, get) => {
     },
 
     setSettings: (patch) => {
+      // 界面偏好按**登录用户**落盘：换个账号进来是另一套观感，不互相串。
+      // 内存先更新（界面实时预览），落盘交给合并写 —— 拖滑块时 onChange 高频触发，
+      // 每次都同步写 localStorage 就是「拖不动、闪屏」的主因，见 scheduleSettingsPersist。
       const next = { ...get().settings, ...patch }
-      // 界面偏好按**登录用户**落盘：换个账号进来是另一套观感，不互相串
-      const username = get().auth?.username
-      if (username) writeJSON(LS_SETTINGS(username), next)
       set({ settings: next })
+      scheduleSettingsPersist(get().auth?.username, next, Object.keys(patch))
     },
 
     toast: (kind, text) => {

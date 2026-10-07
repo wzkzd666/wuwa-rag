@@ -435,7 +435,7 @@ function LlmSection() {
             <div className="set-row">
               <div className="set-row-main">
                 <label>更换口令</label>
-                <p>必须提供原口令。只换口令本身，已存的 API Key 密文不动。</p>
+                <p>必须提供原口令。仅更换口令本身，已保存的密钥不受影响。</p>
               </div>
               <div className="set-row-ctl status-ctl">
                 <input className="input api-input" type="password" value={oldPp}
@@ -911,6 +911,31 @@ export default function SettingsPage() {
   })
   const toggle = (k: string) => setFold((f) => ({ ...f, [k]: !f[k] }))
 
+  // ---- 布局类设置（内容区宽度 / 基础字号）：拖拽期间不动布局，松手才提交 ----
+  //
+  // 为什么不能边拖边改：这两项都会改变页面的几何 —— 前者改主卡片宽度、后者改整页 zoom，
+  // 而**滑块自己就长在被改动的那个容器里**。实时应用等于「一边拖、一边把滑块从光标底下
+  // 挪走」：滑块被挪动 / 缩放后，同样的鼠标位移映射出的值就变了，拖到一半就脱手，
+  // 主观感受就是「拖拽被打断」。所以拖动时只更新草稿 —— 手柄和右侧数值照常跟手 ——
+  // 松手（pointerup / 键盘 keyup / 失焦）才写进 store。
+  const [draftWidth, setDraftWidth] = useState<number | null>(null)
+  const [draftFontSize, setDraftFontSize] = useState<number | null>(null)
+
+  /**
+   * 提交布局类设置。先挂上落位标记再写值，让松手那一次是从旧值**平滑**滑到新值，
+   * 而不是生硬跳变（过渡规则定义在 global.css，用 :root[data-layout-anim] 限定生效范围，
+   * 免得给页面加载、窗口缩放这些几何变化也带上动画）。
+   */
+  const commitLayout = (key: 'contentWidth' | 'fontSize', value: number | null) => {
+    if (value == null) return
+    const root = document.documentElement
+    root.dataset.layoutAnim = '1'
+    setSettings(key === 'contentWidth' ? { contentWidth: value } : { fontSize: value })
+    if (key === 'contentWidth') setDraftWidth(null)
+    else setDraftFontSize(null)
+    window.setTimeout(() => { delete root.dataset.layoutAnim }, 340)
+  }
+
   // ---- 音乐设置（开关 + 播放器路径）----
   const [mset, setMset] = useState<MusicSetting | null>(null)
   const [msetBusy, setMsetBusy] = useState(false)
@@ -1005,7 +1030,7 @@ export default function SettingsPage() {
         <div className="set-row">
           <div className="set-row-main">
             <label>API 地址</label>
-            <p>留空则走开发代理 /api（转发到 127.0.0.1:8000）。跨机访问时填完整地址，如 http://192.168.1.10:8000，此时后端需允许 CORS。</p>
+            <p>留空则使用默认的本地服务地址。跨机访问时填后端完整地址，如 http://192.168.1.10:8000。</p>
           </div>
           <div className="set-row-ctl">
             <input
@@ -1019,7 +1044,7 @@ export default function SettingsPage() {
         <div className="set-row">
           <div className="set-row-main">
             <label>连接状态</label>
-            <p>每 30 秒自动探测 GET /health。</p>
+            <p>每 30 秒自动检测一次连接状态。</p>
           </div>
           <div className="set-row-ctl status-ctl">
             <span className={`tag ${health === 'ok' ? 'tag-ok' : health === 'down' ? 'tag-err' : 'tag-warn'}`}>
@@ -1034,7 +1059,7 @@ export default function SettingsPage() {
         <div className="set-row">
           <div className="set-row-main">
             <label>流式输出</label>
-            <p>开启走 SSE 逐字吐答案（/ask/stream）；关闭则一次性返回（/ask）。</p>
+            <p>开启后逐字显示回答；关闭则一次性显示完整回答。</p>
           </div>
           <div className="set-row-ctl">
             <button
@@ -1184,12 +1209,35 @@ export default function SettingsPage() {
               min={12}
               max={18}
               step={1}
-              value={settings.fontSize}
-              onChange={(e) => setSettings({ fontSize: Number(e.target.value) })}
+              value={draftFontSize ?? settings.fontSize}
+              onChange={(e) => setDraftFontSize(Number(e.target.value))}
+              onPointerUp={(e) => commitLayout('fontSize', Number(e.currentTarget.value))}
+              onKeyUp={(e) => commitLayout('fontSize', Number(e.currentTarget.value))}
             />
             <span className="font-val">
-              <Type size={13} /> {settings.fontSize}px
+              <Type size={13} /> {draftFontSize ?? settings.fontSize}px
             </span>
+          </div>
+        </div>
+
+        {/* 内容区宽度：标题块与所有卡片共用这一个值（用户此前反馈「宽度不一致」）。 */}
+        <div className="set-row">
+          <div className="set-row-main">
+            <label>内容区宽度</label>
+            <p>当前 {draftWidth ?? settings.contentWidth}px，标题块与所有卡片同步。</p>
+          </div>
+          <div className="set-row-ctl font-ctl">
+            <input
+              type="range"
+              min={640}
+              max={1120}
+              step={20}
+              value={draftWidth ?? settings.contentWidth}
+              onChange={(e) => setDraftWidth(Number(e.target.value))}
+              onPointerUp={(e) => commitLayout('contentWidth', Number(e.currentTarget.value))}
+              onKeyUp={(e) => commitLayout('contentWidth', Number(e.currentTarget.value))}
+            />
+            <span className="font-val">{draftWidth ?? settings.contentWidth}px</span>
           </div>
         </div>
 
@@ -1451,7 +1499,7 @@ export default function SettingsPage() {
                 </span>
                 <button
                   className="profile-del"
-                  title="不再记住这条"
+                  title="不再保留此项"
                   onClick={async () => {
                     try {
                       await api.deleteFact(f.id, apiBase)

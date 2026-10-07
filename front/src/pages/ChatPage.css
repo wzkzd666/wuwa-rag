@@ -301,14 +301,35 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 8px 4px;
+  /* 收纳开关已独立成顶部一行（.session-toggle），这里不再保留左右内边距 ——
+     留着会让「新建对话」比上面那条收纳键窄 16px，两个按钮左右边缘对不齐。 */
+  padding: 0;
 }
 .session-head .new-chat {
   flex: 1;
   justify-content: center;
 }
+/* 会话列表的收纳开关（会话栏顶部一整条，在「新建对话」之上）。
+   与侧栏的 `.sidebar-fold-btn` 同一套观感：两个面板各自的收纳键都贴在自己顶上。 */
 .session-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
   flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+.session-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 .session-list.rail {
   width: 44px;
@@ -317,9 +338,10 @@
   padding: 10px 4px;
   gap: 6px;
 }
+/* 折叠态 .session-head 里已经没有任何节点（新建按钮改由 `.new-chat-rail` 在 head
+   之外单独渲染），留着它只会白占一格 gap，直接不显示。 */
 .session-list.rail .session-head {
-  padding: 0;
-  justify-content: center;
+  display: none;
 }
 .session-list.rail .session-toggle {
   width: 32px;

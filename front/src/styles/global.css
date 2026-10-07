@@ -52,7 +52,16 @@
 
   --sidebar-w: 264px;
   --topbar-h: 58px;
-  --content-max: 880px;
+  /* 页面内容的统一宽度（**唯一定义处**）：`.page` 的每个直接子元素都吃这个值，
+     由设置页「内容宽度」滑块实时写入（App.tsx → root.style.setProperty）。
+     其它任何地方都不许再写一套自己的宽度 —— 见下方 `.page > *` 处的说明。 */
+  --content-max: 760px;
+  /* 面板内边距随内容宽度**等比缩放**：760px（默认值）时正好 20px，与改版前的
+     固定内边距一致，所以默认观感不变；把内容宽度调窄时留白同步收小，
+     不会出现「窄框里一圈大空白」。`.page-head`（页面标题块）与
+     `.usage-card`（用量/反馈主卡片）共用同一个值 —— 外框等宽、内文也对齐。
+     设置页滑块的范围是 640~1120px，对应 16.8~29.5px，边界值都落在 clamp 内。 */
+  --card-pad: clamp(12px, calc(var(--content-max) / 38), 30px);
 
   color-scheme: dark;
 }
@@ -459,6 +468,12 @@ select.input {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 滚动条槽位**常驻**。为什么必须常驻：内容高度会随内容宽度变化，滚动条若跟着出现/消失，
+     内容区宽度就要来回跳一个滚动条的宽度（本项目是 8px）——
+     拖「内容区宽度」滑块时最明显：宽度一变 → 文字换行数变 → 内容高度变 →
+     滚动条 toggle → 可用宽度又变 → 「该不该出现」再翻转，两边来回振荡，肉眼看就是「闪」。
+     槽位常驻后可用宽度恒定，只剩一次平滑的宽度变化。 */
+  scrollbar-gutter: stable;
   padding: 26px 28px 40px;
 }
 /* 页面内容统一宽度。
@@ -471,6 +486,15 @@ select.input {
   margin-left: auto;
   margin-right: auto;
 }
+/* 布局类设置「松手落位」时的一次过渡（内容区宽度 / 基础字号，见 SettingsPage 的 commitLayout）。
+   这两项在拖拽期间**不写进 store**，页面几何完全不动 —— 否则滑块会在拖拽过程中被自己
+   改变的布局挪走，拖到一半就脱手。既然拖动时不动，提交那一次就可以放心地平滑滑到位。
+   ⚠️ 用 [data-layout-anim] 限定范围，不要做成常驻 transition：常驻会让页面首次加载、
+   窗口缩放等一切几何变化都带上动画。 */
+:root[data-layout-anim] .page > * {
+  transition: max-width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+              padding 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
 .page-inner {
   max-width: var(--content-max);
   margin: 0 auto;
@@ -479,6 +503,38 @@ select.input {
 .chat-page > * {
   max-width: none;
 }
+
+/* 用量页 / 反馈页的主卡片。
+   ⚠️ 它原来只写在 UsagePage.css 里，而反馈页 import 的是 FeedbackPage.css ——
+   于是反馈页卡片完全没有内边距，内容顶到边框，视觉上比用量页「宽」一截
+   （用户连续反馈「宽度不一致」）。两页都要用，就放在共享的 global.css。 */
+/* 用量页 / 反馈页的**主卡片**：只给内边距，绝不碰宽度。
+   ⚠️ 这里曾经写成 `padding:0; margin-left:0; margin-right:0; width:100%; max-width:100%`，
+   三条都在同特异性（0,1,0）下、且定义在 `.page > *` **之后** —— 于是把
+   `max-width: var(--content-max)` 覆盖成 100%（`margin` 归零还顺带让它不再居中）。
+   表现为「设置里的内容宽度是 760、卡片实测 1289」，而且怎么调设置都不动。
+   宽度只归 `.page > *` 管；卡片自己只负责留白，且留白随宽度等比缩放（--card-pad）。
+   为什么留白放这一层而不是更内层：内层有 grid/flex 包裹，padding 会被逐层累加，
+   导致卡片总宽比标题块窄一截（这正是当初「宽度对不上」的另一半原因）。 */
+.usage-card,
+.feedback-page .usage-card {
+  padding: var(--card-pad);
+  box-sizing: border-box;
+}
+
+/* 卡片**内层**的包裹层（它们不是 `.page` 的直接子元素，不吃 --content-max）：
+   任务只是「撑满外卡片 + 可收缩」，不承担宽度标准。 */
+.usage-panel,
+.usage-panel > .charts,
+.usage-panel > .usage-tables {
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 
 /* 页面标题块：与下方卡片**同一套面板材质**（--panel-*），只是更薄一点。
    为什么必须包：自定义背景图下，卡片以外的文字**没有底色**，浅灰的副标题
@@ -490,7 +546,9 @@ select.input {
   align-items: flex-start;
   gap: 16px;
   margin-bottom: 20px;
-  padding: 18px 20px;
+  /* 与下方的 `.usage-card` / `.set-card` 共用 --card-pad：内边距随内容宽度等比缩放，
+     三页的标题块与主卡片永远是同一档留白（原来三处各写 18px 20px，改宽度时对不齐）。 */
+  padding: var(--card-pad);
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
   /* 与 .card **完全同一材质**（同样的 alpha / 模糊 / 内边距）——

@@ -36,14 +36,18 @@ export default function MusicBar() {
 
   useEffect(() => {
     let alive = true
+    let timer = 0
     const tick = async () => {
+      if (!alive) return
       const s = await refresh()
       if (!alive) return
-      // 没在放就不再问了：省掉每 5 秒一次的无效请求
-      if (s && !s.available) return
-      timer = window.setTimeout(tick, 5000)
+      // ⚠️ **绝不能**因为「现在没在放」就 return 掉轮询（旧写法如此，是个真 bug）：
+      // 播放状态是**会自己变**的 —— 用户随时可能去点歌、或手动打开 QQ音乐，
+      // 一旦停了轮询，播放条就再也不会出现了（表现出来就是「明明在放歌，顶栏却空的」）。
+      // 没在放时只是把间隔放宽，省掉大部分无效请求。
+      timer = window.setTimeout(tick, s?.available ? 5000 : 15000)
     }
-    let timer = window.setTimeout(tick, 0)
+    timer = window.setTimeout(tick, 0)
     return () => {
       alive = false
       window.clearTimeout(timer)
@@ -109,7 +113,7 @@ export default function MusicBar() {
                   onClick={() => void ctl(st!.muted ? 'unmute' : 'mute')}>
             {st!.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
           </button>
-          <button className="msg-action" title="音量（只改 QQ音乐，不动系统）" disabled={!!busy}
+          <button className="msg-action" title="音量（仅调整 QQ音乐，不影响系统音量）" disabled={!!busy}
                   onClick={() => void openVol()}>
             <SlidersHorizontal size={14} />
           </button>
@@ -120,7 +124,7 @@ export default function MusicBar() {
             max={100}
             value={vol ?? st!.volume ?? 100}
             disabled={!!busy}
-            title={`QQ音乐音量 ${vol ?? st!.volume ?? '—'}%（只改这个应用）`}
+            title={`QQ音乐音量 ${vol ?? st!.volume ?? '—'}%（仅作用于 QQ音乐）`}
             onChange={(e) => {
               const v = Number(e.target.value)
               setVol(v)

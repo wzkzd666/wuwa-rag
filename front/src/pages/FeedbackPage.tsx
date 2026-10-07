@@ -17,7 +17,7 @@ export default function FeedbackPage() {
   const [days, setDays] = useState(7)
 
   return (
-    <div className="page usage-page">
+    <div className="page feedback-page">
       <div className="page-head">
         <div>
           <h2 className="page-title">

@@ -1,4 +1,2 @@
 /* 反馈页与用量页共用同一套卡片外框 */
-.feedback-page .usage-card {
-  padding: 18px 20px;
-}
+/* 卡片宽度统一在 global.css 里管（.usage-card / .usage-panel 一律 padding:0）。 */
