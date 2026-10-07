@@ -234,6 +234,9 @@ export interface Settings {
   theme: 'dark' | 'light'
   stream: boolean
   fontSize: number
+  /** 用量表 / 答案反馈等**数据区**的字号（px），与全局 fontSize 分开调。
+   *  数据区信息密度比聊天区高，挤在一页里看的东西多，字号要能单独收放。 */
+  dataFontSize: number
 
   // ---------- 个性化（2026-09-22 新增） ----------
   /** 桌面端把侧边栏折叠成图标窄栏 */

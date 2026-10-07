@@ -427,7 +427,9 @@ async def _run_music_best_effort(question: str, user_id: int,
         if action == "play":
             return await music_svc.play(kw, user_id) if kw else ""
         if action == "status":
-            return await music_svc.call("player_status")
+            # ⚠️ 必须走带 user_id 的 status()：赤裸的 call() 不会设置用户上下文，
+            # 内层可用性判定会退回部署默认 —— 用户在设置页开了开关也照样报「未启用」。
+            return await music_svc.status(user_id)
         return await music_svc.control(action, user_id)
     except Exception as exc:  # noqa: BLE001 —— 音乐是附加能力，挂了不该影响问答
         log.warning("音乐指令 %s 执行失败: %s", action, exc)
@@ -442,12 +444,17 @@ async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, ke
 
     # 音乐指令：先播、先给阶段提示，再进问答流。放在 ask_stream **之前**是因为
     # 点歌要等冷启动（实测 2.7s）+ 切歌确认，放到流里会卡住第一个 token。
+    # ⚠️ 结果必须**带进图**（ask_stream 的 music_result 参数）：图里的 chitchat 分支
+    # 同样会处理音乐动作，不把结果交过去它就会再跑一遍 —— 同一句点歌搜两次、投两次。
+    # 空串表示「这一轮没有实际执行」（比如没听清歌名），交给图里照常处理。
+    music_result = ""
     if music_action(question, history) is not None:
         yield {"stage": "music", "label": "帮家人放首歌"}
-        await _run_music_best_effort(question, user.id, history)
+        music_result = await _run_music_best_effort(question, user.id, history)
     try:
         async for evt in ask_stream(question, key, user_context=user_ctx,
-                                    user_id=user.id, history=history):
+                                    user_id=user.id, history=history,
+                                    music_result=music_result):
             if evt.get("done"):
                 # 必须在把 done 交给前端**之前**写完库：前端收到 done 会立刻重拉会话
                 # 列表，晚一步就是「刚聊完一刷新答案没了」的竞态。

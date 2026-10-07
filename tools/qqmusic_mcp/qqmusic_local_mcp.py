@@ -178,10 +178,48 @@ async def _mid_to_songid(mid: str) -> dict[str, Any] | None:
             "album": (it.get("album") or {}).get("name", "")}
 
 
+def _fallback_keywords(keyword: str) -> list[str]:
+    """原串搜不到时的降级关键词。
+
+    ⚠️ 这不是锦上添花，是**必需**的：QQ 的搜索接口对「歌手 + 的 + 歌名」
+    这种中文串返回空。实测（2026-10-07）：
+
+        '周杰伦的青花瓷'  -> 0 条      <-- 用户最自然的口语说法
+        '周杰伦 青花瓷'   -> 4 条      <-- 把「的」换成空格
+        '青花瓷'          -> 4 条      <-- 只留歌名
+        '周杰伦的晴天'    -> 0 条
+
+    没有这层降级，点歌就会莫名其妙地"搜不到"，而模型拿到「没搜到」后会
+    自己编一个理由（实测它说成了「这曲子好像不在我的歌单库里」）。
+    """
+    k = keyword.strip()
+    # 书名号 / 引号：『《青花瓷》』这类直接剥掉
+    for ch in "《》「」『』":
+        k = k.replace(ch, " ").strip()
+    alts: list[str] = []
+    if "的" in k:
+        alts.append(k.replace("的", " "))         # ① 的 → 空格（保留歌手约束，命中率最高）
+        alts.append(k.rsplit("的", 1)[-1].strip())  # ② 只留「的」后面的歌名
+    return list(dict.fromkeys(a for a in alts if a and a != keyword.strip()))
+
+
 async def search_song(keyword: str, limit: int = 5) -> list[dict]:
-    """搜索并补全 songid（每条都实打实取过 songid，不编造）。"""
+    """搜索并补全 songid（每条都实打实取过 songid，不编造）。
+
+    原串落空时按 `_fallback_keywords` 依次重试 —— 用户口语里的
+    「播放<歌手>的<歌名>」在原串下恒为 0 条，必须降级才行。
+    """
+    items = await _search_mid(keyword, limit)
+    if not items:
+        for alt in _fallback_keywords(keyword):
+            items = await _search_mid(alt, limit)
+            if items:
+                log.info("搜索降级命中：%r -> %r", keyword, alt)
+                break
+    if not items:
+        return []
     out: list[dict] = []
-    for item in await _search_mid(keyword, limit):
+    for item in items:
         full = await _mid_to_songid(item["mid"])
         if full:
             out.append({**item, **full})

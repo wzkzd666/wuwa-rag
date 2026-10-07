@@ -226,3 +226,25 @@ async def test_问自己是谁_已在意图路由里判进闲聊(offline_intent)
     st2 = await offline_intent("守岸人是谁", user_context="用户自称是颗粒")
     assert st2["intent"] != "chitchat", st2
     assert st2.get("characters") == ["守岸人"], st2
+
+
+def test_对话图能编译_且每条边的端点都已注册为节点() -> None:
+    """守「边引用了未注册节点」这类构图错误 —— 它是**编译期**才暴露的。
+
+    背景：`clarify` 分支曾经只加了路由表 `"clarify": "clarify"` 和
+    `add_edge("clarify", END)`，却漏掉 `add_node("clarify", ...)`，
+    于是 LangGraph 编译时抛 `Found edge starting at unknown node 'clarify'`。
+    因为 `_compiled` 是懒加载（首次问答才编译），**进程启动一切正常、
+    第一条提问才「生成中断」**，只看启动日志根本发现不了。
+
+    这条测试不需要 LLM / 数据库 / 事件循环，纯构图，毫秒级，
+    但能拦住「加节点时漏注册」这一类所有变体。
+    """
+    from wuwa_rag.dialog.graph import build_graph
+
+    compiled = build_graph().compile()   # 构图有问题会直接在这里抛
+    nodes = set(compiled.get_graph().nodes)
+    assert "clarify" in nodes
+    for edge in compiled.get_graph().edges:
+        assert edge.source in nodes, f"边的起点不是已注册节点: {edge.source}"
+        assert edge.target in nodes, f"边的终点不是已注册节点: {edge.target}"

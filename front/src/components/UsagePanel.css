@@ -1,15 +1,22 @@
 
 /* ---------- 图表（手写 SVG，无图表库依赖） ---------- */
+/* 图表卡曾比旁边的表格/反馈卡大一圈（用户反馈「图表框很大，和别的文本框不统一」）。
+   根因：SVG 是 viewBox 640×168 + width:100%，宽屏下**等比拉高**，卡片跟着长。
+   现在把两处钉住：
+   ① 每列最多占 0.5fr —— 宽屏也不会无限拉宽；
+   ② SVG 限高 170px + 保持比例 —— 超出部分留白，不会变形。 */
 .charts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 0.5fr));
+  gap: 10px;
+  align-items: start;
 }
 .chart-card {
-  padding: 12px 14px 8px;
+  padding: 8px 10px 6px;          /* 与其它数据块同一档内边距 */
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
+  min-width: 0;
 }
 .chart-head {
   display: flex;
@@ -36,10 +43,11 @@
 .chart-svg {
   width: 100%;
   height: auto;
+  max-height: 170px;   /* 钉住高度：卡片不再随窗口宽度长高 */
   display: block;
 }
 .chart-tick {
-  font-size: 9.5px;
+  font-size: 9.5px;   /* SVG 内部刻度不跟 --data-font-size：viewBox 是固定坐标系 */
   fill: var(--text-muted);
 }
 .chart-empty,
@@ -58,12 +66,15 @@
   background: var(--bg-elevated);
   overflow: hidden;
 }
+/* 与图表卡、表格**同一档**：内边距 8px 10px、字号走 --data-font-size。
+   之前这里是 11px 14px + 默认字号，折叠框比旁边两块明显大一圈（用户反馈）。 */
 .fb-fold-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 11px 14px;
+  padding: 8px 10px;
+  font-size: var(--data-font-size, 12px);
   background: transparent;
   border: 0;
   cursor: pointer;
@@ -97,9 +108,9 @@
 .fb-fold-body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 4px 12px 12px;
-  max-height: 460px;
+  gap: 6px;
+  padding: 0 10px 8px;        /* 与 head 的 8px 10px 对齐 */
+  max-height: 320px;          /* 460 → 320：展开后不再比图表卡高一截 */
   overflow-y: auto;
 }
 .fb-del {
@@ -147,17 +158,40 @@
   max-width: 100%;
   min-width: 0;
 }
+/* ---------- 数据块统一样式（用量表 + 反馈列表共用）----------
+   ⚠️ 之前只有用量表被单独压过字号，反馈卡片仍是默认尺寸，两块并排时一胖一瘦、
+   圆角与边框也不一致（用户反馈「样式不统一很突兀」）。现在**同一套规则**管两者：
+   12px 正文、1.5 行高、6px×9px 内边距、同一档边框与圆角。
+   想调整密度只改这一段，不要再给某一页单独特效。 */
+/* 字号走 `--data-font-size`（设置页「数据区字号」滑块实时写入，见 App.tsx），
+   行高固定 1.5 不跟字号走 —— 跟着变会让不同字号下行距忽宽忽窄。 */
+.usage-panel .kb-table,
+.fb-fold-body {
+  font-size: var(--data-font-size, 12px);
+  line-height: 1.5;
+}
 .usage-panel .kb-table {
   table-layout: fixed;
   width: 100%;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
 }
 .usage-panel .kb-table th,
 .usage-panel .kb-table td {
-  padding: 7px 10px;
-  font-size: 12.5px;
+  padding: 5px 9px;              /* 7px → 5px：行更密，一屏能多看几行 */
+  font-size: inherit;
+  line-height: 1.5;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.usage-panel .kb-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.usage-panel .usage-empty {
+  padding: 12px 9px;
+  font-size: inherit;
 }
 @media (max-width: 860px) {
   .usage-panel {
@@ -183,10 +217,21 @@
 .fb-fold-body,
 .fb-item {
   min-width: 0;
+  padding: 7px 9px;              /* 与用量表的 5px×9px 同一档 */
+  font-size: inherit;            /* 跟 --data-font-size 走 */
+  line-height: 1.5;
+  border-radius: var(--radius-sm);
+}
+.fb-item-head {
+  font-size: inherit;
+  gap: 6px;
 }
 .fb-item-q,
 .fb-item-a,
 .fb-item-c {
+  font-size: inherit;
+  line-height: 1.5;
+  margin-top: 3px;
   overflow-wrap: anywhere;   /* 长英文/URL 不再把卡片撑出横向滚动条 */
 }
 @media (max-width: 860px) {

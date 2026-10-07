@@ -1192,6 +1192,28 @@ export default function SettingsPage() {
             </span>
           </div>
         </div>
+
+        {/* 数据区字号：用量表 / 答案反馈这些「一屏要看很多东西」的地方单独调。
+            跟基础字号分开放，因为两者诉求相反：聊天区要易读，数据区要紧凑。 */}
+        <div className="set-row">
+          <div className="set-row-main">
+            <label>数据区字号</label>
+            <p>当前 {settings.dataFontSize}px，用于用量表与答案反馈。</p>
+          </div>
+          <div className="set-row-ctl font-ctl">
+            <input
+              type="range"
+              min={10}
+              max={16}
+              step={1}
+              value={settings.dataFontSize}
+              onChange={(e) => setSettings({ dataFontSize: Number(e.target.value) })}
+            />
+            <span className="font-val">
+              <Type size={13} /> {settings.dataFontSize}px
+            </span>
+          </div>
+        </div>
       </Fold>
 
       {/* 个性化：头像 + 背景 */}

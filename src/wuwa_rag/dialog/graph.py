@@ -1022,11 +1022,13 @@ _CLARIFY_HINT = (
     "在你问清楚之前，**不要**猜测着回答任何内容，也不要顺着上一句话往下编。"
 )
 
+# ⚠️ 这里只写**正面要求**，不要点名反例（原先写的是「不要假装已经放上了」）——
+# 提示词里点名的反例会被 aemeath 当成输出样本照抄，是项目里反复踩过的坑。
+# 工具返回本身已经是完整的人话（成功/没搜到/不可用各有措辞），模型只需如实转述。
 _MUSIC_RESULT_HINT = (
-    "家人点了音乐。音乐工具刚执行完，结果如下（这就是事实，照着说，别改也别加戏）：\n"
+    "家人点了音乐，工具已经执行完。下面是它返回的原文，这是本轮唯一可以依据的事实：\n"
     "{result}\n"
-    "用你自己的口吻把上面这个结果讲一句；如果结果是失败或不可用，就如实说做不到，"
-    "不要假装已经放上了。"
+    "请用你自己的口吻把这句话转述给家人，让他清楚这次点歌的结果。"
 )
 
 # 用户画像注入（「不检索」分支专用）。
@@ -1167,20 +1169,33 @@ async def _run_music(state: RagState) -> str:
     act = state.get("music_action") or ""
     if not act:
         return ""
-    ok, why = music.available()
-    if not ok:
-        return f"（音乐功能不可用：{why}）"
+    # API 层为了让歌**早点开始放**，可能已经提前跑过一次（见 api/app.py 的
+    # _stream_answer_inner），结果由 state 带进来 —— 这里直接复用。
+    # 没有这一步，同一句点歌会把工具调两遍：搜索结果发两次、播放指令投两次。
+    preset = state.get("music_result") or ""
+    if preset:
+        return preset
+    uid = state.get("user_id")
     kw = state.get("music_keyword") or ""
-    try:
-        uid = state.get("user_id")
-        if act == "play":
-            return await music.play(kw, uid) if kw else "（没听清要放哪首）"
-        if act == "status":
-            return await music.call("player_status")
-        return await music.control(act, uid)
-    except Exception as exc:  # noqa: BLE001 —— 音乐失败绝不能带崩闲聊分支
-        log.warning("音乐动作 %s 失败: %s", act, exc)
-        return f"（音乐操作失败：{exc}）"
+    # ⚠️ 整段包在 `as_user` 里。内层 `_ensure_base()` 判「这个用户允不允许用音乐」时
+    # **只能**从 contextvar 取当前用户（会话是全局单例，没有参数可传）。
+    # 漏包的后果不是报错，而是静默退回部署默认（.env 没开就一律判「未启用」）——
+    # 用户在设置页开了开关也照样不能用，看起来就像「必须重启服务」。
+    # status 分支尤其要当心：它是直接 `call()`，不像 play/control 自带 as_user。
+    with music.as_user(uid):
+        # 必须走 available_async：同步 available() 只看 .env 的部署开关。
+        ok, why = await music.available_async(uid)
+        if not ok:
+            return f"（音乐功能不可用：{why}）"
+        try:
+            if act == "play":
+                return await music.play(kw, uid) if kw else "（没听清要放哪首）"
+            if act == "status":
+                return await music.status(uid)
+            return await music.control(act, uid)
+        except Exception as exc:  # noqa: BLE001 —— 音乐失败绝不能带崩闲聊分支
+            log.warning("音乐动作 %s 失败: %s", act, exc)
+            return f"（音乐操作失败：{exc}）"
 
 
 async def clarify_node(state: RagState):
@@ -1222,6 +1237,12 @@ def build_graph() -> StateGraph:
     g = StateGraph(RagState)
     g.add_node("intent", intent_node)
     g.add_node("chitchat", chitchat_node)
+    # ⚠️ clarify 的节点注册曾经整条漏掉 —— 而路由表里已写了 "clarify": "clarify"、
+    # 下面也已 add_edge("clarify", END)，于是 LangGraph 编译时抛
+    # 「Found edge starting at unknown node 'clarify'」，表现为**每次提问都生成中断**。
+    # 图是首次请求才编译的（_compiled 懒加载），所以这个错不在进程启动时报，
+    # 而是在第一条问答打进来时才爆 —— 排查时别只盯着启动日志。
+    g.add_node("clarify", clarify_node)
     g.add_node("time", time_node)
     g.add_node("graph", graph_node)
     g.add_node("vector", vector_node)
@@ -1308,7 +1329,8 @@ async def ensure_characters(question: str) -> tuple[list[str], bool, list[str]]:
 
 
 def _fresh_state(question: str, characters: list[str], user_context: str = "",
-                 user_id: int | None = None, history: list[dict] | None = None) -> dict:
+                 user_id: int | None = None, history: list[dict] | None = None,
+                 music_result: str = "") -> dict:
     """每轮问答的初始状态：检索侧字段全部清零。
 
     docs/graph_facts/web_facts 等是普通字段（无 reducer），checkpointer 会把上一轮
@@ -1343,6 +1365,11 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "",
         # _chat_client 会读到**上一个用户**的云端配置 —— 等于用别人的 API-KEY 跑自己的问题。
         # 无登录/未配置时为 None，_chat_client 直接回落本地默认。
         "user_id": user_id,
+        # 音乐工具结果：API 层为了让歌**早点开始放**，会在进图之前先跑一次，
+        # 结果由这里带进本轮 —— 图里的 _run_music 命中它就跳过重复调用。
+        # ⚠️ 必须每轮显式覆盖（与 user_id 同理）：checkpointer 会把上一轮的值带进来，
+        # 那会让**这一轮**拿着上一轮的点歌结果去回话。
+        "music_result": music_result,
     }
     if history is not None:
         state["history"] = history
@@ -1380,7 +1407,8 @@ async def ask(question: str, thread_id: str = "default", user_context: str = "",
 
 
 async def ask_stream(question: str, thread_id: str = "default", user_context: str = "",
-                     user_id: int | None = None, history: list[dict] | None = None):
+                     user_id: int | None = None, history: list[dict] | None = None,
+                     music_result: str = ""):
     """流式问答：走 LangGraph astream_events，checkpointer 自动管理多轮记忆。
 
     yield dict：
@@ -1417,7 +1445,7 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
 
     chain = await get_chain()
     injected = crawled if crawled else []
-    input_state = _fresh_state(question, injected, user_context, user_id, history)
+    input_state = _fresh_state(question, injected, user_context, user_id, history, music_result)
     config = {"configurable": {"thread_id": thread_id}}
 
     # 从事件流抽 token + 阶段 + 最终元数据

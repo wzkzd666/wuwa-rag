@@ -408,3 +408,35 @@
   opacity: 0.4;
   cursor: default;
 }
+
+/* ---------- 侧边栏里的「会话列表」折叠开关 ----------
+   放在侧边栏而不是会话栏内部：两个面板各放一个收纳按钮会让人分不清按哪个，
+   而侧边栏本就是「导航收纳」的归属地。侧栏折叠（rail）时只剩图标。 */
+.session-fold-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 18px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.session-fold-btn:hover {
+  background: var(--bg-deep);
+  color: var(--text-primary);
+}
+@media (min-width: 861px) {
+  .sidebar.rail .session-fold-btn {
+    justify-content: center;
+    padding: 9px 0;
+  }
+  .sidebar.rail .session-fold-btn span {
+    display: none;
+  }
+}

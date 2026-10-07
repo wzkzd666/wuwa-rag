@@ -4,6 +4,7 @@ import { ChevronDown, Loader2, RefreshCw, ThumbsDown, ThumbsUp, Trash2 } from 'l
 import { useStore } from '../store/useStore'
 import { feedbackDelete, feedbackList } from '../lib/api'
 import type { FeedbackList } from '../types'
+import './UsagePanel.css'
 
 /**
  * 答案反馈（独立一页）。

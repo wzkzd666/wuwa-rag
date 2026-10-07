@@ -23,6 +23,9 @@ class RagState(TypedDict, total=False):
     answer: str
     music_action: str        # 音乐动作 play/pause/next/prev/stop/status；空=本轮不是音乐指令
     music_keyword: str       # 点歌关键词（仅 music_action == "play" 用）
+    music_result: str        # **已经执行过**的音乐工具结果。API 层为了让歌早点开始放，
+                             # 会在进图之前先跑一次（见 api/app.py 的 _stream_answer_inner），
+                             # 结果从这里带进来，图里据此**跳过重复调用**（见 _run_music）。
     truncated: bool        # 复读兜底触发、答案被截断过
     element: str
     stage: str

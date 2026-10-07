@@ -51,6 +51,7 @@ function useNarrow(): boolean {
 export default function Layout() {
   const health = useStore((s) => s.health)
   const collapsed = useStore((s) => s.settings.sidebarCollapsed)
+  const sessionListCollapsed = useStore((s) => s.settings.sessionListCollapsed)
   const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const setSettings = useStore((s) => s.setSettings)
   const toast = useStore((s) => s.toast)
@@ -72,6 +73,7 @@ export default function Layout() {
   const narrow = useNarrow()
 
   const loc = useLocation()
+  const showSessionToggle = loc.pathname === '/'
   const current = NAV.find((n) => (n.end ? loc.pathname === n.to : loc.pathname.startsWith(n.to)))
 
   // 落在窄屏时，把桌面折叠态清掉，避免媒体查询切换时留个「半折叠」的怪状态
@@ -136,6 +138,24 @@ export default function Layout() {
             <span>鸣潮角色知识助手</span>
           </div>
         </div>
+
+        {/* 会话列表（问答页左侧那一列）的折叠开关：放在侧边栏**顶部**、导航之上。
+            不再塞进会话栏内部 —— 两个面板各放一个收纳按钮会让人分不清按哪个，
+            而「点标题旁的箭头收起面板」本就是标题区的惯例。 */}
+        {showSessionToggle && (
+          <button
+            className="session-fold-btn"
+            onClick={() => setSettings({ sessionListCollapsed: !sessionListCollapsed })}
+            aria-label={sessionListCollapsed ? '展开会话列表' : '收起会话列表'}
+            aria-expanded={!sessionListCollapsed}
+            title={sessionListCollapsed ? '展开会话列表' : '收起会话列表'}
+          >
+            {sessionListCollapsed
+              ? <PanelLeftOpen size={15} />
+              : <PanelLeftClose size={15} />}
+            <span>会话列表</span>
+          </button>
+        )}
 
         <nav className="nav">
           {NAV.map(({ to, label, icon: Icon, end }) => (

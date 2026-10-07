@@ -50,9 +50,12 @@ export default function App() {
     root.style.setProperty('zoom', String(uiZoom))
     root.style.setProperty('--ui-zoom', String(uiZoom))
     // 面板磨砂（卡片 / 页面标题块统一走 --panel-* 三个变量，见 global.css）
+    // 数据区字号（用量表 / 答案反馈）：单独一个变量，不跟全局 zoom 混在一起 ——
+    // 那两处要的是「一屏多看几行」，与聊天区的「易读」是相反诉求。
+    root.style.setProperty('--data-font-size', `${settings.dataFontSize}px`)
     root.style.setProperty('--panel-alpha', String(settings.panelAlpha))
     root.style.setProperty('--panel-blur', `${settings.panelBlur}px`)
-  }, [settings.theme, settings.fontSize, settings.panelAlpha, settings.panelBlur])
+  }, [settings.theme, settings.fontSize, settings.dataFontSize, settings.panelAlpha, settings.panelBlur])
 
   // 启动时把 persist 恢复的 token 接回 api 层，并校验是否仍有效
   // （30 天过期 / 后端重启清库 → 静默登出，不做多余弹窗）

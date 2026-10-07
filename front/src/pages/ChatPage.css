@@ -325,9 +325,9 @@
   width: 32px;
   height: 32px;
 }
-/* 折叠态竖排时，「新建对话」是主要动作 —— 放上面；收起/展开的开关退到下面。 */
+/* 折叠态竖排：顺序与展开态一致 —— **收纳在上、新建在下**。
+   （曾用 `order: -1` 把新建顶到最上面，与主侧栏的顺序相反，已去掉。） */
 .session-list.rail .new-chat-rail {
-  order: -1;
   width: 32px;
   height: 32px;
   padding: 0;

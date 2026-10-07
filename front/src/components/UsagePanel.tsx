@@ -5,6 +5,7 @@ import UsageCharts from './UsageCharts'
 import { useStore } from '../store/useStore'
 import { usageSummary } from '../lib/api'
 import type { UsageSummary } from '../types'
+import './UsagePanel.css'
 
 const n = (v: number | null | undefined) => (v ?? 0).toLocaleString('zh-CN')
 

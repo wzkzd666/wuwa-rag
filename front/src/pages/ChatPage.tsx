@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Plus, MessageSquare, Trash2, Pencil, Check, X, Sparkles, Library, Swords, Gem, Coins,
-  PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import MessageBubble from '../components/MessageBubble'
@@ -21,7 +20,6 @@ function SessionList() {
   // 会话栏**独立**于主侧栏折叠：主侧栏收起时它还能继续收窄，
   // 两级都收起时聊天区拿到整屏宽度 —— 窄屏（小窗口/分屏）下这是刚需。
   const collapsed = useStore((s) => s.settings.sessionListCollapsed)
-  const setSettings = useStore((s) => s.setSettings)
   const convs = useStore((s) => s.convs)
   const activeThreadId = useStore((s) => s.activeThreadId)
   const select = useStore((s) => s.selectConversation)
@@ -56,15 +54,6 @@ function SessionList() {
   return (
     <div className={`session-list ${collapsed ? 'rail' : ''}`}>
       <div className="session-head">
-        <button
-          className="btn btn-icon session-toggle"
-          data-tip={collapsed ? '展开会话列表' : '收起会话列表（←）'}
-          aria-label={collapsed ? '展开会话列表' : '收起会话列表'}
-          aria-expanded={!collapsed}
-          onClick={() => setSettings({ sessionListCollapsed: !collapsed })}
-        >
-          {collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-        </button>
         {!collapsed && (
           <button className="btn btn-primary new-chat" onClick={() => create()}>
             <Plus size={15} /> 新建对话
