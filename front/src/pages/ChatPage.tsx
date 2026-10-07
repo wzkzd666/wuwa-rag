@@ -58,7 +58,7 @@ function SessionList() {
       <div className="session-head">
         <button
           className="btn btn-icon session-toggle"
-          title={collapsed ? '展开会话列表' : '收起会话列表（←）'}
+          data-tip={collapsed ? '展开会话列表' : '收起会话列表（←）'}
           aria-label={collapsed ? '展开会话列表' : '收起会话列表'}
           aria-expanded={!collapsed}
           onClick={() => setSettings({ sessionListCollapsed: !collapsed })}
@@ -71,9 +71,14 @@ function SessionList() {
           </button>
         )}
       </div>
-      {!collapsed && (
-        <button className="btn btn-primary new-chat new-chat-rail" onClick={() => create()} title="新建对话">
-          <Plus size={15} />
+      {collapsed && (
+        <button
+          className="btn btn-primary new-chat new-chat-rail"
+          onClick={() => create()}
+          data-tip="新建对话"
+          aria-label="新建对话"
+        >
+          <Plus size={16} />
         </button>
       )}
       <div className="session-scroll">
@@ -133,8 +138,13 @@ function SessionList() {
         ))}
       </div>
       {isAdmin && (
-        <button className="btn btn-ghost goto-knowledge" onClick={() => navigate('/knowledge')}>
-          <Library size={14} /> 收录新角色
+        <button
+          className="btn btn-ghost goto-knowledge"
+          onClick={() => navigate('/knowledge')}
+          data-tip="收录新角色"
+          aria-label="收录新角色"
+        >
+          <Library size={14} /> <span className="session-btn-text">收录新角色</span>
         </button>
       )}
     </div>

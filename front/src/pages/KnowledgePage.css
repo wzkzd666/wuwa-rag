@@ -173,17 +173,32 @@
 }
 
 /* 「自动收录」标记：这个名字不在内置名册里，是爬取时发现的新角色 */
+/* 「自动收录」标记。
+   ⚠️ 原来是**粉色胶囊**（accent-3 + 描边 + 底色），在一张冷色调的表里格外扎眼，
+   而且它只是**说明性**信息、不是徽章（用户反馈「难看」）。改成不带底色的次要色小字：
+   同一行的其它列本来就有灰色副文案（原文大小/时间），用同一种视觉层级更协调。 */
 .kb-badge {
   display: inline-flex;
   align-items: center;
-  margin-left: 7px;
-  padding: 1px 7px;
-  border-radius: var(--radius-pill);
-  border: 1px solid rgba(240, 171, 252, 0.35);
-  background: rgba(240, 171, 252, 0.08);
-  color: var(--accent-3);
-  font-size: 10.5px;
-  font-weight: 500;
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.kb-badge::before {
+  content: '';
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
   vertical-align: middle;
 }
 

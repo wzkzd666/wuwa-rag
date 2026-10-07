@@ -461,9 +461,23 @@ select.input {
   overflow-y: auto;
   padding: 26px 28px 40px;
 }
+/* 页面内容统一宽度。
+   ⚠️ 之前这里有**两套并存的机制**：`--content-max`（880px）和 `.page-inner`（硬编码
+   1000px）—— 而**没有任何一个页面在用它们**（实测 6 个页面里 page-inner 出现 0 次），
+   结果每个页面各用各的容器，宽度对不齐。现在统一在这里收口：
+   直接子元素（标题块 / 卡片）都吃同一个最大宽度，值只留 `--content-max` 一处。 */
+.page > * {
+  max-width: var(--content-max);
+  margin-left: auto;
+  margin-right: auto;
+}
 .page-inner {
-  max-width: 1000px;
+  max-width: var(--content-max);
   margin: 0 auto;
+}
+/* 聊天页是**整屏铺满**的（消息流不该被限制成一行窄栏），单独豁免。 */
+.chat-page > * {
+  max-width: none;
 }
 
 /* 页面标题块：与下方卡片**同一套面板材质**（--panel-*），只是更薄一点。

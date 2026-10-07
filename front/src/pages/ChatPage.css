@@ -313,20 +313,103 @@
 .session-list.rail {
   width: 44px;
   align-items: center;
+  /* 折叠态把内边距收到最小：原来沿用 12px/10px，44px 宽里两个图标被挤得歪斜 */
+  padding: 10px 4px;
+  gap: 6px;
 }
 .session-list.rail .session-head {
-  padding: 8px 0 4px;
+  padding: 0;
   justify-content: center;
 }
+.session-list.rail .session-toggle {
+  width: 32px;
+  height: 32px;
+}
+/* 折叠态竖排时，「新建对话」是主要动作 —— 放上面；收起/展开的开关退到下面。 */
 .session-list.rail .new-chat-rail {
-  width: 36px;
+  order: -1;
+  width: 32px;
+  height: 32px;
   padding: 0;
-  margin: 0 4px 6px;
+  margin: 0 auto;
   display: grid;
   place-items: center;
+  border-radius: 8px;
 }
-.session-list.rail .session-scroll {
+/* 折叠态：把**所有**可能带字的节点显式清掉。
+   为什么写这么全：折叠后如果漏一个（比如某个 span 里的标题），44px 宽里就会硬挤出
+   一截文字（用户反馈「收纳后显示字很突兀」）。用「宁可多隐藏」代替「逐个排查」。 */
+.session-list.rail .session-scroll,
+.session-list.rail .session-item,
+.session-list.rail .session-empty,
+.session-list.rail .session-list-label {
   display: none;
+}
+/* 折叠态只隐藏**文字**（`.session-btn-text` / `new-chat` 里的文本），
+   **按钮本身必须保留** —— 曾经把 `.new-chat` 整体 display:none，
+   结果「新建会话」按钮凭空消失（用户实测「没有新建会话按钮」）。
+   文字改由 `data-tip` 自绘提示承担。 */
+/* ⚠️ 这里**不要**再写 `.session-list.rail .new-chat { display: none }` ——
+   折叠态的新建按钮**就**是 `.new-chat.new-chat-rail`（JSX 用 `collapsed &&` 单独渲染），
+   一藏就等于把折叠态唯一的新建入口删掉（用户实测「收纳后未出现」）。
+   展开态那个带「新建对话」文字的按钮是另一个节点，由 JSX 的 `!collapsed &&` 负责。 */
+.session-list.rail .session-btn-text {
+  display: none;
+}
+/* 折叠态里的按钮：正方形居中，但**不能裁剪**。
+   ⚠️ 曾经写了 `overflow: hidden` —— 图标被裁掉，表现为「收纳后没有新建会话按钮」
+   （用户实测）。`white-space: nowrap` 也一并去掉：它对纯图标无意义，却会在按钮
+   意外带字时把文字挤出去。 */
+.session-list.rail button {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+/* 折叠态悬停提示：自绘 tooltip，不用浏览器原生 title。
+   原生 title 有 1 秒延迟、样式跟随系统、和其他按钮不一致 —— 折叠后只剩图标，
+   这时提示就是唯一的说明，必须做得克制且一致（与主侧栏收纳后同一套观感）。 */
+.session-list.rail [data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s;
+  z-index: 40;
+}
+.session-list.rail [data-tip]:hover::after {
+  opacity: 1;
+}
+.session-list.rail [data-tip] {
+  position: relative;
+}
+.session-list.rail .goto-knowledge,
+.session-list.rail .new-chat-rail {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  margin: 0 auto;
 }
 .session-list.rail .session-empty {
   display: none;

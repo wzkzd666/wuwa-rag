@@ -324,9 +324,13 @@
 .fb-wrap {
   display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;   /* 面板换行独占整宽，不溢出气泡 */
+  flex-wrap: wrap;   /* 面板要能换行独占整宽，才不会溢出气泡 */
   gap: 2px;
-  width: 100%;
+  /* ⚠️ 曾经写了 `width: 100%` —— 它让**按钮本身**也占满整行，于是赞/踩/反馈/朗读/复制
+     被挤成上下两行（用户实测反馈「这几个按钮分行了」）。这里改回内容宽度：
+     按钮排成一行，只有展开的反馈面板才换行独占整宽。 */
+  width: auto;
+  max-width: 100%;
 }
 .fb-btn.fb-on {
   color: var(--ok);
@@ -337,6 +341,7 @@
   border-color: var(--err);
 }
 .fb-panel {
+  /* 面板是 fb-wrap 的子元素：靠 `flex-basis:100%` + 父级 wrap 换行独占整宽 */
   flex: 1 0 100%;
   width: 100%;
   margin-top: 6px;
