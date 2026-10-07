@@ -15,9 +15,9 @@ graph BT
     L1["L1 内核 core<br/>security · db · authdb · conversations · llm · llmstore"]
     L2["L2 知识 knowledge<br/>crawl · graph · index · retrieve · entities · s3"]
     L3["L3 任务 tasks<br/>worker"]
-    L4["L4 服务 services<br/>persona · emotion · tts · verify · websearch · profile"]
-    L5["L5 对话 dialog<br/>graph · state · nlu · tools · agent · guard · memory"]
-    L6["L6 接口 api<br/>app · auth · server"]
+    L4["L4 服务 services<br/>persona · emotion · tts · verify · websearch · profile · music"]
+    L5["L5 对话 dialog<br/>graph · prompt · state · nlu · tools · agent · guard · memory"]
+    L6["L6 接口 api<br/>app · auth · ratelimit · usage · music · server"]
 
     L1 --> L0
     L2 --> L1
@@ -47,7 +47,7 @@ graph BT
 | L1 内核 | `core` | 基础设施：口令哈希、PG 连接池、鉴权表、会话存储、LLM 客户端、凭据保险箱 | L0 |
 | L2 知识 | `knowledge` | 语料与索引：爬取分块、图谱、BM25/向量索引、混合召回、角色名册、对象存储 | L0 L1 |
 | L3 任务 | `tasks` | Celery worker：把 L2 的批处理串成 5 步链并上报进度 | L0 L1 L2 |
-| L4 服务 | `services` | 单点能力：人格注入、情绪判定、语音合成、答案校验、联网兜底、用户画像 | L0 L1 L2 |
+| L4 服务 | `services` | 单点能力：人格注入、情绪判定、语音合成、答案校验、联网兜底、用户画像、音乐播放 | L0 L1 L2 |
 | L5 对话 | `dialog` | LangGraph 编排：NLU → 路由 → 检索 → 校验 → 生成，含记忆与防复读 | L0 L1 L2 L3 L4 |
 | L6 接口 | `api` | FastAPI 路由、鉴权依赖、SSE 流式 | 全部 |
 
@@ -68,7 +68,7 @@ uv run python scripts/check_layers.py --dot    # 额外输出 Graphviz DOT
 ```
 
 它按上面的分层表扫描全部内部导入，报告**分层方向违规**与**循环依赖**。
-改完结构跑一次；接 CI 后可以作为提交门禁。当前状态：**49 个模块，132 条依赖边，0 违规，0 环**。
+改完结构跑一次；接 CI 后可以作为提交门禁。当前状态：**56 个模块，164 条依赖边，0 违规，0 环**。
 
 > 📌 2026-10-06：清掉了 2026-09-30 重构遗留的 5 个空壳包（`rag/` `graph/` `ingest/`
 > `retrieval/` `storage/`，均只含 `__init__.py`、贡献 0 条依赖边，无任何代码引用），
@@ -143,6 +143,7 @@ Windows 必须 `--pool=solo` 且并发 1：`chunk` 任务按角色整写 `chunks
 | `verify.py` | 检索后校验「资料能否回答问题」，给不匹配分级升级 |
 | `websearch.py` | 百度千帆联网兜底；`QIANFAN_API_KEY` 留空即整体关闭 |
 | `profile.py` | 用户画像（user_facts）读写；同类事实**可更新**（`category` 列，昵称/水平覆盖，主玩角色等可多值事实叠加保留） |
+| `music.py` | QQ音乐 MCP 的 stdio 客户端（`tools/qqmusic_mcp/` 是**独立的 server 进程**）：**常驻 task** 持有会话、可用性分层判定（个人开关 / 部署默认 / 环境就绪）、播放与音量薄封装 |
 
 ### L5 对话 `dialog`
 
@@ -166,6 +167,8 @@ LangGraph 编排层，也是全项目最厚的一层。
 | `app.py` | 全部路由：`/ask` `/ask/stream`(SSE) `/ingest` `/ingest/status` `/llm/*` `/tts` `/profile` `/admin/users` … |
 | `auth.py` | 注册/登录/token 校验、`get_current_user` / `require_admin` 依赖 |
 | `ratelimit.py` | 限流（slowapi）：`limit_auth` / `limit_ask` / `limit_tts` / `limit_outbound` 四档 + `install(app)` |
+| `usage.py` | token 用量汇总（`/usage/summary`）：管理员看全员、普通用户强制只看自己（越权在后端拦） |
+| `music.py` | 播放状态与控制（`/music/status` `/music/control` `/music/setting`）—— 前端顶栏播放条的数据来源 |
 | `server.py` | uvicorn 启动入口（**唯一**需要 `SelectorEventLoop` 的 async 入口之一） |
 
 ---
@@ -176,6 +179,7 @@ LangGraph 编排层，也是全项目最厚的一层。
 
 ```
 intent ─┬─ chitchat ──────────────────────────────────┐
+        ├─ clarify ───────────────────────────────────┤
         ├─ time ──────────────────────────────────────┤
         ├─ fact     → graph            → verify ─┐    │
         ├─ semantic → vector           → verify ─┤    ├→ generate
@@ -191,6 +195,9 @@ verify 不通过时升级：重爬该角色 → 重检索 → 联网兜底 ─�
   零幻觉、零额外延迟。`agent.py` 的 L2 路径保留作对照。
 - **纯时间问题**（`intent=time`）不检索，取服务端真值后交模型用爱弥斯口吻说出；
   **顺带问时间**的游戏问题仍走检索，同时在 prompt 里补一句真值（`intent.mentions_time` 判定）。
+- **判定落空则反问**（`intent=clarify`）：走独立节点反问一句，不复用 `chitchat`。
+  `chitchat` 允许模型自由发挥，落空时会顺着上一个话题编造内容；反问的成本低于答错。
+  判据保守，只覆盖纯指代 / 回指 / 语气词。
 
 ### 4.2 入库链路（`tasks/worker.py`，Celery chain）
 
@@ -201,6 +208,29 @@ crawl_character → chunk_character → ingest_character → index_character →
 
 各步幂等、可单独重跑：`documents` 靠 `raw_sha256` DO UPDATE，`chunks` 靠 `chunk_id` DO NOTHING。
 五步各自上报进度（Celery backend + Redis 聚合键双通道），`GET /ingest/status` 按角色查。
+
+### 4.3 音乐链路（`services/music.py` ↔ `tools/qqmusic_mcp/`）
+
+```
+用户语句 ─→ nlu.music_action（规则判定，零 LLM）
+                    │
+        ┌───────────┴───────────┐
+        ↓                       ↓
+   控制类动作              点歌（play + 关键词）
+   player_control          play_music
+        └───────────┬───────────┘
+                    ↓
+        services/music.py  →  call()  ← 常驻 task 持有的 MCP 会话
+                    ↓
+        tools/qqmusic_mcp/qqmusic_local_mcp.py（子进程，stdio）
+                    ↓
+        搜索（smartbox → songid）→ QQMusic.exe /playbysongid
+```
+
+- 意图判定用**规则**而非 LLM：句式高度固定，且误判成本高（部分游戏问句也含相近字）
+- MCP server 是**独立子进程**，其崩溃或改版均不影响主链路；调用失败一律回落为一句可读原因，不抛异常
+- 播放控制在 **server 进程内**执行（SMTC 读状态、Core Audio 调音量），本服务只做转发 ——
+  COM 属 STA 且同步阻塞，放进本服务的事件循环会阻塞整个 API
 
 ---
 
@@ -229,6 +259,7 @@ crawl_character → chunk_character → ingest_character → index_character →
 | Chroma | bge-m3 稠密向量 | `data/chroma/chroma/` |
 | Ollama `aemeath` | 最终作答模型（QLoRA 微调 Qwen3-8B） | 人设由 Modelfile 自带 |
 | Ollama `qwen3:8b` | 结构化抽取、校验、改写 | `think=False` |
+| **QQ音乐 PC 客户端**（可选） | 音乐播放 | 由 `tools/qqmusic_mcp` 经 `/playbysongid` 投递；路径可经设置页或环境变量 `QQMUSIC_EXE` 指定 |
 
 ---
 

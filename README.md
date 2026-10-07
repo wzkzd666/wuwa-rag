@@ -26,6 +26,8 @@ BM25 sparse(30)   ┘                  (CrossEncoder)
 
 ```
 intent ─┬─ chitchat  ────────────────────────→ chitchat_node
+        ├─ clarify   ────────────────────────→ clarify_node   ← 判定落空 → 反问一句
+        ├─ time      ────────────────────────→ time_node      ← 取服务端真值
         ├─ fact      ─→ graph ─┬─────────────→ verify
         ├─ semantic  ─→ vector ┘
         └─ hybrid    ─→ graph ─→ vector ─────→ verify
@@ -41,6 +43,7 @@ verify ─┬─ ok / exhausted ────────────────
 - **验证升级闭环**：重排低分只能挡"无资料"，挡不住跑题与脏数据，因此 `verify_node` 用独立 LLM 判定"资料能否回答问题"，不匹配时按代价从低到高升级——① 按角色清库重爬 ② 用 verifier 给出的 refined 检索式重检索 ③ 联网兜底 ④ exhausted 直接走"不知道"话术
   - ⚠️ **① 有前置条件：`characters` 非空**。角色识别一旦失败（历史上单字角色名就被 `len >= 2` 过滤掉了，见下文「角色名识别」），① 直接跳过 → 额度耗尽 → 落到 ③ 联网兜底。所以"新角色明明已入库、提问却走联网"这类现象，**先查角色识别，别查检索或联网**
 - **防死循环三道闸**：`retry_count ≤ 1` + `refreshed` 仅一次 + `used_web` 仅一次
+- **判定落空则反问（`clarify`）**：闲聊分类之前再判一次 `needs_clarification`，命中则走独立节点反问一句，不硬答。为什么单开一条：`chitchat_node` 允许模型自由发挥，判定落空时它会**顺着上一个话题编**（实测问「刚刚的任务你再试试看」，它开始讲另一个角色的故事）；而反问的成本远低于答错。判据刻意保守——只覆盖「纯指代/回指/语气词」，「讲个故事」这种 4 字完整句一律放行（把「短」等同于「不明」是错的）
 
 ### 图谱：规则抽取 + Cypher 模板检索
 
@@ -101,6 +104,38 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
   - 生效优先级：**用户自持凭据 > 部署者 `.env` 兜底**。自部署者想统一配一份给所有人用时，才填下面那几个 `TTS_*` 环境变量
   - `TTS_ENABLED=false` 是**全功能总闸**，关掉后连用户自持的凭据也不生效（部署者仍掌握「这个功能到底开不开」）
 - **可用性状态**：未配置或凭据异常时，`/tts` 返回 `200 + ok=false` 与可读原因（说明缺什么、该做什么，如「重新登录即可自动恢复」）——配置缺失不是服务故障，不报 5xx；设置页「语音合成」卡以「已就绪 / 未就绪」徽章展示当前生效来源、音色与合成模型
+
+### 音乐播放：对话点歌 + 顶栏播放条（可选）
+
+自包含的 QQ音乐 MCP server（`tools/qqmusic_mcp/`，不依赖第三方音乐库），按 MCP 规范以**子进程 + stdio** 方式接入。默认为**关闭**状态，设置页开启后立即生效。
+
+**调用链路**
+
+| 入口 | 链路 |
+| --- | --- |
+| 对话点歌 | 用户语句 → `nlu.music_action`（规则判定，不调用 LLM）→ MCP 工具 |
+| 顶栏播放条 | 上一首 / 播放暂停 / 下一首 / 音量 / 静音；播放状态每 5 秒轮询一次 |
+
+**意图判定**
+
+- 采用**动词锚定**：控制类语句须出现控制词，点歌类语句须以播放动词开头。据此，「卡卡的声骸怎么配」等游戏问句不会误命中
+- 已覆盖的口语形式包括：引导前缀（我想 / 我要 / 麻烦 / 能不能）、量词（一首 / 一下）、倒装（把音乐关掉）、动词重复（听听小夜曲）、音量表达（调小音乐 / 声音小一点 / 小点声 / 静音）。上述形式均属「相差一字即无法命中」的高频说法，回归用例见 `tests/test_music.py`
+- **搜索降级**：QQ 音乐的搜索接口不支持「歌手 + 的 + 歌名」形式（实测「周杰伦的青花瓷」返回 0 条，「周杰伦 青花瓷」返回 4 条）。原串无结果时，依次按「的 → 空格」「仅保留歌名」重试
+
+**播放控制**
+
+- 采用 **SMTC**（Windows Media Session）精确定位 QQ音乐，不使用全局媒体键 —— 后者会被前台播放器截获，且无法回读执行结果
+- 音量控制采用**应用级 Core Audio**，仅调整 QQ音乐，不影响系统音量。⚠️ COM 组件属 STA 且为同步阻塞调用，必须在 **MCP server 进程**内执行；若置于本服务的事件循环中，将导致 API 整体阻塞（实测 `/music/status` 超时，且不产生任何错误日志）
+
+**会话生命周期**
+
+MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task 内执行。anyio 的 `CancelScope` 仅允许在其创建所在的 task 中退出；若将会话绑定于请求 task，流式响应收尾时将抛出 `RuntimeError: Attempted to exit a cancel scope that isn't the current tasks's current cancel scope`。
+
+**可用性判定**
+
+`is_enabled`（个人设置 ∪ 部署默认）与 `_env_ready`（server 文件 + mcp 依赖）**分别判定**，避免出现「设置页已开启开关、系统仍返回未启用」的情况。开关**即时生效，无需重启服务**。
+
+依赖为可选组：`uv sync --extra music`；缺少 `mcp` 时该功能整体降级，不影响问答主链路。
 
 ### 多轮上下文：追问改写（零 LLM 锚点 + 滚动摘要）
 
@@ -190,7 +225,7 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 
 > **分层设计、各包职责、依赖规则**（含分层图与可执行的依赖守卫）见 **[ARCHITECTURE.md](ARCHITECTURE.md)**。
 > 一句话概括：`src/wuwa_rag` 分 7 层，依赖**只向下**，同层可互调，内部导入一律用绝对路径；
-> 跑 `uv run python scripts/check_layers.py` 可校验（当前 132 条依赖边、0 违规、0 环）。
+> 跑 `uv run python scripts/check_layers.py` 可校验（当前 **56 个模块、164 条依赖边、0 违规、0 环**）。
 >
 > 下面只讲各组件的**数据角色**与链路。
 
@@ -325,16 +360,16 @@ graph_character    正则抽事实 → Neo4j MERGE
 
 ## 技术栈
 
-**后端**：Python 3.13 · FastAPI · LangGraph · SQLAlchemy · psycopg3 · Celery · slowapi(限流) · uv
+**后端**：Python 3.13 · FastAPI · LangGraph · SQLAlchemy · psycopg3 · Celery · slowapi(限流) · MCP(stdio) · uv
 **检索**：Chroma · bge-m3 · bge-reranker-v2-m3 · sentence-transformers · jieba · rank_bm25
 **存储**：PostgreSQL (pgvector) · Neo4j 5.26 · Redis · RustFS (S3)
 **模型**：Qwen3-8B · ms-swift LoRA · Ollama · vLLM · bitsandbytes
 **前端**：React · TypeScript · Vite · Zustand · react-router-dom（SSE 流式聊天、知识库五步进度可视化、设置、认证、历史）
 **部署**：Docker Compose（PG / Neo4j / Redis / RustFS，四者均已设 CPU/内存上限）· tenacity 重试 · loguru
 
-代码量（2026-10-06 实测，`src/wuwa_rag` 下不含 `__init__.py`）：后端 **40 个模块 / 10,198 物理行**，
-其中纯代码 **7,840 行**（用 `tokenize` 去掉注释与空行；本项目注释占比高，两个数都给才有参考价值）。
-前端 **4,645 行** TS/TSX（18 文件）+ **2,520 行** CSS（10 文件）。
+代码量（2026-10-07 实测，`src/wuwa_rag` 下不含 `__init__.py`）：后端 **47 个模块 / 12,691 物理行**，
+其中纯代码 **7,371 行**（用 `tokenize` 去掉注释与空行；本项目注释占比高，两个数都给才有参考价值）。
+前端 **6,200 行** TS/TSX（25 文件）+ **3,379 行** CSS（13 文件）。
 
 ---
 
@@ -437,7 +472,7 @@ uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价�
 ### 6. 验证
 
 ```bash
-uv run pytest                            # 单元测试（139 条，**全量离线**，约 1s）
+uv run pytest                            # 单元测试（243 条，**全量离线**，约 5s）
 uv run python -m wuwa_rag.dialog.graph   # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
 ```
@@ -466,6 +501,12 @@ uv run ruff check src                    # lint（line-length=100）
 | `POST /auth/password` | 登录 | 兜底 200/min | 改登录密码（自动重绑云端密钥） |
 | `POST /ingest` | 管理员 | 兜底 200/min | 触发角色摄取 `{"character":"忌炎"}` |
 | `GET /ingest/status?character=xxx` | 管理员 | 兜底 200/min | 查询五步流水线进度 |
+| `GET /knowledge/characters` | 登录 | 兜底 200/min | 候选角色名册（唯一真源在数据库） |
+| `GET /usage/summary?days=&user=` | 登录 | 兜底 200/min | token 用量汇总（管理员可指定 `user` 查看单人） |
+| `GET/POST/DELETE /feedback` | 登录 | 兜底 200/min | 答案反馈（删除仅限本人或管理员） |
+| `GET /music/status` | 登录 | 兜底 200/min | 播放状态（顶栏播放条 5 秒轮询，3s 硬超时） |
+| `POST /music/control` | 登录 | 兜底 200/min | 播放控制（动作名与 MCP 工具一致） |
+| `GET/PUT /music/setting` | 登录 | 兜底 200/min | 音乐开关与播放器路径（**即时生效，无需重启**） |
 
 超限返回 `429` + `Retry-After` 秒数 + 中文错误体。限额与开关全部可经 `.env` 覆盖（见「配置环境变量」一节）。
 
@@ -483,7 +524,7 @@ psycopg / neo4j 的异步实现在 uvicorn 自起的 Proactor loop 上会报 `In
 
 诚实列出，避免过度宣称：
 
-- **测试分两层**。`tests/` 有 139 条**离线单测**（见「6. 验证」），守规则层判据；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
+- **测试分两层**。`tests/` 有 243 条**离线单测**（见「6. 验证」），守规则层判据；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
 - **`agent.py` 的 ToolNode 自主选工具路径默认未启用**，主链路走规则条件路由。本项目是 LangGraph DAG 编排，不是多 Agent 系统
 - **图谱抽取是正则规则，不是 LLM 抽取**（这是有意的设计选择，理由见上文）
 - **VLM 链路预留但未接入**：`config.py` 有 qwen3-vl 配置，主链路未使用
@@ -504,7 +545,7 @@ src/wuwa_rag/          # ✅ 已入库
 ├── knowledge/   L2 知识：crawl(分块+落库) graph(Neo4j+正则抽取) index(bm25+向量+精排)
 │                retrieve(双路召回+RRF) entities(角色名册与别名) s3(对象存储抽象)
 ├── tasks/       L3 任务：worker.py —— Celery 5 步流水线 + 进度上报
-├── services/    L4 服务：persona emotion tts verify websearch profile
+├── services/    L4 服务：persona emotion tts verify websearch profile music
 ├── dialog/      L5 对话：graph(主编排) prompt(提示词构建) state nlu(意图/改写)
 │                tools agent guard memory
 └── api/         L6 接口：app(路由) auth(登录/token/RBAC) ratelimit(限流) server(uvicorn 入口)
@@ -512,7 +553,7 @@ src/wuwa_rag/          # ✅ 已入库
 front/                 # ✅ 已入库   React + TS + Vite 前端
 pgsql/                 # ✅ 已入库   建表 SQL（幂等）
 scripts/               # ✅ 已入库   start.ps1 / stop.ps1 / check_layers.py（架构守卫）
-tests/                 # ✅ 已入库   139 条离线单测（回归基线，可当提交门禁）
+tests/                 # ✅ 已入库   243 条离线单测（回归基线，可当提交门禁）
 
 data/                  # ⚠️ gitignore，未入库（需自行采集生成）
 ├── raw/          角色 wiki markdown（由 wuwa-mcp 爬取）
@@ -532,7 +573,11 @@ logs/ .runtime/ .env   # ⚠️ gitignore，运行时产物与密钥
 
 ## 开发时间线
 
-2026.09.08 启动 → 2026.09.23 主体完成，持续迭代中。
+2026.09.08 启动 → 2026.09.23 主体完成 → 持续迭代中。
+
+截至 2026-10-07，此后的迭代范围包括：检索质量与角色名识别、用户自持云端凭据（DEK/KEK 双层加密）、
+语音朗读与情绪标签、权限分层、token 用量与答案反馈看板、音乐播放（对话点歌 + 顶栏播放条）、
+离线回归测试套件与架构分层守卫。
 
 ---
 
