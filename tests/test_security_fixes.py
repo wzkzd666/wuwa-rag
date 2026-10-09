@@ -212,3 +212,21 @@ def test_生命周期收尾关闭音乐会话() -> None:
     end = src.index("app = FastAPI(")
     lifespan_src = src[start:end]
     assert "music_svc.aclose()" in lifespan_src
+
+
+# ---------- llmstore：InvalidToken 不是 ValueError 子类（实测推翻的想当然假设） ----------
+
+def test_解密异常口径必须接住_InvalidToken() -> None:
+    """`_DECRYPT_ERRORS` 若只捕 ValueError，「口令/密码不对」会裸冲出去弄挂登录。"""
+    from cryptography.fernet import Fernet, InvalidToken
+
+    from wuwa_rag.core.llmstore import _DECRYPT_ERRORS
+
+    # 钉住那个反直觉事实本身：InvalidToken 直接继承 Exception
+    assert not issubclass(InvalidToken, ValueError)
+    k1, k2 = Fernet.generate_key(), Fernet.generate_key()
+    cipher = Fernet(k1).encrypt(b"sk-secret")
+    with pytest.raises(_DECRYPT_ERRORS):
+        Fernet(k2).decrypt(cipher)
+    # 合法密钥必须能解回——防止把判据写成「什么都算解密失败」的假绿
+    assert Fernet(k1).decrypt(cipher) == b"sk-secret"

@@ -18,10 +18,19 @@
 单字名 bug 期间，`intent_node('心的声骸怎么配')` 返回 intent='hybrid'、chars=[]。
 只看 intent 断言全绿，功能其实已经废了——空 chars 反而更容易满足「未指名」判据，
 intent 照样合理。所以每条路由用例都同时断言 intent 与 characters。
+
+离线**硬约束**（_block_external_network）
+--------------------------------------
+上面的约定原本只靠自觉：用例偷偷连库只会「慢 10s」而不是「红」，久了必烂。
+现在把非回环 socket 连接直接判失败。放行回环是必须的——Windows 的 asyncio
+把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。
+⚠️ 副作用：偷偷连本机 PG/Neo4j 容器的行为拦不住（回环可达），这类依赖靠
+   「容器没起也必须全绿」的人工抽查兜底（把 config 五件套指向不可达端口跑一遍）。
 """
 from __future__ import annotations
 
 import logging
+import socket
 
 import pytest
 
@@ -41,6 +50,46 @@ ROSTER = [
 @pytest.fixture
 def roster() -> list[str]:
     return list(ROSTER)
+
+
+def _is_loopback_host(host) -> bool:
+    h = str(host or "")
+    return h == "" or h == "localhost" or h == "::1" or h.startswith("127.")
+
+
+@pytest.fixture(autouse=True)
+def _block_external_network(monkeypatch):
+    """离线硬约束：任何非回环的真实网络连接/DNS 解析直接判失败。
+
+    没有这层闸时，偷偷联网的用例只会「慢 10s」不会「红」，约定必烂。
+    回环必须放行：Windows asyncio 把 socketpair 模拟成 127.0.0.1 回连，
+    全禁会让**所有异步用例**假失败。
+    """
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_getaddrinfo = socket.getaddrinfo
+
+    def _guard(addr):
+        host = addr[0] if isinstance(addr, tuple) else addr
+        if not _is_loopback_host(host):
+            raise RuntimeError(f"测试离线约束：拦截对外连接 -> {addr!r}")
+
+    def connect(self, addr, *a):
+        _guard(addr)
+        return real_connect(self, addr, *a)
+
+    def connect_ex(self, addr, *a):
+        _guard(addr)
+        return real_connect_ex(self, addr, *a)
+
+    def getaddrinfo(host, *a, **k):
+        if not _is_loopback_host(host):
+            raise RuntimeError(f"测试离线约束：拦截对外 DNS -> {host!r}")
+        return real_getaddrinfo(host, *a, **k)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
 @pytest.fixture

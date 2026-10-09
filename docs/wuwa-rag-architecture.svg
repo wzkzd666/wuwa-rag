@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1090" viewBox="0 0 1700 1090" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1330" viewBox="0 0 1700 1330" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif">
   <defs>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,1 L9,5 L0,9 z" fill="#94A3B8"/>
@@ -12,7 +12,7 @@
 
   <!-- ============ 标题 ============ -->
   <text x="45" y="52" font-size="30" font-weight="700" fill="#0F172A">wuwa-rag 架构全景</text>
-  <text x="45" y="80" font-size="14" fill="#64748B">《鸣潮》角色知识助手 · LangGraph 混合检索 RAG · 后端 7 层 / 56 个模块 / 164 条依赖边 / 0 违规 0 环（由可执行守卫校验）</text>
+  <text x="45" y="80" font-size="14" fill="#64748B">《鸣潮》角色知识助手 · LangGraph 混合检索 RAG · 后端 7 层 / 56 个模块 / 164 条依赖边 / 0 违规 0 环（可执行守卫）· 260 条离线单测作提交门禁</text>
   <line x1="45" y1="98" x2="1655" y2="98" stroke="#E2E8F0" stroke-width="1.5"/>
 
   <!-- ============ ① 分层架构 ============ -->
@@ -55,16 +55,17 @@
   <rect x="54" y="608" width="46" height="26" rx="6" fill="#2563EB"/>
   <text x="77" y="626" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L2</text>
   <text x="112" y="626" font-size="16" font-weight="700" fill="#0F172A">知识  knowledge</text>
-  <text x="112" y="652" font-size="12.5" fill="#475569">语料与索引：分块 / 图谱 / BM25 / 向量 / 召回 / 对象存储</text>
-  <text x="112" y="674" font-size="12" fill="#64748B">crawl · graph · index · retrieve · entities · s3</text>
+  <text x="112" y="652" font-size="12.5" fill="#475569">语料与索引：分块 / 图谱 / BM25 / 向量 / 召回 / 名册归一 / 领域词表 / 对象存储</text>
+  <text x="112" y="674" font-size="12" fill="#64748B">crawl · graph · index · retrieve · entities · domain_terms · s3</text>
 
   <!-- L1 -->
   <rect x="40" y="702" width="600" height="106" rx="8" fill="#E0E7FF" stroke="#A5B4FC" stroke-width="1.5"/>
   <rect x="54" y="720" width="46" height="26" rx="6" fill="#4F46E5"/>
   <text x="77" y="738" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L1</text>
   <text x="112" y="738" font-size="16" font-weight="700" fill="#0F172A">内核  core</text>
-  <text x="112" y="764" font-size="12.5" fill="#475569">口令哈希 · PG 连接池 · 鉴权表 · 会话 · LLM 客户端 · 凭据保险箱</text>
-  <text x="112" y="786" font-size="12" fill="#64748B">security · db · authdb · conversations · llm · llmstore</text>
+  <text x="112" y="756" font-size="12.5" fill="#475569">口令哈希 · PG 连接池 · 鉴权表 · 会话 · LLM 客户端 · 凭据保险箱</text>
+  <text x="112" y="776" font-size="12" fill="#64748B">security · db · authdb · conversations · llm · llmstore</text>
+  <text x="112" y="796" font-size="12" fill="#64748B">settings（用户设置）· usage（token 计量）· feedback（反馈账本）</text>
 
   <!-- L0 -->
   <rect x="40" y="814" width="600" height="106" rx="8" fill="#F1F5F9" stroke="#94A3B8" stroke-width="1.5"/>
@@ -87,7 +88,7 @@
   <text x="925" y="183" font-size="11.5" fill="#4B5563" text-anchor="middle">6 分支：chitchat / clarify / time / fact / semantic / hybrid</text>
 
   <!-- 路由说明 -->
-  <text x="925" y="220" font-size="11.5" fill="#64748B" text-anchor="middle">fact → 图谱 ｜ semantic → 向量 ｜ hybrid → 图谱 + 向量 ｜ 其余直达生成</text>
+  <text x="925" y="220" font-size="11.5" fill="#64748B" text-anchor="middle">fact→图谱｜semantic→向量｜hybrid→双路｜chitchat·time·clarify 不检索直出</text>
 
   <!-- graph / vector -->
   <path d="M925,192 V232" stroke="#94A3B8" stroke-width="1.4" fill="none"/>
@@ -142,6 +143,12 @@
   <text x="680" y="762" font-size="11.5" fill="#475569">SSE + 按 langgraph_node 过滤 token（否则会把分类器输出吐给用户）</text>
   <text x="680" y="782" font-size="11.5" fill="#475569">额外下发阶段进度事件，覆盖检索静默期（约 19s）</text>
 
+  <!-- 检索增强与确定性补料 -->
+  <text x="680" y="818" font-size="14" font-weight="700" fill="#1E293B">检索增强与确定性补料</text>
+  <text x="680" y="840" font-size="11.5" fill="#475569">技能满级表 / 突破材料按 chunk 元数据直取，不经检索（宽表在重排里必输）</text>
+  <text x="680" y="860" font-size="11.5" fill="#475569">图谱后 _after_graph 再决定补向量：技能类 / 指名队伍（≥3 角色名）强制补</text>
+  <text x="680" y="880" font-size="11.5" fill="#475569">泛问配队降级 fact 只走图谱（intent 如实标注），答完确定性追加一句追问</text>
+
   <!-- ============ ③ 入库链路 ============ -->
   <text x="1190" y="128" font-size="17" font-weight="700" fill="#1E293B">③ 入库链路 · Celery 5 步链</text>
 
@@ -169,7 +176,8 @@
   <text x="1206" y="387" font-size="13" font-weight="700" fill="#0F172A">graph_character</text>
   <text x="1206" y="404" font-size="11" fill="#64748B">正则抽事实 → Neo4j MERGE（幂等）</text>
 
-  <text x="1190" y="430" font-size="11.5" fill="#64748B">各步幂等可单独重跑 · 进度双通道上报（Celery backend + Redis 聚合键）</text>
+  <text x="1190" y="430" font-size="11.5" fill="#64748B">各步幂等、可单独重跑 · 进度双通道上报（Celery backend + Redis 聚合键）</text>
+  <text x="1190" y="448" font-size="11.5" fill="#64748B">暂停/继续/取消走 Redis 旗标（每步开头自查）· 操作留痕 · 库外角色自动入队等待</text>
 
   <!-- ============ ④ 音乐链路 ============ -->
   <text x="1190" y="470" font-size="17" font-weight="700" fill="#1E293B">④ 音乐链路 · MCP（可选，默认关闭）</text>
@@ -193,64 +201,109 @@
   <text x="1206" y="666" font-size="12.5" font-weight="700" fill="#4C1D95">搜索 smartbox → songid → QQMusic /playbysongid</text>
   <text x="1206" y="682" font-size="11" fill="#64748B">「歌手 + 的 + 歌名」无结果时降级重试</text>
 
+  <text x="1190" y="700" font-size="11.5" fill="#64748B">控制动作（player_control）与点歌（play_music）分流 · 可用性四层判定</text>
+
   <!-- ============ ⑤ 关键设计决策 ============ -->
-  <text x="1190" y="726" font-size="17" font-weight="700" fill="#1E293B">⑤ 关键设计决策</text>
-  <text x="1190" y="750" font-size="11.5" fill="#475569">· PostgreSQL 是唯一真源；Chroma / bm25.pkl / Neo4j 均为可全量重建的派生索引</text>
-  <text x="1190" y="770" font-size="11.5" fill="#475569">· bge-m3 与 reranker 走 CPU —— 8GB 显存留给 LLM</text>
-  <text x="1190" y="790" font-size="11.5" fill="#475569">· 双 8B 模型分工：aemeath 作答 / qwen3:8b 做结构化抽取</text>
-  <text x="1190" y="810" font-size="11.5" fill="#475569">· Windows 用 SelectorEventLoop + psycopg，不用 asyncpg</text>
+  <text x="1190" y="740" font-size="17" font-weight="700" fill="#1E293B">⑤ 关键设计决策</text>
+  <text x="1190" y="764" font-size="11.5" fill="#475569">· PostgreSQL 是唯一真源；Chroma / bm25.pkl / Neo4j 均为可全量重建的派生索引</text>
+  <text x="1190" y="784" font-size="11.5" fill="#475569">· bge-m3 与 reranker 走 CPU —— 8GB 显存留给 LLM</text>
+  <text x="1190" y="804" font-size="11.5" fill="#475569">· 双 8B 模型分工：aemeath 作答 / qwen3:8b 做结构化抽取</text>
+  <text x="1190" y="824" font-size="11.5" fill="#475569">· Windows 用 SelectorEventLoop + psycopg，不用 asyncpg</text>
+  <text x="1190" y="844" font-size="11.5" fill="#475569">· 提示词只写正面要求——反例会被微调模型当样本照抄（实证）</text>
+  <text x="1190" y="864" font-size="11.5" fill="#475569">· 配队语义 /＝或、+＝和、一队 3 人；「问谁锁谁」用确定性收窄而非提示词</text>
+  <text x="1190" y="884" font-size="11.5" fill="#475569">· 增益调用（改写/摘要/情绪/画像）失败只记日志，绝不影响问答主链路</text>
 
   <!-- ============ ⑥ 外部依赖 ============ -->
   <line x1="45" y1="916" x2="1655" y2="916" stroke="#E2E8F0" stroke-width="1.5"/>
   <text x="45" y="946" font-size="17" font-weight="700" fill="#1E293B">⑥ 外部依赖与数据落点</text>
 
-  <rect x="45" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="59" y="983" font-size="12.5" font-weight="700" fill="#0F172A">PostgreSQL</text>
-  <text x="59" y="1001" font-size="10.5" fill="#475569">业务真源 + checkpointer</text>
-  <text x="59" y="1018" font-size="10" fill="#94A3B8">pgvector16</text>
-  <text x="59" y="1032" font-size="10" fill="#94A3B8">pgsql/001_init.sql</text>
+  <rect x="45" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="57" y="983" font-size="12.5" font-weight="700" fill="#0F172A">PostgreSQL</text>
+  <text x="57" y="1000" font-size="10.5" fill="#475569">业务真源 + checkpointer</text>
+  <text x="57" y="1016" font-size="10" fill="#94A3B8">pgvector16 · lg schema</text>
+  <text x="57" y="1030" font-size="10" fill="#94A3B8">pgsql/001~003 幂等 SQL</text>
 
-  <rect x="245" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="259" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Chroma</text>
-  <text x="259" y="1001" font-size="10.5" fill="#475569">bge-m3 稠密向量（派生）</text>
-  <text x="259" y="1018" font-size="10" fill="#94A3B8">data/chroma/</text>
-  <text x="259" y="1032" font-size="10" fill="#94A3B8">可全量重建</text>
+  <rect x="224" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="236" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Chroma</text>
+  <text x="236" y="1000" font-size="10.5" fill="#475569">bge-m3 稠密向量（派生）</text>
+  <text x="236" y="1016" font-size="10" fill="#94A3B8">data/chroma/</text>
+  <text x="236" y="1030" font-size="10" fill="#94A3B8">可全量重建</text>
 
-  <rect x="445" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="459" y="983" font-size="12.5" font-weight="700" fill="#0F172A">BM25 · jieba</text>
-  <text x="459" y="1001" font-size="10.5" fill="#475569">稀疏索引，含词典快照</text>
-  <text x="459" y="1018" font-size="10" fill="#94A3B8">bm25.pkl</text>
-  <text x="459" y="1032" font-size="10" fill="#94A3B8">快照保证分词一致</text>
+  <rect x="403" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="415" y="983" font-size="12.5" font-weight="700" fill="#0F172A">BM25 · jieba</text>
+  <text x="415" y="1000" font-size="10.5" fill="#475569">稀疏索引，含词典快照</text>
+  <text x="415" y="1016" font-size="10" fill="#94A3B8">bm25.pkl</text>
+  <text x="415" y="1030" font-size="10" fill="#94A3B8">快照保证分词一致</text>
 
-  <rect x="645" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="659" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Neo4j 5.26</text>
-  <text x="659" y="1001" font-size="10.5" fill="#475569">6 类节点 / 6 类关系</text>
-  <text x="659" y="1018" font-size="10" fill="#94A3B8">全部 MERGE 幂等</text>
-  <text x="659" y="1032" font-size="10" fill="#94A3B8">正则规则抽取</text>
+  <rect x="582" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="594" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Neo4j 5.26</text>
+  <text x="594" y="1000" font-size="10.5" fill="#475569">6 类节点 / 6 类关系</text>
+  <text x="594" y="1016" font-size="10" fill="#94A3B8">全部 MERGE 幂等</text>
+  <text x="594" y="1030" font-size="10" fill="#94A3B8">正则规则抽取</text>
 
-  <rect x="845" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="859" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Redis</text>
-  <text x="859" y="1001" font-size="10.5" fill="#475569">Celery broker / backend</text>
-  <text x="859" y="1018" font-size="10" fill="#94A3B8">+ 进度聚合键（TTL 1h）</text>
-  <text x="859" y="1032" font-size="10" fill="#94A3B8">+ 限流计数（可选）</text>
+  <rect x="761" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="773" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Redis</text>
+  <text x="773" y="1000" font-size="10.5" fill="#475569">Celery broker/backend</text>
+  <text x="773" y="1016" font-size="10" fill="#94A3B8">+ 进度 / 暂停取消旗标</text>
+  <text x="773" y="1030" font-size="10" fill="#94A3B8">+ 限流计数（可选）</text>
 
-  <rect x="1045" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="1059" y="983" font-size="12.5" font-weight="700" fill="#0F172A">RustFS（S3）</text>
-  <text x="1059" y="1001" font-size="10.5" fill="#475569">原文 md + 立绘</text>
-  <text x="1059" y="1018" font-size="10" fill="#94A3B8">knowledge/s3.py 抽象层</text>
-  <text x="1059" y="1032" font-size="10" fill="#94A3B8">换后端只改这一层</text>
+  <rect x="940" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="952" y="983" font-size="12.5" font-weight="700" fill="#0F172A">RustFS（S3）</text>
+  <text x="952" y="1000" font-size="10.5" fill="#475569">原文 md + 立绘</text>
+  <text x="952" y="1016" font-size="10" fill="#94A3B8">s3.py 抽象层</text>
+  <text x="952" y="1030" font-size="10" fill="#94A3B8">换后端只改这一层</text>
 
-  <rect x="1245" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="1259" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Ollama ×2</text>
-  <text x="1259" y="1001" font-size="10.5" fill="#475569">aemeath 作答 / qwen3:8b 抽取</text>
-  <text x="1259" y="1018" font-size="10" fill="#94A3B8">LoRA 微调 Qwen3-8B（GGUF）</text>
-  <text x="1259" y="1032" font-size="10" fill="#94A3B8">均 bind(think=False)</text>
+  <rect x="1119" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1131" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Ollama 双模型</text>
+  <text x="1131" y="1000" font-size="10.5" fill="#475569">作答 + 抽取分工</text>
+  <text x="1131" y="1016" font-size="10" fill="#94A3B8">aemeath / qwen3:8b</text>
+  <text x="1131" y="1030" font-size="10" fill="#94A3B8">均 bind(think=False)</text>
 
-  <rect x="1445" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
-  <text x="1459" y="983" font-size="12.5" font-weight="700" fill="#0F172A">QQ音乐 PC（可选）</text>
-  <text x="1459" y="1001" font-size="10.5" fill="#475569">音乐播放</text>
-  <text x="1459" y="1018" font-size="10" fill="#94A3B8">经 MCP 子进程调用</text>
-  <text x="1459" y="1032" font-size="10" fill="#94A3B8">路径可由设置页指定</text>
+  <rect x="1298" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1310" y="983" font-size="12.5" font-weight="700" fill="#0F172A">QQ音乐 PC（可选）</text>
+  <text x="1310" y="1000" font-size="10.5" fill="#475569">音乐播放</text>
+  <text x="1310" y="1016" font-size="10" fill="#94A3B8">经 MCP 子进程调用</text>
+  <text x="1310" y="1030" font-size="10" fill="#94A3B8">路径可经设置页指定</text>
 
-  <text x="45" y="1062" font-size="11" fill="#94A3B8">说明：Chroma / bm25.pkl / Neo4j 三者均为派生索引，可随时从 PostgreSQL 全量重建；数据规模为 2026-10-06 四方对账实测（chunk 6,741）。</text>
+  <rect x="1477" y="962" width="172" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1489" y="983" font-size="12.5" font-weight="700" fill="#0F172A">外部大模型（可选）</text>
+  <text x="1489" y="1000" font-size="10.5" fill="#475569">Qwen-TTS · 千帆联网</text>
+  <text x="1489" y="1016" font-size="10" fill="#94A3B8">用户自持 OpenAI 兼容端点</text>
+  <text x="1489" y="1030" font-size="10" fill="#94A3B8">凭据 DEK/KEK 加密落库</text>
+
+  <text x="45" y="1060" font-size="11" fill="#94A3B8">说明：Chroma / bm25.pkl / Neo4j 三者均为派生索引，可随时从 PostgreSQL 全量重建；数据规模为 2026-10-09 实测（chunk 6,741 · raw 58 角色）。</text>
+
+  <!-- ============ ⑦⑧⑨ 横切能力 ============ -->
+  <line x1="45" y1="1082" x2="1655" y2="1082" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <!-- ⑦ 鉴权 -->
+  <text x="45" y="1112" font-size="17" font-weight="700" fill="#1E293B">⑦ 鉴权、权限与凭据保护</text>
+  <text x="45" y="1138" font-size="11.5" fill="#475569">· scrypt 口令哈希 + Bearer token（30 天，落 PG，重启不掉线）</text>
+  <text x="45" y="1158" font-size="11.5" fill="#475569">· RBAC 两档：问答 / 设置登录即可；入库、用户管理、看板 admin 专属</text>
+  <text x="45" y="1178" font-size="11.5" fill="#475569">· 四档限流：auth 10/min·IP｜ask 20/min·用户｜tts 10/min｜outbound 20/h</text>
+  <text x="45" y="1198" font-size="11.5" fill="#475569">· DEK/KEK 双层密钥：登录自动解锁、改密自动重绑、加密口令兜底，</text>
+  <text x="45" y="1216" font-size="11.5" fill="#475569">  服务端不持有任何主密钥；解不开一律回落本地 aemeath，不退化明文</text>
+  <text x="45" y="1236" font-size="11.5" fill="#475569">· SSRF 防护：出站 base_url / workspace_id 校验、云元数据端点无条件拦截</text>
+  <text x="45" y="1256" font-size="11.5" fill="#475569">· CORS 只放行配置源；默认凭据收紧：弱口令不内置，首启随机一次性口令</text>
+
+  <!-- ⑧ 语音·画像·反馈 -->
+  <text x="600" y="1112" font-size="17" font-weight="700" fill="#1E293B">⑧ 语音、画像与反馈闭环</text>
+  <text x="600" y="1138" font-size="11.5" fill="#475569">· TTS：情绪标签判定 → 朗读稿清洗 → 指令控制 → 合成 → 24h URL 播放</text>
+  <text x="600" y="1158" font-size="11.5" fill="#475569">· 凭据优先级：用户自持 &gt; .env 兜底；未就绪降级纯文本，不挡问答</text>
+  <text x="600" y="1178" font-size="11.5" fill="#475569">· 画像：每轮答完（finally）tool LLM 抽 user_facts，同类覆盖 / 多值叠加，</text>
+  <text x="600" y="1196" font-size="11.5" fill="#475569">  同时注入 generate 与 chitchat/time 两分支（后者曾完全拿不到画像）</text>
+  <text x="600" y="1216" font-size="11.5" fill="#475569">· 用量计量：客户端级回调 + contextvar 传归属，调用点零改动</text>
+  <text x="600" y="1236" font-size="11.5" fill="#475569">· 点赞点踩连问答快照入库（upsert 防刷）→ 管理员用量 / 满意度看板</text>
+
+  <!-- ⑨ 前端 -->
+  <text x="1155" y="1112" font-size="17" font-weight="700" fill="#1E293B">⑨ 前端（React + Vite + TS）</text>
+  <text x="1155" y="1138" font-size="11.5" fill="#475569">· 43 个文件 / 9,605 行（TS/TSX 6,226 + CSS 3,379）</text>
+  <text x="1155" y="1158" font-size="11.5" fill="#475569">· 页面：未登录门禁 / 对话 / 知识库 / 设置（账号·云模型·语音分块）</text>
+  <text x="1155" y="1176" font-size="11.5" fill="#475569">  / 历史 / 用量 / 反馈</text>
+  <text x="1155" y="1196" font-size="11.5" fill="#475569">· SSE 流式渲染：token + 阶段进度 + done 元信息；引用面板取</text>
+  <text x="1155" y="1214" font-size="11.5" fill="#475569">  done.sources，不依赖模型写编号</text>
+  <text x="1155" y="1234" font-size="11.5" fill="#475569">· 知识库页 3s 轮询五步入库进度；顶栏播放条轮询 /music/status</text>
+  <text x="1155" y="1254" font-size="11.5" fill="#475569">· 凭证只存组件内存、提交即清；渲染层禁用波浪号删除线</text>
+
+  <text x="45" y="1300" font-size="11" fill="#94A3B8">守卫与门禁：scripts/check_layers.py（56 模块 / 164 边 / 0 违规 / 0 环）· uv run pytest（260 条全离线用例，不依赖 PG / Neo4j / Redis / Ollama / 网络，约 3s）。</text>
 </svg>

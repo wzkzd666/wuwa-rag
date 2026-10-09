@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：243 条，**全量离线**，约 5s
+uv sync --extra dev && uv run pytest    # 单元测试：358 条，**全量离线**，约 4s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -863,9 +863,9 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **243 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **358 条用例、全量离线、约 4s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
-四个文件，各自守一类「功能没坏、只是没被验证」的高危判据：
+十四个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
 | 文件 | 守什么 |
 |---|---|
@@ -874,8 +874,17 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_profile_facts.py` | 画像 `_fact_category` 22 条、注入串拼接与 `MAX_FACTS_IN_PROMPT` 截断 |
 | `test_ratelimit_cors.py` | 限流四档、豁免、429 头、CORS 顺序、真实 app 接线完整性 |
 | `test_architecture_layers.py` | 分层方向、循环依赖、计数基线、空包清理与同名子包未误删 |
+| `test_config_and_prompt.py` | config 默认值口径、prompt 拆分后 `doc_sources` 再导出与提示词构建 |
+| `test_ingest_control.py` | 入库暂停/继续/取消旗标、状态聚合与操作留痕 |
+| `test_music.py` | 音乐 NLU 正/负样本（差一字即漏的动词锚定）、可用性四层判定、as_user 契约 |
+| `test_qqmusic_mcp.py` | MCP server 侧：常驻会话、工具面收敛、搜索降级重试 |
+| `test_security_fixes.py` | 2026-10-09 安全修复回归桩：默认凭据/CORS/XFF/verify 分片/TTS workspace/错误体不泄原文/must_change/`_DECRYPT_ERRORS` 接住 InvalidToken |
+| `test_text.py` | **`text.py` 全部清洗规则的实测基线**：图标残渣 5 正 8 负、`fix_percent_units` 六条红线（`27%5%`/`1%.20%`/术语前瞻/量纲）、`[n]` 剥离与 COST 还原、AnswerFilter 流式（含「短答案整段重复」回归）、`lock_focus`、dedup 只丢整行相同 |
+| `test_guard.py` | 防复读闸：整句重复三次必中/两次放行、周期块循环（计数后缀形态）从最早块截断、退化块后跟正常内容也能算出切点、材料表/技能 13 行/短碎句负样本不命中、流式逐 token 触发 |
+| `test_team_prune.py` | 名册归一五类形态（漂泊者补男属性/剥括号/剥位置词/前缀最长匹配/纯槽位→None）+「绝不猜着切」红线；`_covers` 逐位不摊平、等价对互 True、占位串判定、镜像指纹 |
+| `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；对照：PG 连接超时实测 10s，所以任何用例若试图连库必然卡住）。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：358 条 / 4.6s）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 三条写用例时必须遵守的经验（都是实际踩过的）：
 
@@ -883,7 +892,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 243 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 358 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：
