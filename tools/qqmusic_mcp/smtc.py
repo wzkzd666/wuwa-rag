@@ -57,15 +57,12 @@ async def find_session(app_id: str = _APPID) -> Any | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def _identity(session: Any) -> str:
-    """Session 身份（AppId）。
-
-    ⚠️ 这里**刻意不用** `id(session)` 做身份核对：pywinrt 每次 `get_sessions()` 都返回
-    新的 Python 包装对象，地址必然不同 —— 拿它比对会 100% 判成「会话被重建」，
-    于是每次确认都失败（实测 play/pause 全报「无法确认」，而状态其实已经变了）。
-    真要核对原生对象身份得用 WinRT 的 IUnknown 身份接口，成本高、收益在这个场景下很小：
-    客户端重启后歌名也会变，届时**读到的状态本身就是新的**，把它当成新结果并不会误导人。
-    """
+# ⚠️ 刻意不做「Session 对象身份核对」：pywinrt 每次 get_sessions() 都返回**新的
+# Python 包装对象**，拿 id(session) 比对会 100% 判成「会话被重建」，于是每次确认都
+# 失败（实测 play/pause 全报「无法确认」，而状态其实已经变了）。真要核对原生对象
+# 身份得用 WinRT 的 IUnknown 身份接口，成本高、收益在这个场景下很小：客户端重启后
+# 歌名也会变，届时**读到的状态本身就是新的**，把它当成新结果并不会误导人。
+# （曾在此处留过一个只有 docstring、恒返回 None 的 _identity()，零调用，2026-10-09 删除。）
 
 
 async def _read(session: Any) -> dict[str, Any]:
@@ -107,8 +104,9 @@ async def _confirm_switch(before: dict, budget: float = _CONFIRM_BUDGET) -> tupl
     """等歌名确实变了。返回 (是否确认, 原因)。
 
     `Changing` 状态下的新标题**不算**确认 —— 那一瞬间换歌还没落地。
-    过程中会核对 Session 身份：客户端重启导致对象换了就如实说「无法确认」，
-    而不是把新对象的歌名当成这次命令的成果。
+    会话消失（客户端重启等）也如实报「媒体会话消失」，而不是把后来新出现的
+    会话当作这次命令的续集来确认 —— 身份核对的完整取舍见文件内 `_identity` 位
+    置的那段注释（刻意不做对象级核对，这里以「会话存在 + 歌名变化」为确认口径）。
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + budget
@@ -170,7 +168,6 @@ async def control(action: str, app_id: str = _APPID) -> str:
         except ImportError:
             return "音量控制需要 pycaw（uv sync --extra music）"
         except Exception as exc:  # noqa: BLE001
-            return f"音量控制失败：{type(exc).__name__}: {exc}"
             return f"音量控制失败：{type(exc).__name__}: {exc}"
     if action not in _ACTIONS and action not in ("quality_up", "quality_down"):
         return f"未知动作 {action}；可用：{'/'.join([*_ACTIONS, *_QUALITY, *_VOLUME])}"

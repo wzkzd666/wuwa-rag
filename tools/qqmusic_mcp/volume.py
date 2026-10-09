@@ -62,7 +62,9 @@ def _qq_exe() -> str | None:
 
 def _all_sessions() -> list[tuple[str, Any, Any]]:
     """所有活动输出设备上的会话 → [(设备名, AudioSession, SimpleAudioVolume)]。"""
-    clsid, DEVICE_STATE, EDataFlow, AudioSession, AudioUtilities = _api()
+    # ⚠️ 第一个返回值是 IAudioSessionControl2 **接口类**，不是 CLSID（旧变量名
+    # 叫 clsid，纯属误导 —— QueryInterface 接受接口类，写法本身没错）。
+    ifc, DEVICE_STATE, EDataFlow, AudioSession, AudioUtilities = _api()
     out = []
     try:
         devices = AudioUtilities.GetAllDevices(EDataFlow.eRender.value, DEVICE_STATE.ACTIVE.value)
@@ -76,7 +78,7 @@ def _all_sessions() -> list[tuple[str, Any, Any]]:
                 ctl = enum.GetSession(i)
                 if ctl is None:
                     continue
-                sess = AudioSession(ctl.QueryInterface(clsid))
+                sess = AudioSession(ctl.QueryInterface(ifc))
                 out.append((dev.FriendlyName, sess, sess.SimpleAudioVolume))
         except Exception as exc:  # noqa: BLE001 —— 个别设备/会话失效是常态
             log.debug("跳过设备 %s: %s", dev.FriendlyName, exc)

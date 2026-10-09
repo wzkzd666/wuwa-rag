@@ -205,7 +205,7 @@ MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task �
 
 | 档 | 限额 | 计数主体 | 为什么要限 |
 | --- | --- | --- | --- |
-| `auth` | 10/minute | **客户端 IP** | 登录/注册时还没有用户身份；种子账号是公开的 `admin/123456`，必须挡暴力枚举 |
+| `auth` | 10/minute | **客户端 IP** | 登录/注册时还没有用户身份；口令在部署侧（种子策略见 `core/authdb.ensure_schema`），必须挡暴力枚举。默认按连接 IP 计数；挂反代时设 `TRUST_PROXY_HEADERS=true` 才认 `X-Forwarded-For`（该头客户端可自报，直连场景信任它=限速可绕） |
 | `ask` | 20/minute | **登录用户** | 一轮 20s 量级，且与 Ollama 抢同一块 GPU（`OLLAMA_NUM_PARALLEL=1`） |
 | `tts` | 10/minute | 登录用户 | 每次合成都是真实费用 |
 | `outbound` | 20/hour | 登录用户 | `/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，是 SSRF 面 |
@@ -217,7 +217,7 @@ MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task �
 - 多实例部署把 `RATE_LIMIT_STORAGE` 设成 `redis://…`（项目已有 Redis）即可跨实例共享计数。已开 `in_memory_fallback_enabled` + `swallow_errors`：Redis 挂了自动回落内存、限额检查出错时放行——**限流是保护性设施，它自己不该把问答弄挂**。
 - 实测：`auth` 档 10/minute 下第 11 次起返回 429（且请求根本没碰到 PG，暴力枚举正是这样被挡住的），响应带 `Retry-After: 60` 与中文错误体。
 
-**CORS**：默认允许任意源（前后端分端口开发便利），但通配符时自动关掉 `allow_credentials`——`*` + credentials 等于允许任意站点带凭据跨域调用。本项目鉴权走 `Authorization: Bearer` 请求头、不依赖 Cookie，通配符场景不需要 credentials。生产环境用 `CORS_ORIGINS` 收窄。
+**CORS**：默认**只放行 Vite 开发端口**（`http://localhost:5173` 与 `127.0.0.1:5173`，2026-10-09 收紧——原来默认 `*`，不配环境变量就等于全网可跨域调用）。生产/其它前端来源用 `CORS_ORIGINS`（逗号分隔）显式配置；确实需要全放开时写 `CORS_ORIGINS=*`（明确决策，不再默认给）。通配符时自动关掉 `allow_credentials`——`*` + credentials 等于允许任意站点带凭据跨域调用；本项目鉴权走 `Authorization: Bearer` 请求头、不依赖 Cookie，通配符场景不需要 credentials。
 
 ---
 
@@ -403,15 +403,14 @@ QIANFAN_API_KEY=...      # 留空 = 联网兜底整体关闭，优雅降级不�
 CLOUD_ALLOW_PRIVATE_NET=false  # ⚠️ 代码默认已是 false（防内网探测/SSRF）。
                                #   仅当你要把云端 base_url 指向本机 Ollama/vLLM 时才设 true。
 
-# 可选：跨域（前后端分端口开发时才需要；同源部署留空即可）
-# 留空/不设 = 允许任意源（开发便利）。生产环境务必收窄成具体源，逗号分隔。
-# ⚠️ 通配符 * 时自动关闭 allow_credentials，避免「任意站点带凭据跨域调用」。
+# 可选：跨域（默认只放行 Vite 开发端口；生产填自己的源，逗号分隔）
+# 全放开需显式写 CORS_ORIGINS=*（明确决策；通配符下自动关 allow_credentials）。
 CORS_ORIGINS=
 
 # 可选：限流（默认开启；见下方「限流」一节）
 RATE_LIMIT_ENABLED=true
 RATE_LIMIT_STORAGE=            # 留空=进程内存（单实例够用）；多实例填 redis://… 跨实例共享计数
-RATE_LIMIT_AUTH=10/minute      # 登录/注册，按 IP —— 挡 admin/123456 暴力枚举
+RATE_LIMIT_AUTH=10/minute      # 登录/注册，按 IP —— 挡暴力枚举（默认不认 X-Forwarded-For）
 RATE_LIMIT_ASK=20/minute       # /ask 与 /ask/stream，按登录用户（两者共享同一计数器）
 RATE_LIMIT_TTS=10/minute       # 语音合成，按用户（有真实费用）
 RATE_LIMIT_OUTBOUND=20/hour    # /llm/models、/llm/config/test —— 会向外发请求，SSRF 面收紧

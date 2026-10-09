@@ -8,14 +8,19 @@
 --       所以这份 SQL 主要供手工建库 / 核对结构用。
 -- ============================================================
 
--- 用户表：admin 由 API 启动时种子写入（admin / 123456），游客走 /auth/register
+-- 用户表：admin 由 API 启动时种子写入（口令策略见 core/authdb.ensure_schema：
+-- ADMIN_PASSWORD 显式配置，留空则首启随机生成一次性口令，不再有内置弱口令），
+-- 游客走 /auth/register
 CREATE TABLE IF NOT EXISTS users (
-    id         BIGSERIAL PRIMARY KEY,
-    username   TEXT        NOT NULL,
-    pw_hash    TEXT        NOT NULL,                     -- scrypt$<salt hex>$<hash hex>
-    role       TEXT        NOT NULL DEFAULT 'guest',     -- 'admin' / 'guest'
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id          BIGSERIAL PRIMARY KEY,
+    username    TEXT        NOT NULL,
+    pw_hash     TEXT        NOT NULL,                     -- scrypt$<salt hex>$<hash hex>
+    role        TEXT        NOT NULL DEFAULT 'guest',     -- 'admin' / 'guest'
+    must_change BOOLEAN     NOT NULL DEFAULT FALSE,       -- 初始口令待改：登录响应据此提示
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- 老库补列（幂等），与 core/authdb._DDL 保持一致
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username ON users(username);
 
 -- 登录令牌：随机 256bit，30 天过期；登出即删行

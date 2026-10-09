@@ -66,7 +66,7 @@ toggle 用同一个旧状态。
 2. **mid → songid**：`c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg`
    ⚠️ songid 在 `data[0]['id']`（**没有** `songid` 这个键）
 3. **播放**（⚠️ 参数格式是命门，见下）：
-   `[QQMusic.exe, '/playbysongid', 'cmd_count==1&&id_0=<songid>&songtype_0==0']`
+   `[QQMusic.exe, '/playbysongid', 'cmd_count==1&&id_0==<songid>&&songtype_0==0']`
 
 ### ⚠️ `/playbysongid` 必须传**两个独立参数**
 
@@ -115,5 +115,6 @@ QQ 音乐接口变动频繁。搜索返回空时，先怀疑接口，改这里�
 ## 兼容性
 
 - **mcp 1.x / 2.x 都支持**：2.x 起 `FastMCP` 改名 `MCPServer`，本文件两条都兼容
-- 仅 Windows（媒体键走 `ctypes.windll.user32.keybd_event`）
-- 媒体键是**全局**的：会被前台那个播放器截获，不保证一定作用于 QQ 音乐
+- 仅 Windows：依赖 SMTC（`winrt`）与 Core Audio（`pycaw`/COM）。
+  早期版本的媒体键模拟（`keybd_event`）已删除——它是**全局**按键，会被前台播放器截获、
+  不保证作用于 QQ 音乐，且发出去读不回结果；控制一律走 SMTC 精确命中（见 smtc.py）

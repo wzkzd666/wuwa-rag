@@ -64,6 +64,8 @@ export interface AuthOut {
   token: string
   username: string
   role: 'admin' | 'guest'
+  /** true = 该账号仍是部署者配置的初始口令，前端应引导尽快改密 */
+  must_change_password?: boolean
 }
 
 export function register(username: string, password: string, base?: string): Promise<AuthOut> {

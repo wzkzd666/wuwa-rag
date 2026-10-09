@@ -14,7 +14,8 @@ qqmusic_local_mcp.py —— 自包含的 QQ音乐 MCP server（Windows）
 2) mid → 十进制 songid
    GET https://c.y.qq.com/v8/fcg-bin/fcg_play_single_song.fcg?songmid=<mid>&noplaysong=1
    `data` 是 list，取 data[0]；songid 在 **`data[0]['id']`**（int，**没有 songid 这个键**）。
-3) 播放：QQMusic.exe /playbysongid=<songid>
+3) 播放（两个独立参数，**不是**等号形式，等号形式实测完全不被解析）：
+   [QQMusic.exe, '/playbysongid', 'cmd_count==1&&id_0=<songid>&songtype_0==0']
 
 已废弃（不要再用，都是实测过的）
 --------------------------------
@@ -32,7 +33,6 @@ from __future__ import annotations
 
 import asyncio
 import configparser
-import ctypes
 import json
 import logging
 import os
@@ -116,20 +116,6 @@ def find_qqmusic() -> str | None:
         if p.is_file():
             return str(p)
     return None
-
-
-# ---------- Windows 媒体按键 ----------
-VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_STOP, VK_MEDIA_PLAY_PAUSE = 0xB0, 0xB1, 0xB2, 0xB3
-VK_VOLUME_MUTE, VK_VOLUME_DOWN, VK_VOLUME_UP = 0xAD, 0xAE, 0xAF
-KEYEVENTF_KEYUP = 0x0002
-_MAX_VOLUME_STEPS = 20          # 上限保护：keybd_event 是串行循环，steps 给大了会长时间卡住
-
-
-def tap(vk: int, times: int = 1) -> None:
-    times = max(1, min(int(times), _MAX_VOLUME_STEPS))
-    for _ in range(times):
-        ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
 
 
 # ---------- 搜索 ----------
@@ -244,7 +230,7 @@ def _launch(songid: int | None = None) -> str:
     """投递播放命令。
 
     ⚠️ **参数格式是这个功能的命门**（实测踩过）：必须传**两个独立参数** ——
-        [exe, '/playbysongid', 'cmd_count==1&&id_0=<songid>&songtype_0==0']
+        [exe, '/playbysongid', 'cmd_count==1&&id_0==<songid>&&songtype_0==0']
     写成单个 `/playbysongid=<id>`（等号形式）客户端**完全不解析**：进程会起、会话会建，
     但歌名永远不变（SMTC 读回 16~40 秒均为原曲），非常容易误判成「等待不够久」。
     参考实现：github.com/yotohime777/QQMusic-mcp（qqmusic/client.py）。

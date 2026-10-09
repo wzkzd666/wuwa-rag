@@ -67,11 +67,16 @@ async def register(username: str, password: str) -> dict:
 
 
 async def login(username: str, password: str) -> dict:
-    """登录。成功发新 token；失败一律「用户名或密码错误」（不泄露哪个错）。"""
+    """登录。成功发新 token；失败一律「用户名或密码错误」（不泄露哪个错）。
+
+    响应带 `must_change_password`：为 true 时前端引导改密（见 AuthPage 的 toast）。
+    它对应「部署者用 ADMIN_PASSWORD 显式配了初始口令」那一路——初始口令属于配置文件
+    里的明文，不该长期使用。
+    """
     pool = await get_pool()
     async with pool.connection() as conn:
         cur = await conn.execute(
-            "SELECT id, username, role, pw_hash FROM users WHERE username = %s",
+            "SELECT id, username, role, pw_hash, must_change FROM users WHERE username = %s",
             (username.strip(),),
         )
         row = await cur.fetchone()
@@ -86,6 +91,7 @@ async def login(username: str, password: str) -> dict:
     except Exception as exc:  # noqa: BLE001 —— 解锁失败不影响登录本身
         log.warning("user=%s 登录时自动解锁云端密钥失败（忽略）：%s", row["id"], exc)
     return {"id": row["id"], "username": row["username"], "role": row["role"],
+            "must_change_password": bool(row.get("must_change")),
             "token": await create_token(row["id"])}
 
 
@@ -109,7 +115,8 @@ async def change_password(user_id: int, old: str, new: str) -> None:
             log.warning("user=%s 改密码时重绑云端密钥失败（改用加密口令解锁即可）：%s",
                         user_id, exc)
         await conn.execute(
-            "UPDATE users SET pw_hash = %s WHERE id = %s", (hash_password(new), user_id)
+            "UPDATE users SET pw_hash = %s, must_change = FALSE WHERE id = %s",
+            (hash_password(new), user_id),
         )
     log.info("user=%s 已修改密码", user_id)
 

@@ -1,0 +1,256 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1090" viewBox="0 0 1700 1090" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#94A3B8"/>
+    </marker>
+    <marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#64748B"/>
+    </marker>
+  </defs>
+
+  <rect width="1700" height="1090" fill="#FFFFFF"/>
+
+  <!-- ============ 标题 ============ -->
+  <text x="45" y="52" font-size="30" font-weight="700" fill="#0F172A">wuwa-rag 架构全景</text>
+  <text x="45" y="80" font-size="14" fill="#64748B">《鸣潮》角色知识助手 · LangGraph 混合检索 RAG · 后端 7 层 / 56 个模块 / 164 条依赖边 / 0 违规 0 环（由可执行守卫校验）</text>
+  <line x1="45" y1="98" x2="1655" y2="98" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <!-- ============ ① 分层架构 ============ -->
+  <text x="45" y="128" font-size="17" font-weight="700" fill="#1E293B">① 分层架构（依赖只向下 · 同层可互调 · 内部一律绝对导入）</text>
+
+  <!-- L6 -->
+  <rect x="40" y="142" width="600" height="106" rx="8" fill="#FFE4E6" stroke="#FDA4AF" stroke-width="1.5"/>
+  <rect x="54" y="160" width="46" height="26" rx="6" fill="#E11D48"/>
+  <text x="77" y="178" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L6</text>
+  <text x="112" y="178" font-size="16" font-weight="700" fill="#0F172A">接口  api</text>
+  <text x="112" y="204" font-size="12.5" fill="#475569">FastAPI 路由 · 鉴权依赖 · SSE 流式</text>
+  <text x="112" y="226" font-size="12" fill="#64748B">app · auth · ratelimit · usage · music · server</text>
+
+  <!-- L5 -->
+  <rect x="40" y="254" width="600" height="106" rx="8" fill="#FEF3C7" stroke="#FCD34D" stroke-width="1.5"/>
+  <rect x="54" y="272" width="46" height="26" rx="6" fill="#D97706"/>
+  <text x="77" y="290" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L5</text>
+  <text x="112" y="290" font-size="16" font-weight="700" fill="#0F172A">对话  dialog</text>
+  <text x="112" y="316" font-size="12.5" fill="#475569">LangGraph 编排：NLU → 路由 → 检索 → 校验 → 生成</text>
+  <text x="112" y="338" font-size="12" fill="#64748B">graph · prompt · state · nlu · tools · agent · guard · memory</text>
+
+  <!-- L4 -->
+  <rect x="40" y="366" width="600" height="106" rx="8" fill="#D1FAE5" stroke="#6EE7B7" stroke-width="1.5"/>
+  <rect x="54" y="384" width="46" height="26" rx="6" fill="#059669"/>
+  <text x="77" y="402" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L4</text>
+  <text x="112" y="402" font-size="16" font-weight="700" fill="#0F172A">服务  services</text>
+  <text x="112" y="428" font-size="12.5" fill="#475569">单点能力：人格 / 情绪 / TTS / 校验 / 联网 / 画像 / 音乐</text>
+  <text x="112" y="450" font-size="12" fill="#64748B">persona · emotion · tts · verify · websearch · profile · music</text>
+
+  <!-- L3 -->
+  <rect x="40" y="478" width="600" height="106" rx="8" fill="#CFFAFE" stroke="#67E8F9" stroke-width="1.5"/>
+  <rect x="54" y="496" width="46" height="26" rx="6" fill="#0891B2"/>
+  <text x="77" y="514" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L3</text>
+  <text x="112" y="514" font-size="16" font-weight="700" fill="#0F172A">任务  tasks</text>
+  <text x="112" y="540" font-size="12.5" fill="#475569">Celery 5 步摄取链 + 双通道进度上报</text>
+  <text x="112" y="562" font-size="12" fill="#64748B">worker（Windows 必须 --pool=solo 且并发 1）</text>
+
+  <!-- L2 -->
+  <rect x="40" y="590" width="600" height="106" rx="8" fill="#DBEAFE" stroke="#93C5FD" stroke-width="1.5"/>
+  <rect x="54" y="608" width="46" height="26" rx="6" fill="#2563EB"/>
+  <text x="77" y="626" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L2</text>
+  <text x="112" y="626" font-size="16" font-weight="700" fill="#0F172A">知识  knowledge</text>
+  <text x="112" y="652" font-size="12.5" fill="#475569">语料与索引：分块 / 图谱 / BM25 / 向量 / 召回 / 对象存储</text>
+  <text x="112" y="674" font-size="12" fill="#64748B">crawl · graph · index · retrieve · entities · s3</text>
+
+  <!-- L1 -->
+  <rect x="40" y="702" width="600" height="106" rx="8" fill="#E0E7FF" stroke="#A5B4FC" stroke-width="1.5"/>
+  <rect x="54" y="720" width="46" height="26" rx="6" fill="#4F46E5"/>
+  <text x="77" y="738" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L1</text>
+  <text x="112" y="738" font-size="16" font-weight="700" fill="#0F172A">内核  core</text>
+  <text x="112" y="764" font-size="12.5" fill="#475569">口令哈希 · PG 连接池 · 鉴权表 · 会话 · LLM 客户端 · 凭据保险箱</text>
+  <text x="112" y="786" font-size="12" fill="#64748B">security · db · authdb · conversations · llm · llmstore</text>
+
+  <!-- L0 -->
+  <rect x="40" y="814" width="600" height="106" rx="8" fill="#F1F5F9" stroke="#94A3B8" stroke-width="1.5"/>
+  <rect x="54" y="832" width="46" height="26" rx="6" fill="#475569"/>
+  <text x="77" y="850" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">L0</text>
+  <text x="112" y="850" font-size="16" font-weight="700" fill="#0F172A">基础</text>
+  <text x="112" y="876" font-size="12.5" fill="#475569">配置项唯一定义处 · 跨进程安全日志 · 纯文本工具</text>
+  <text x="112" y="898" font-size="12" fill="#64748B">config · ww_logger · text（零项目内依赖）</text>
+
+  <!-- 依赖方向箭头 -->
+  <line x1="628" y1="912" x2="628" y2="152" stroke="#94A3B8" stroke-width="2" marker-end="url(#ar)"/>
+  <text transform="translate(652,532) rotate(-90)" font-size="12" fill="#64748B" text-anchor="middle">上层可调用下层，下层不知道上层存在</text>
+
+  <!-- ============ ② 问答链路 ============ -->
+  <text x="680" y="128" font-size="17" font-weight="700" fill="#1E293B">② 问答链路 · LangGraph 编排</text>
+
+  <!-- intent -->
+  <rect x="755" y="144" width="340" height="48" rx="7" fill="#EEF2FF" stroke="#6366F1" stroke-width="1.5"/>
+  <text x="925" y="165" font-size="14.5" font-weight="700" fill="#312E81" text-anchor="middle">intent 意图判定</text>
+  <text x="925" y="183" font-size="11.5" fill="#4B5563" text-anchor="middle">6 分支：chitchat / clarify / time / fact / semantic / hybrid</text>
+
+  <!-- 路由说明 -->
+  <text x="925" y="220" font-size="11.5" fill="#64748B" text-anchor="middle">fact → 图谱 ｜ semantic → 向量 ｜ hybrid → 图谱 + 向量 ｜ 其余直达生成</text>
+
+  <!-- graph / vector -->
+  <path d="M925,192 V232" stroke="#94A3B8" stroke-width="1.4" fill="none"/>
+  <path d="M925,232 H833 V244" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+  <path d="M925,232 H1018 V244" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="750" y="246" width="165" height="56" rx="7" fill="#DBEAFE" stroke="#3B82F6" stroke-width="1.5"/>
+  <text x="832" y="268" font-size="13.5" font-weight="700" fill="#1E3A8A" text-anchor="middle">graph 图谱检索</text>
+  <text x="832" y="288" font-size="11" fill="#4B5563" text-anchor="middle">固定 Cypher 模板</text>
+
+  <rect x="935" y="246" width="165" height="56" rx="7" fill="#DBEAFE" stroke="#3B82F6" stroke-width="1.5"/>
+  <text x="1018" y="268" font-size="13.5" font-weight="700" fill="#1E3A8A" text-anchor="middle">vector 向量检索</text>
+  <text x="1018" y="288" font-size="11" fill="#4B5563" text-anchor="middle">dense30+sparse30 → RRF → rerank</text>
+
+  <!-- 汇聚到 verify -->
+  <path d="M832,302 V318 H925" stroke="#94A3B8" stroke-width="1.4" fill="none"/>
+  <path d="M1018,302 V318 H925" stroke="#94A3B8" stroke-width="1.4" fill="none"/>
+  <path d="M925,318 V332" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <!-- verify -->
+  <rect x="755" y="334" width="340" height="62" rx="7" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.5"/>
+  <text x="925" y="356" font-size="14.5" font-weight="700" fill="#78350F" text-anchor="middle">verify 校验（资料能否回答问题）</text>
+  <text x="925" y="375" font-size="11.5" fill="#4B5563" text-anchor="middle">5 种判定：ok / exhausted / retrieval 重检索 / refreshed 重爬 / web 联网</text>
+  <text x="925" y="390" font-size="11" fill="#92400E" text-anchor="middle">按代价由低到高升级 · 三道闸防止自我循环</text>
+
+  <!-- 升级回流 -->
+  <path d="M750,365 H712 V274 H748" stroke="#F59E0B" stroke-width="1.6" fill="none" marker-end="url(#arb)"/>
+  <text x="706" y="320" font-size="10.5" fill="#B45309" text-anchor="end">升级回流</text>
+
+  <!-- generate -->
+  <path d="M925,396 V414" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+  <rect x="755" y="416" width="340" height="50" rx="7" fill="#D1FAE5" stroke="#10B981" stroke-width="1.5"/>
+  <text x="925" y="437" font-size="14.5" font-weight="700" fill="#064E3B" text-anchor="middle">generate 生成</text>
+  <text x="925" y="455" font-size="11.5" fill="#4B5563" text-anchor="middle">aemeath 作答 · 引用标记剥离 · 输出侧兜底</text>
+
+  <text x="680" y="496" font-size="11.5" fill="#64748B">工具调用走节点内确定性直调（await TOOL.ainvoke），不用 LLM 选工具 —— 零幻觉、零额外延迟</text>
+
+  <!-- 防复读 -->
+  <text x="680" y="536" font-size="14" font-weight="700" fill="#1E293B">防复读三道闸</text>
+  <text x="680" y="558" font-size="11.5" fill="#475569">① 采样参数 repeat_penalty / top_p / top_k</text>
+  <text x="680" y="578" font-size="11.5" fill="#475569">② 上下文约束：零资料时注入一句话作答指令</text>
+  <text x="680" y="598" font-size="11.5" fill="#475569">③ 运行时检测 loopguard —— 实测省下 76% 无效生成</text>
+
+  <!-- 多轮记忆 -->
+  <text x="680" y="638" font-size="14" font-weight="700" fill="#1E293B">多轮记忆与追问改写</text>
+  <text x="680" y="660" font-size="11.5" fill="#475569">AsyncPostgresSaver 按 thread_id 持久化（PG lg schema）</text>
+  <text x="680" y="680" font-size="11.5" fill="#475569">零 LLM 焦点锚点 + 滚动摘要 → 补成自包含问句</text>
+  <text x="680" y="700" font-size="11.5" fill="#475569">摘要不注入生成侧（避免第三人称摘要腔穿帮）</text>
+
+  <!-- 流式 -->
+  <text x="680" y="740" font-size="14" font-weight="700" fill="#1E293B">流式输出</text>
+  <text x="680" y="762" font-size="11.5" fill="#475569">SSE + 按 langgraph_node 过滤 token（否则会把分类器输出吐给用户）</text>
+  <text x="680" y="782" font-size="11.5" fill="#475569">额外下发阶段进度事件，覆盖检索静默期（约 19s）</text>
+
+  <!-- ============ ③ 入库链路 ============ -->
+  <text x="1190" y="128" font-size="17" font-weight="700" fill="#1E293B">③ 入库链路 · Celery 5 步链</text>
+
+  <rect x="1190" y="142" width="450" height="46" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1206" y="163" font-size="13" font-weight="700" fill="#0F172A">crawl_character</text>
+  <text x="1206" y="180" font-size="11" fill="#64748B">抓 wiki markdown，记录 crawl_runs</text>
+  <path d="M1415,188 V196" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="198" width="450" height="46" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1206" y="219" font-size="13" font-weight="700" fill="#0F172A">chunk_character</text>
+  <text x="1206" y="236" font-size="11" fill="#64748B">结构感知分块（按 H2/H3/H4 + 表格感知）</text>
+  <path d="M1415,244 V252" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="254" width="450" height="46" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1206" y="275" font-size="13" font-weight="700" fill="#0F172A">ingest_character</text>
+  <text x="1206" y="292" font-size="11" fill="#64748B">PG + RustFS 落库（documents DO UPDATE / chunks DO NOTHING）</text>
+  <path d="M1415,300 V308" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="310" width="450" height="46" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1206" y="331" font-size="13" font-weight="700" fill="#0F172A">index_character</text>
+  <text x="1206" y="348" font-size="11" fill="#64748B">BM25 全量重建 + Chroma 增量 upsert</text>
+  <path d="M1415,356 V364" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="366" width="450" height="46" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1206" y="387" font-size="13" font-weight="700" fill="#0F172A">graph_character</text>
+  <text x="1206" y="404" font-size="11" fill="#64748B">正则抽事实 → Neo4j MERGE（幂等）</text>
+
+  <text x="1190" y="430" font-size="11.5" fill="#64748B">各步幂等可单独重跑 · 进度双通道上报（Celery backend + Redis 聚合键）</text>
+
+  <!-- ============ ④ 音乐链路 ============ -->
+  <text x="1190" y="470" font-size="17" font-weight="700" fill="#1E293B">④ 音乐链路 · MCP（可选，默认关闭）</text>
+
+  <rect x="1190" y="484" width="450" height="44" rx="7" fill="#F5F3FF" stroke="#A78BFA" stroke-width="1.4"/>
+  <text x="1206" y="504" font-size="12.5" font-weight="700" fill="#4C1D95">用户语句 → nlu.music_action</text>
+  <text x="1206" y="520" font-size="11" fill="#64748B">规则判定（动词锚定），零 LLM，避免游戏问句误命中</text>
+  <path d="M1415,528 V536" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="538" width="450" height="44" rx="7" fill="#F5F3FF" stroke="#A78BFA" stroke-width="1.4"/>
+  <text x="1206" y="558" font-size="12.5" font-weight="700" fill="#4C1D95">services/music.py → call()</text>
+  <text x="1206" y="574" font-size="11" fill="#64748B">常驻 task 持有 MCP 会话（anyio CancelScope 同任务进出）</text>
+  <path d="M1415,582 V590" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="592" width="450" height="44" rx="7" fill="#F5F3FF" stroke="#A78BFA" stroke-width="1.4"/>
+  <text x="1206" y="612" font-size="12.5" font-weight="700" fill="#4C1D95">tools/qqmusic_mcp（子进程 · stdio）</text>
+  <text x="1206" y="628" font-size="11" fill="#64748B">SMTC 定位播放器 · Core Audio 应用级音量（COM 须在子进程内）</text>
+  <path d="M1415,636 V644" stroke="#94A3B8" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+  <rect x="1190" y="646" width="450" height="44" rx="7" fill="#F5F3FF" stroke="#A78BFA" stroke-width="1.4"/>
+  <text x="1206" y="666" font-size="12.5" font-weight="700" fill="#4C1D95">搜索 smartbox → songid → QQMusic /playbysongid</text>
+  <text x="1206" y="682" font-size="11" fill="#64748B">「歌手 + 的 + 歌名」无结果时降级重试</text>
+
+  <!-- ============ ⑤ 关键设计决策 ============ -->
+  <text x="1190" y="726" font-size="17" font-weight="700" fill="#1E293B">⑤ 关键设计决策</text>
+  <text x="1190" y="750" font-size="11.5" fill="#475569">· PostgreSQL 是唯一真源；Chroma / bm25.pkl / Neo4j 均为可全量重建的派生索引</text>
+  <text x="1190" y="770" font-size="11.5" fill="#475569">· bge-m3 与 reranker 走 CPU —— 8GB 显存留给 LLM</text>
+  <text x="1190" y="790" font-size="11.5" fill="#475569">· 双 8B 模型分工：aemeath 作答 / qwen3:8b 做结构化抽取</text>
+  <text x="1190" y="810" font-size="11.5" fill="#475569">· Windows 用 SelectorEventLoop + psycopg，不用 asyncpg</text>
+
+  <!-- ============ ⑥ 外部依赖 ============ -->
+  <line x1="45" y1="916" x2="1655" y2="916" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="45" y="946" font-size="17" font-weight="700" fill="#1E293B">⑥ 外部依赖与数据落点</text>
+
+  <rect x="45" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="59" y="983" font-size="12.5" font-weight="700" fill="#0F172A">PostgreSQL</text>
+  <text x="59" y="1001" font-size="10.5" fill="#475569">业务真源 + checkpointer</text>
+  <text x="59" y="1018" font-size="10" fill="#94A3B8">pgvector16</text>
+  <text x="59" y="1032" font-size="10" fill="#94A3B8">pgsql/001_init.sql</text>
+
+  <rect x="245" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="259" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Chroma</text>
+  <text x="259" y="1001" font-size="10.5" fill="#475569">bge-m3 稠密向量（派生）</text>
+  <text x="259" y="1018" font-size="10" fill="#94A3B8">data/chroma/</text>
+  <text x="259" y="1032" font-size="10" fill="#94A3B8">可全量重建</text>
+
+  <rect x="445" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="459" y="983" font-size="12.5" font-weight="700" fill="#0F172A">BM25 · jieba</text>
+  <text x="459" y="1001" font-size="10.5" fill="#475569">稀疏索引，含词典快照</text>
+  <text x="459" y="1018" font-size="10" fill="#94A3B8">bm25.pkl</text>
+  <text x="459" y="1032" font-size="10" fill="#94A3B8">快照保证分词一致</text>
+
+  <rect x="645" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="659" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Neo4j 5.26</text>
+  <text x="659" y="1001" font-size="10.5" fill="#475569">6 类节点 / 6 类关系</text>
+  <text x="659" y="1018" font-size="10" fill="#94A3B8">全部 MERGE 幂等</text>
+  <text x="659" y="1032" font-size="10" fill="#94A3B8">正则规则抽取</text>
+
+  <rect x="845" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="859" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Redis</text>
+  <text x="859" y="1001" font-size="10.5" fill="#475569">Celery broker / backend</text>
+  <text x="859" y="1018" font-size="10" fill="#94A3B8">+ 进度聚合键（TTL 1h）</text>
+  <text x="859" y="1032" font-size="10" fill="#94A3B8">+ 限流计数（可选）</text>
+
+  <rect x="1045" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1059" y="983" font-size="12.5" font-weight="700" fill="#0F172A">RustFS（S3）</text>
+  <text x="1059" y="1001" font-size="10.5" fill="#475569">原文 md + 立绘</text>
+  <text x="1059" y="1018" font-size="10" fill="#94A3B8">knowledge/s3.py 抽象层</text>
+  <text x="1059" y="1032" font-size="10" fill="#94A3B8">换后端只改这一层</text>
+
+  <rect x="1245" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1259" y="983" font-size="12.5" font-weight="700" fill="#0F172A">Ollama ×2</text>
+  <text x="1259" y="1001" font-size="10.5" fill="#475569">aemeath 作答 / qwen3:8b 抽取</text>
+  <text x="1259" y="1018" font-size="10" fill="#94A3B8">LoRA 微调 Qwen3-8B（GGUF）</text>
+  <text x="1259" y="1032" font-size="10" fill="#94A3B8">均 bind(think=False)</text>
+
+  <rect x="1445" y="962" width="190" height="76" rx="7" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.4"/>
+  <text x="1459" y="983" font-size="12.5" font-weight="700" fill="#0F172A">QQ音乐 PC（可选）</text>
+  <text x="1459" y="1001" font-size="10.5" fill="#475569">音乐播放</text>
+  <text x="1459" y="1018" font-size="10" fill="#94A3B8">经 MCP 子进程调用</text>
+  <text x="1459" y="1032" font-size="10" fill="#94A3B8">路径可由设置页指定</text>
+
+  <text x="45" y="1062" font-size="11" fill="#94A3B8">说明：Chroma / bm25.pkl / Neo4j 三者均为派生索引，可随时从 PostgreSQL 全量重建；数据规模为 2026-10-06 四方对账实测（chunk 6,741）。</text>
+</svg>

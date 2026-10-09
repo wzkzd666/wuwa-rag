@@ -53,9 +53,13 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # ---------- RustFS / S3（原文 + 立绘） ----------
+    # ⚠️ 默认凭据留空（2026-10-09 安全收紧）：原来默认 rustfsadmin/rustfsadmin，
+    # 忘记配 .env 时会**静默**用这对公开默认弱凭据连上 RustFS——看起来一切正常，
+    # 实际桶是拿部署默认口令开的。现在留空 = 连不上就响亮报错，逼部署者显式配置。
+    # docker-compose.yml 里 RustFS 的 RUSTFS_ACCESS_KEY/SECRET_KEY 与本节必须成对设置。
     S3_ENDPOINT: str = "http://localhost:9000"
-    S3_ACCESS_KEY: str = "rustfsadmin"
-    S3_SECRET_KEY: str = "rustfsadmin"
+    S3_ACCESS_KEY: str = ""
+    S3_SECRET_KEY: str = ""
     S3_BUCKET_RAW: str = "wuwa-raw"
     S3_BUCKET_IMAGES: str = "wuwa-images"   # 预留：立绘桶，images 表已建、VLM 链路未接入主链
 
@@ -273,11 +277,24 @@ class Settings(BaseSettings):
     API_HOST: str = "127.0.0.1"
     API_PORT: int = 8000
     MAX_HISTORY_TURNS: int = 3      # 带进 prompt 的历史轮数
+    # 管理员种子口令（见 core/authdb.ensure_schema）。留空 = 首启随机生成一次性口令，
+    # 打在 API 启动日志里（只出现一次）；显式设置 = 用它做初始口令，并把 admin 标记
+    # 为「需改密」，登录响应会带 must_change_password=true 提示前端引导改密。
+    # ⚠️ 不再内置固定的弱默认口令：公网部署忘改 = 管理员权限公开。
+    ADMIN_PASSWORD: str = ""
+    # 反代信任（见 api/ratelimit.py）：只有 API 前面挂了会覆写 X-Forwarded-For 的
+    # 反向代理（nginx/Caddy）时才设 True。直连部署保持 False——否则客户端自报一个
+    # 头就能伪造来源 IP，把按 IP 的登录限速整档作废。
+    TRUST_PROXY_HEADERS: bool = False
+    # 跨域白名单（逗号分隔，见 api/app.py）。默认**只放行 Vite 开发端口**
+    # （2026-10-09 安全收紧：原来代码默认 `*`，不配环境变量就等于全网可跨域调用）。
+    # 生产改成自己的源；确实要全放开时显式写 `CORS_ORIGINS=*`（明确决策，不再默认给）。
+    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # ---------- 限流（slowapi，见 api/ratelimit.py）----------
     # 为什么必须有：/ask 一轮要跑检索+重排+生成（实测 20s 量级），且与 Ollama 抢同一块
-    # GPU（OLLAMA_NUM_PARALLEL=1）；/tts 每次合成都是真实费用；/auth/login 面对的是
-    # 种子管理员 admin/123456 这种公开弱口令，必须挡暴力枚举。
+    # GPU（OLLAMA_NUM_PARALLEL=1）；/tts 每次合成都是真实费用；/auth/login 要挡暴力枚举
+    # （管理员口令虽已不再内置弱口令，但口令策略在部署侧，枚举风险仍在），必须限速。
     # 限额用 limits 库的标准写法（`<次数>/<单位>`，单位 minute/hour/day，可写 `5 per minute`）。
     RATE_LIMIT_ENABLED: bool = True
     # 计数存储：留空 = 进程内存（单实例够用）；填 Redis DSN 则跨实例共享、重启不丢计数。

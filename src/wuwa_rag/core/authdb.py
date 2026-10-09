@@ -9,6 +9,8 @@ search_path，默认 public，与 001/002 建表位置一致）。
 """
 from __future__ import annotations
 
+import secrets
+
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -29,9 +31,13 @@ _DDL = [
         username   TEXT        NOT NULL,
         pw_hash    TEXT        NOT NULL,
         role       TEXT        NOT NULL DEFAULT 'guest',
+        must_change BOOLEAN     NOT NULL DEFAULT FALSE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # 老库补列（幂等）：must_change 标记「管理员用部署者显式配置的初始口令建号」，
+    # 登录响应据此提示前端引导改密。历史用户默认 FALSE，不影响既有账号。
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change BOOLEAN NOT NULL DEFAULT FALSE",
     "CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username ON users(username)",
     """
     CREATE TABLE IF NOT EXISTS auth_tokens (
@@ -90,7 +96,15 @@ async def close_pool() -> None:
 
 
 async def ensure_schema() -> None:
-    """幂等建表 + 清过期 token + 种子 admin。API lifespan 里调用一次。"""
+    """幂等建表 + 清过期 token + 种子 admin。API lifespan 里调用一次。
+
+    管理员口令（2026-10-09 安全收紧）：**不再内置固定弱口令**。
+    - `ADMIN_PASSWORD` 留空（默认）→ 随机生成一次性口令，只在本进程日志里
+      打印一次；没看到日志就无法登录，不存在「默认凭据公开」的窗口。
+    - 显式设置 → 用它建号，并把 admin 标记 `must_change=TRUE`，
+      登录响应带 `must_change_password` 提示前端引导改密。
+    两种路径都不再依赖「记得去改默认口令」这种全靠部署者自觉的约定。
+    """
     pool = await get_pool()
     async with pool.connection() as conn:
         for stmt in _DDL:
@@ -98,14 +112,22 @@ async def ensure_schema() -> None:
         # 清掉过期令牌（顺手机会清理，不靠定时任务）
         await conn.execute("DELETE FROM auth_tokens WHERE expires_at < now()")
         # 种子管理员：只在不存在时插入。
-        # 安全提示：默认凭据 admin/123456 仅适用于本地开发与内网演示。
-        #    任何对外可访问的部署都必须先改掉该密码（或改为首次启动强制设置），
-        #    否则等于把管理员权限公开。
-        cur = await conn.execute("SELECT 1 FROM users WHERE username = %s", ("admin",))
-        if await cur.fetchone() is None:
-            await conn.execute(
-                "INSERT INTO users (username, pw_hash, role) VALUES (%s, %s, 'admin')",
-                ("admin", hash_password("123456")),
+        cfg_pwd = (s.ADMIN_PASSWORD or "").strip()
+        if cfg_pwd:
+            pwd, must_change, how = cfg_pwd, True, "ADMIN_PASSWORD 显式配置（登录后应尽快改密）"
+        else:
+            pwd = secrets.token_urlsafe(24)
+            must_change, how = False, "首启随机生成（见本条日志，只打印这一次）"
+        cur = await conn.execute(
+            "INSERT INTO users (username, pw_hash, role, must_change) "
+            "VALUES (%s, %s, 'admin', %s) "
+            "ON CONFLICT (username) DO NOTHING RETURNING username",
+            ("admin", hash_password(pwd), must_change),
+        )
+        if await cur.fetchone() is not None:
+            log.warning(
+                "已种子管理员 admin。初始口令（来源：%s）：%s"
+                "——口令只显示这一次，请立即妥善保存并登录后尽快修改。",
+                how, pwd,
             )
-            log.info("已种子管理员 admin（密码见需求：123456）")
     log.info("鉴权表结构就绪")

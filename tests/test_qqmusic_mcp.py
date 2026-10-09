@@ -69,10 +69,18 @@ def test_环境变量指向不存在的文件时继续往下找(monkeypatch) -> 
     assert m.find_qqmusic() is None or isinstance(m.find_qqmusic(), str)
 
 
-# ---------- 参数夹紧 ----------
-def test_音量步数被夹在上限内() -> None:
-    """keybd_event 是串行循环，steps 给大了会长时间卡住。"""
-    assert _load()._MAX_VOLUME_STEPS == 20
+# ---------- 媒体键死代码不得复活 ----------
+def test_媒体键模拟已删除() -> None:
+    """2026-10-09 删除 tap()/_MAX_VOLUME_STEPS/VK_* 全家（零调用者）。
+
+    原测试钉的是「keybd_event 串行循环 steps 夹紧 20」——那是媒体键模拟的护栏；
+    媒体键本身是**全局**按键（会被前台播放器截获、发出去读不回结果），控制一律走
+    SMTC 精确命中（见 smtc.py），这套按键代码属于误导性死代码，删。
+    本测试改为守卫：确认它们不会以「看着还能用」的形态悄悄回来。
+    """
+    m = _load()
+    for gone in ("tap", "_MAX_VOLUME_STEPS", "KEYEVENTF_KEYUP", "VK_MEDIA_NEXT"):
+        assert not hasattr(m, gone), f"{gone} 应已随媒体键模拟一并删除"
 
 
 def test_工具集已精简() -> None:

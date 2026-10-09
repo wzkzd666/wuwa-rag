@@ -5,14 +5,15 @@
 ① `/ask` 一轮要跑检索+重排+生成（实测 20s 量级），且与 Ollama 抢同一块 GPU
    （`OLLAMA_NUM_PARALLEL=1`）——并发打进来互相拖慢，谁都拿不到结果；
 ② `/tts` 每次合成都是真实费用（按 token 计价），必须防刷；
-③ `/auth/login` 面对的是**种子管理员 admin/123456** 这种公开弱口令，
+③ `/auth/login` 面对的是**种子管理员**（口令策略见 `core/authdb.ensure_schema`），
    不限速等于把暴力枚举的门敞开；
 ④ `/llm/models`、`/llm/config/test` 会向用户填的地址发起**出站请求**，
    是 SSRF 面，频率要收紧。
 
 两种计数主体
 ------------
-- **按 IP**：登录/注册时还没有用户身份，只能按来源 IP（`get_remote_address`）。
+- **按 IP**：登录/注册时还没有用户身份，只能按来源 IP（`client_ip`，默认取连接 IP，
+  只有 `TRUST_PROXY_HEADERS=True` 时才认 X-Forwarded-For）。
 - **按登录用户**：问答/语音按 `u<user_id>` 计。身份由 `api/auth.get_current_user`
   写进 `request.state.user_id`；取不到时回落 IP，所以依赖顺序写错也只是退化成
   按 IP 限速，不会变成「完全不限流」。
@@ -60,13 +61,28 @@ from wuwa_rag.ww_logger import get_logger
 log = get_logger("app")
 
 
+def client_ip(request: Request) -> str:
+    """客户端来源 IP。
+
+    ⚠️ 只有 `TRUST_PROXY_HEADERS=True`（API 前面确实挂了会**覆写** X-Forwarded-For 的
+    反向代理）时才读该头，且只取**最左**一项（最早、由代理写入的真实客户端）。
+    默认 False：`X-Forwarded-For` 是客户端可自报的请求头，直连场景信任它 = 任何人
+    换一个头值就能绕开按 IP 的登录限速，那档限额形同虚设。
+    """
+    if get_settings().TRUST_PROXY_HEADERS:
+        fwd = (getattr(request, "headers", None) or {}).get("x-forwarded-for")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return get_remote_address(request)
+
+
 def key_by_user_or_ip(request: Request) -> str:
     """限流主体：优先登录用户（`u<id>`），取不到回落客户端 IP。
 
     `request.state.user_id` 由 `api/auth.get_current_user` 写入。
     """
     uid = getattr(request.state, "user_id", None)
-    return f"u{uid}" if uid else get_remote_address(request)
+    return f"u{uid}" if uid else client_ip(request)
 
 
 def _storage_uri() -> str:
@@ -101,8 +117,12 @@ limiter = Limiter(
 
 # 单端点限额装饰器。⚠️ 每个被装饰的端点都必须有 `request: Request` 形参。
 def limit_auth():
-    """登录/注册：**按 IP** 限速（此时无用户身份）。"""
-    return limiter.limit(get_settings().RATE_LIMIT_AUTH, key_func=get_remote_address)
+    """登录/注册：**按 IP** 限速（此时无用户身份）。
+
+    来源 IP 走 `client_ip`：默认直连口径；挂反代且 `TRUST_PROXY_HEADERS=True`
+    时才取 X-Forwarded-For，否则该头可被客户端自报、按 IP 限速形同虚设。
+    """
+    return limiter.limit(get_settings().RATE_LIMIT_AUTH, key_func=client_ip)
 
 
 def limit_ask():

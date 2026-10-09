@@ -1,7 +1,8 @@
 """Step 9：FastAPI 端点。
 
 系统鉴权与用户画像：
-- 鉴权（api/auth.py + db.py）：admin 种子（admin/123456），游客 /auth/register 注册后登录；
+- 鉴权（api/auth.py + core/authdb.py）：admin 种子（口令见 ADMIN_PASSWORD / 首启随机，
+  不再有内置弱口令），游客 /auth/register 注册后登录；
   请求带 `Authorization: Bearer <token>`。/ask、/ask/stream 登录即可；/ingest* 管理员专属。
 - 画像（rag/profile.py）：user_facts 表落地——问答后异步抽「稳定偏好事实」入库，
   下次提问取活跃事实注入生成 prompt（个性化）；/profile 查自己的、可软删单条。
@@ -14,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import uuid
 from contextlib import asynccontextmanager
@@ -71,7 +71,7 @@ log = get_logger("app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_checkpointer()
-    await ensure_schema()   # 幂等建鉴权表 + 种子 admin/123456（见 pgsql/002_auth.sql）
+    await ensure_schema()   # 幂等建鉴权表 + 种子 admin（口令策略见 core/authdb.ensure_schema）
     await conv.ensure_schema()       # 幂等建会话转录表（见 pgsql/003_conversation_scope.sql）
     await llmstore.ensure_schema()   # 幂等建 user_llm_configs（云端模型配置，含加密 key）
     # 领域词表（单字角色名消歧用）：启动时建好，之后问答主链零额外开销。
@@ -81,6 +81,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # noqa: BLE001 —— 派生词表是增益，挂了不该让服务起不来
         log.warning("领域词表预热失败（回落到手写兜底表）: %s", exc)
     yield
+    # 音乐 MCP 是常驻子进程，必须显式收尾（见 services/music.py 的 aclose）；
+    # 漏掉这一步，服务重启会留下僵尸子进程占住播放器会话。
+    # 失败只记日志：收尾阶段任何异常都不该阻止后面池子的关闭。
+    try:
+        await music_svc.aclose()
+    except Exception as exc:  # noqa: BLE001 —— 尽力而为，不得挡掉后续清理
+        log.warning("音乐 MCP 会话收尾失败（忽略）：%s", exc)
     await close_checkpointer()
     await close_pool()
 
@@ -97,15 +104,18 @@ music_api.install(app)
 # 前端在浏览器里看到的就是一个没有 CORS 头的模糊跨域错误，而不是真正的「请求过于频繁」。
 rl.install(app)
 
-# CORS 配置：支持前后端分端口开发（Vite 5173 / FastAPI 8000）。
-# 生产环境用环境变量 CORS_ORIGINS 收窄允许的源（逗号分隔）：
-#   CORS_ORIGINS=http://localhost:5173,https://yourdomain.com
+# CORS 配置：默认**只放行 Vite 开发端口**（2026-10-09 安全收紧：原来默认 `*`，
+# 把收紧成本转嫁给了部署者——忘记配环境变量就等于全网可跨域调用本 API）。
+# 生产/其它前端来源用环境变量显式配置（逗号分隔）：
+#   CORS_ORIGINS=https://yourdomain.com
+# 确实需要放开时显式写 CORS_ORIGINS=*（明确决策，不再是不配就默认全放）。
 #
 # ⚠️ allow_credentials 只在**显式配了源**时才开：通配符 `*` + credentials=True 等于
 # 允许任意站点带凭据跨域调用本 API（浏览器规范也拒绝这种组合，Starlette 会退化成回显
 # 请求 Origin，效果同样是全放行）。本项目鉴权走 `Authorization: Bearer <token>`
 # 请求头，不依赖 Cookie，通配符场景下根本不需要 credentials。
-_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+_cors_origins = [o.strip() for o in get_settings().CORS_ORIGINS.split(",") if o.strip()] \
+    or ["http://localhost:5173", "http://127.0.0.1:5173"]
 _wildcard = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
@@ -119,13 +129,16 @@ app.add_middleware(
 # ── 全局异常处理 ─────────────────────────────
 # 未捕获异常不再裸 500（前端只能看到 "HTTP 500"，无从下手）：
 # 统一 {error: 简述} JSON + 服务端完整堆栈日志。request_id 串起两端。
+# ⚠️ 客户端响应**不回传异常原文**（2026-10-09 安全收紧）：str(exc) 可能带
+# SQL 片段、文件路径、依赖版本等内部信息，等于把调试素材发给任意请求方。
+# 排障走日志：error 里的编号 rid 与服务端堆栈一一对应。
 @app.exception_handler(Exception)
 async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
     rid = uuid.uuid4().hex[:8]
     log.exception("[%s] 未捕获异常 %s %s", rid, request.method, request.url.path)
     return JSONResponse(
         status_code=500,
-        content={"error": f"服务内部错误（编号 {rid}，详情见服务端日志）", "detail": str(exc)[:300]},
+        content={"error": f"服务内部错误（编号 {rid}，详情见服务端日志）"},
     )
 
 
@@ -464,7 +477,7 @@ async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, ke
                 # 回给前端的必须是**短 id**（它只认自己的 id，不认 u<id>: 前缀）
                 evt["thread_id"] = tid
             yield evt
-    except Exception as exc:  # noqa: BLE001 —— 见下：SSE 响应头已发出，此处**必须**宽捕获
+    except Exception:  # noqa: BLE001 —— 见下：SSE 响应头已发出，此处**必须**宽捕获
         # SSE 一旦开始流式，响应头已发出，全局异常处理器接不住这里的异常——
         # 必须就地捕获并转成 {'error'} 事件下发（前端 store 有对应处理）。
         # ⚠️ 绝不能收窄成具体异常类型：这条流里可能出任何错（LLM 断连、检索异常、
@@ -472,7 +485,8 @@ async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, ke
         # 界面永远停在「生成中」。宁可宽捕获把一切转成 error 事件。
         rid = uuid.uuid4().hex[:8]
         log.exception("[%s] SSE 流中途异常 thread=%s", rid, key)
-        yield {"error": f"生成中断（编号 {rid}）", "detail": str(exc)[:300]}
+        # 与 on_unhandled 同一口径：只给编号，异常原文进日志，不回传客户端。
+        yield {"error": f"生成中断（编号 {rid}）"}
     finally:
         # 流结束后再抽画像：不与生成抢 LLM（OLLAMA_NUM_PARALLEL=1）
         _spawn_profile_task(user.username, key, question)

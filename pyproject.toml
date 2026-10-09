@@ -54,7 +54,8 @@ dependencies = [
     "qianfan>=0.2.5",
     "tqdm>=4.70.1",
     "concurrent-log-handler>=0.9.29",
-    "pytest>=9.1.1",
+    # ⚠️ pytest 只在 [project.optional-dependencies].dev（`uv sync --extra dev`）——
+    # 它是**跑测试的工具**，不是运行时依赖，放主依赖会让生产环境/开源用户白装。
 ]
 
 [project.optional-dependencies]

@@ -74,7 +74,17 @@ async def verify_knowledge(question: str, graph_facts: str, docs: list[dict]) ->
     try:
         resp = await get_tool_llm().ainvoke(
             msgs, config={"tags": ["wwa:verify"]})   # 打标防流式泄漏（同 wwa:summary）
-        txt = '{"' + (resp.content or "")
+        # content 正常是 str；个别 provider/分片返回 list 时这里**不能**直接 '+'
+        # ——TypeError 会掉进下面的 fail-open 宽捕获，症状是「审查看似开着、
+        # 实际每次都没审」（静默失效比报错难查得多）。显式拒成可预期的 ValueError，
+        # 走同一条降级路径但在日志里点名根因。
+        content = resp.content
+        if not isinstance(content, str):
+            parts = [c for c in content if isinstance(c, str)] if isinstance(content, list) else []
+            if not parts:
+                raise ValueError(f"资料审查收到非字符串响应：{type(content).__name__}")
+            content = "".join(parts)
+        txt = '{"' + content
         m = re.search(r"\{.*?\}", txt, re.S)
         if not m:
             log.warning("资料审查: 输出无 JSON，放行：%r", txt[:60])

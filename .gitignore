@@ -14,6 +14,7 @@ wheels/
 data/
 logs/
 .runtime/
+wushi
 
 # Editor / tooling caches
 .vscode/

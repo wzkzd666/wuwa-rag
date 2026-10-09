@@ -180,6 +180,14 @@ def _global_ready() -> tuple[bool, str]:
         return False, "缺少语音服务密钥（DASHSCOPE_API_KEY，需北京地域）"
     if not s.TTS_WORKSPACE_ID.strip():
         return False, "缺少业务空间 ID（TTS_WORKSPACE_ID），可在百炼控制台「业务空间」中获取"
+    # ⚠️ 业务空间 ID 会被拼进请求 URL 的 host 段，格式必须校验（与用户级路径
+    # llmstore.save_tts_config 同一个 validate）。不校验的后果：.env 里填了带
+    # `/` `@` `#` 或空格的值，就能把出站请求指向任意主机（SSRF 面）。
+    # 这里不抛异常——`resolve` 的契约是「不可用返回原因」，抛出去会违反它。
+    try:
+        llmstore.validate_workspace_id(s.TTS_WORKSPACE_ID)
+    except ValueError as exc:
+        return False, f"业务空间 ID 格式不合法（TTS_WORKSPACE_ID）：{exc}"
     return True, ""
 
 

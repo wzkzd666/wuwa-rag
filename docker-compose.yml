@@ -1,4 +1,9 @@
 services:
+  # ⚠️ 四个基础设施容器的端口一律只绑 **127.0.0.1**（2026-10-09 安全收紧）：
+  # 原来 `"5432:5432"` 这类写法会绑到 0.0.0.0——同局域网任何机器都能直连
+  # PG/Redis/Neo4j/RustFS。Redis 无密码、RustFS 是默认弱凭据时，这就是现成的
+  # 入侵入口。本项目的消费者（宿主机上的 API/worker/CLI）走 localhost 不受影响。
+  # 真有跨机访问需求时再显式改回，并且务必先给各服务配好强凭据。
   postgres:
     image: pgvector/pgvector:pg16      # 自带 pgvector，零成本预留迁移后路
     container_name: wuwa-pg
@@ -6,7 +11,7 @@ services:
       POSTGRES_DB: wuwa
       POSTGRES_USER: wuwa
       POSTGRES_PASSWORD: ${PG_PASSWORD}
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     deploy:
       resources:
@@ -26,7 +31,7 @@ services:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
       NEO4J_server_memory_heap_max__size: 1G      # 限内存，机器资源紧张
       NEO4J_server_memory_pagecache_size: 512M
-    ports: ["7687:7687", "7474:7474"]
+    ports: ["127.0.0.1:7687:7687", "127.0.0.1:7474:7474"]
     volumes: ["neo4jdata:/data"]
     deploy:
       resources:
@@ -44,7 +49,7 @@ services:
     # 表现是「提交了入库却永远不跑、进度卡住」且没有任何报错。
     # noeviction 的好处是触顶时 Redis 直接返回 OOM 错误，故障是响亮的。
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]   # AOF 持久化 + 内存上限
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     volumes: ["redisdata:/data"]
     deploy:
       resources:
@@ -58,7 +63,7 @@ services:
     environment:
       RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY}
       RUSTFS_SECRET_KEY: ${S3_SECRET_KEY}
-    ports: ["9000:9000", "9001:9001"]   # 9000=S3 API, 9001=控制台
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]   # 9000=S3 API, 9001=控制台
     volumes: ["rustfsdata:/data"]
     deploy:
       resources:

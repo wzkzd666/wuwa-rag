@@ -6,7 +6,8 @@ import './AuthPage.css'
 
 /**
  * 登录 / 注册页（未登录时的全屏门禁）。
- * - admin 初始账号 admin/123456（后端启动时种子写入）；
+ * - admin 由后端启动时种子写入：ADMIN_PASSWORD 显式配置，留空则首启随机生成
+ *   一次性口令（见 core/authdb.ensure_schema，不再有内置弱口令）；
  * - 游客走注册，注册即登录；
  * - 登录态（token）persist 在 localStorage，刷新不掉线，30 天过期。
  */
@@ -39,6 +40,11 @@ export default function AuthPage() {
           : await api.register(u, password, apiBase)
       setAuth({ token: out.token, username: out.username, role: out.role })
       toast('ok', `欢迎${mode === 'register' ? '' : '回来'}，${out.username}~`)
+      // 部署者用 ADMIN_PASSWORD 配的初始口令属于配置文件明文，登录后引导改密。
+      // 只是提示不强拦：改密入口在设置页（Layout 顶栏 → 设置 → 修改密码）。
+      if (out.must_change_password) {
+        toast('info', '当前仍是初始口令，建议尽快到设置页修改密码')
+      }
     } catch (err) {
       toast('err', err instanceof Error ? err.message : String(err))
     } finally {
