@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：358 条，**全量离线**，约 4s
+uv sync --extra dev && uv run pytest    # 单元测试：394 条，**全量离线**，约 4s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -197,7 +197,7 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 
 所以：**开发期的反例/踩坑记录写进 Python 注释，不要进 prompt**；硬要求一律用肯定句，并压在 prompt **最末**（近因位，见 `build_prompt` 的 `tail`；同一条规则写在 `prompt.SYSTEM_PROMPT` 里实测无效）。
 
-### 输出侧兜底：来源标记 `[n]`、重复列表项、百分比单位
+### 输出侧兜底：来源标记 `[n]`、重复列表项、百分比单位、昵称引号（`graph._clean_answer`）
 
 - **`[n]` 引用编号**：aemeath 只要「依据资料作答」就爱在句末缀 `[1]` `[2]`（会自编到 `[10]`，还把一个 `[1]` 重复用十几次）。提示词侧只能概率压住（实测 3 轮里仍有 2 轮），故由 `text.strip_ref_marks` / `text.AnswerFilter` 在**输出侧**剥离（流式逐 token，会先扣住疑似 `[` / `[1` 的尾巴再吐）。语料正文从不含 `[n]`，游戏术语用的是 `【】`，不受影响。
 - **`## 参考文档` 不要加 `[n]` 编号**：加了必被抄进正文。前端引用面板走 SSE `done.sources`（`doc_sources`），**不依赖模型写编号**；将来真要做「正文引用徽章」请换 `（资料1）` 这类非方括号标记。
@@ -213,6 +213,8 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
     - 数值后**不得紧跟另一个术语**（`_RE_TERM_AHEAD`）：`攻击力：47暴击伤害：10.8%` 里的 `47` 是固定值，不排除就会误补成 `47%`；
     - **不支持中文数字**：模型把 `275%` 写成「两百七十五」本身就是违规改写，补 `%` 只会固化它。
     - 验证口径：全语料 51198 行只应有 6 行改动（`暴击提升2.80`，原文自身缺 `%`），多于此即回归。
+- **昵称外层的引号（2026-10-10）**：模型叙述用户时爱给称呼套「」/“”（实测答案「「颗粒」刚刚让我放…」）。按提示词铁律**不写**「别加引号」这类负向指令（negative-example 污染），改为 `text.unquote_mentions` 确定性剥离：只剥**恰好包裹画像昵称**的那一层引号对，歌名《…》、术语【…】、别的「强调」一概不动。昵称词由 `services/profile.nicknames_from_context(注入串)` 现取——画像事实本身是干净的（`用户自称是颗粒`），所以「剥谁的」必须从 `user_context` 反解，不能写死。
+- ⚠️ **四步清洗只能有一处实现：`graph._clean_answer(raw, user_context)`**（2026-10-10 收敛）。`generate_node` 与 `ask_stream` 收尾**都要过这四步**，而流式的 `done.answer` 是**旁路重算**的（token 从 `on_chat_model_stream` 抽，节点里那份只进 history 与「截断时覆盖」分支）。本轮评审就是抓到 `unquote_mentions` 只加进了节点、漏在 `ask_stream`，表现成「流式回答还带「」，下一轮 history 里却已剥掉」——同一语义两处判据的必然结局。新增清洗规则一律改 `_clean_answer`，并往 `tests/test_text.py::test_清洗管线四步都在` 加一条断言（该用例锁住「四步都在」）。
 
 ### 队友槽位：不能输出「队友→队伍」反查表
 
@@ -783,6 +785,15 @@ DEK     ──KEK_pp──> dek_by_pp       KEK_pp  = 加密口令 + key_salt �
 - 循环里用 **`break` 而非 `return`**，让 `async with AsyncExitStack()` 仍在宿主 task 内收尾
 - `set_exe()` 改播放器路径后要 `aclose()` 重建会话（子进程 env 是启动时注入的）
 
+**stop ≠ pause（2026-10-10 实测，用户纠正「暂停和关闭不是一个事情」）**：
+QQ音乐**不实现** SMTC 的 StopRequested——命令被接受、状态仍 PLAYING。三层修法：
+① smtc 对 stop 的确认口径改为「STOPPED 或会话消失」（此前误用切歌的「歌名变了」判据，
+   永远假阴性，「关闭音乐」看起来像卡住）；② 没停就**关进程**：taskkill 发 WM_CLOSE，
+   3s 没退再 /F 强杀（QQ音乐可能弹确认或缩托盘），文案如实说「已强制关闭，下次点歌自动冷启动」；
+③ 客户端本来没跑 → 直接「已确认（本来就没在跑）」，不假装执行。
+配套：同曲但**暂停中**再点同一首 → 走 SMTC play **恢复**而非重投（重投会从头播，
+「唱到一半突然重来」）。实测：PAUSED→恢复 ✓；stop 关进程后 client_running=False、会话消失 ✓。
+
 **音量走应用级 Core Audio**（只调整 QQ音乐）。⚠️ COM 属 STA 且为同步阻塞调用，
 必须在 **MCP server 进程**内执行 —— 放进本服务的事件循环会阻塞整个 API
 （实测 `/music/status` 超时，且**不产生任何日志**，属最难排查的一类故障）。
@@ -795,7 +806,24 @@ DEK     ──KEK_pp──> dek_by_pp       KEK_pp  = 加密口令 + key_salt �
 - 点歌正则**锚在 `^`** 时要格外小心：中文习惯在动词前加「我想 / 我要 / 麻烦 / 能不能」，
   前缀漏了就是整句落空；量词还要兜「一下」（否则「听一下晴天」会把「一下」算进歌名）
 - 「取消静音」含「静音」子串，必须排在它前面
+- 音量动词组是 `(调|放|开|提|增|加|升)(大|高)` / `(调|放|开|降|减|压)(小|低)` 两支——
+  2026-10-10 实测补的：原来只有 `(调放开)`，「**降低**音量呢」「**提高**音量」「切歌」
+  全部落空（用户截图复现）。补完必须连负样本一起跑（「提高共鸣效率」「大招伤害高不高」）
+- **回指分支禁用裸指代词**（那个/还是/一样）：`_MUSIC_RETRY_RE` 只认明确重试词
+  （再试|再放|刚刚|上次|继续|还是那…）。曾把「那个」收进回指表 → 点过歌后问
+  「那个声骸怎么配」会**把上一首再放一遍**（「带入前面点的歌」根因之一，已修）
 - 改完**必须重跑负样本**（游戏问句 + `我想听歌` 这类无具体歌名的说法），确认未误伤
+
+**音乐轮的两条上下文红线（2026-10-10 修，用户报「带入前面点的歌，影响操作和回答」）**：
+
+1. **API 预执行必须与 `intent_node` 同口径守卫**（`app._is_music_turn`）：
+   `not detect_slots(...) and not extract_characters(...)`。预执行发生在图守卫**之前**，
+   漏守卫时哪怕最终判成游戏提问，歌已经被放出去了——副作用拦不住。
+2. **音乐轮生成不带对话历史**（`chitchat_node` → `_chat_turn(..., use_history=False)`）：
+   history 里躺着前几轮点歌的执行文案（旧歌名），aemeath 会把它复述进本轮
+   （实测「关闭音乐」答成「无间渡还在原地打转」）。本轮工具返回本身含歌名与状态，够了；
+   回指重放的歌名走 `music_keyword`→工具，不靠 prompt 历史。⚠️ 只掐**进 prompt 的**历史，
+   `_commit_history` 仍写全量——记忆不能因为一轮音乐就断。
 
 **搜索降级**：QQ 的 smartbox 接口**不认「歌手 + 的 + 歌名」**
 （实测「周杰伦的青花瓷」返回 0 条，而「周杰伦 青花瓷」返回 4 条 —— 前者恰是用户最自然的说法）。
@@ -863,7 +891,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **358 条用例、全量离线、约 4s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **394 条用例、全量离线、约 4s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
 十四个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
@@ -884,7 +912,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_team_prune.py` | 名册归一五类形态（漂泊者补男属性/剥括号/剥位置词/前缀最长匹配/纯槽位→None）+「绝不猜着切」红线；`_covers` 逐位不摊平、等价对互 True、占位串判定、镜像指纹 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：358 条 / 4.6s）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 三条写用例时必须遵守的经验（都是实际踩过的）：
 
@@ -892,7 +920,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 358 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 394 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：

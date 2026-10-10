@@ -130,3 +130,94 @@ def test_非数字songid被拒绝() -> None:
     m = _load()
     assert m._launch("0039MnYb0qxYhV").startswith("错误: songid 必须是纯数字")
     assert m._launch("../../evil").startswith("错误: songid 必须是纯数字")
+
+
+# ---------- 同曲短路（重放正在播的歌不得被说成「卡住了」） ----------
+
+def test_同曲判定_形态变体() -> None:
+    m = _load()
+    assert m._is_same_song("无间渡", "无间渡", "胡彦斌的无间渡")
+    assert m._is_same_song("无间渡 (Live)", "无间渡", "无间渡")      # SMTC 带后缀
+    assert m._is_same_song("无间渡", "无间渡", "播放无间渡")          # 标题在关键词里
+    assert not m._is_same_song("稻香", "无间渡", "无间渡")
+    assert not m._is_same_song("", "无间渡", "无间渡")               # 没在播
+
+
+def test_点正在播的歌_不再投递直接确认() -> None:
+    """2026-10-10 实测：无间渡本来就在放，再点一次 → confirm_switch 见歌名没变
+    → 回「已接受·未确认」→ 模型转述成「是不是卡住了」。同曲必须短路。"""
+    import asyncio
+    m = _load()
+    calls = {"dispatch": 0}
+
+    async def fake_search(keyword, limit=5):
+        return [{"name": "无间渡", "singer": "胡彦斌", "songid": 123}]
+
+    async def fake_dispatch(songid):
+        calls["dispatch"] += 1
+        return "不该被调用"
+
+    async def fake_read(app_id=None):
+        return {"title": "无间渡", "artist": "胡彦斌", "playing": True, "state": "PLAYING"}
+
+    m.search_song = fake_search
+    m.dispatch = fake_dispatch
+    m.smtc.read_state = fake_read
+    out = asyncio.run(m.play_music("胡彦斌的无间渡"))
+    assert calls["dispatch"] == 0, "同曲不该重新投递"
+    assert "正在播放" in out and "无间渡" in out
+    assert "没变" not in out and "未确认" not in out
+
+
+# ---------- stop = 真停（QQ音乐不实现 SMTC StopRequested，2026-10-10 实测） ----------
+
+def test_stop_媒体命令被忽略时关进程(monkeypatch) -> None:
+    """pause≠stop：用户要彻底停。Stop 被播放器忽略 → 兜底关客户端进程，且如实报。"""
+    import asyncio
+    m = _load()
+    monkeypatch.setattr(m.smtc, "control", lambda a: _coro("[已接受·未确认] stop —— 播放器没停"))
+    monkeypatch.setattr(m, "_client_running", lambda: True)
+    monkeypatch.setattr(m, "_close_client", lambda: _coro("已关闭客户端进程"))
+    out = asyncio.run(m.player_control("stop"))
+    assert out.startswith("[已确认]") and "关闭客户端进程" in out and "冷启动" in out
+
+
+def test_stop_客户端没跑直接确认(monkeypatch) -> None:
+    import asyncio
+    m = _load()
+    monkeypatch.setattr(m.smtc, "control",
+                        lambda a: _coro("没找到 QQ音乐的媒体会话（客户端未运行？）"))
+    monkeypatch.setattr(m, "_client_running", lambda: False)
+    out = asyncio.run(m.player_control("stop"))
+    assert out.startswith("[已确认]") and "没在跑" in out
+
+
+def test_同曲但暂停中_恢复播放而非重投(monkeypatch) -> None:
+    """暂停中再点同一首：重投会**从头播**（唱到一半突然重来）→ 必须走 SMTC play 恢复。"""
+    import asyncio
+    m = _load()
+
+    async def fake_search(keyword, limit=5):
+        return [{"name": "无间渡", "singer": "胡彦斌", "songid": 1}]
+
+    async def fake_dispatch(songid):
+        raise AssertionError("暂停中重播同一首不该走投递")
+
+    async def fake_read(app_id=None):
+        return {"title": "无间渡", "artist": "胡彦斌", "playing": False, "state": "PAUSED"}
+
+    monkeypatch.setattr(m, "search_song", fake_search)
+    monkeypatch.setattr(m, "dispatch", fake_dispatch)
+    monkeypatch.setattr(m.smtc, "read_state", fake_read)
+    monkeypatch.setattr(m.smtc, "control", lambda a: _coro("[已确认] play（PAUSED → PLAYING）"))
+    out = asyncio.run(m.play_music("无间渡"))
+    assert "恢复播放" in out
+
+
+def _coro(value):
+    import asyncio
+    fut: asyncio.Future = asyncio.get_event_loop_policy().new_event_loop().create_future()
+    fut.set_result(value)
+    async def one():
+        return value
+    return one()

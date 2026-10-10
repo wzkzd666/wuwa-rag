@@ -247,3 +247,46 @@ def test_满级表五行同材料不得误杀() -> None:
 def test_非列表行不参与判重() -> None:
     src = "这一句出现了两次。\n这一句出现了两次。"
     assert dedup_list_items(src) == src
+
+
+# ---------- unquote_mentions（昵称套引号的确定性剥离） ----------
+
+def test_剥掉包裹昵称的引号() -> None:
+    from wuwa_rag.text import unquote_mentions
+    assert unquote_mentions("「颗粒」刚刚让我放歌", ["颗粒"]) == "颗粒刚刚让我放歌"
+    assert unquote_mentions("“颗粒”说想听稻香", ["颗粒"]) == "颗粒说想听稻香"
+    assert unquote_mentions('"颗粒"来啦', ["颗粒"]) == "颗粒来啦"
+
+
+def test_只剥昵称别的引号一概不动() -> None:
+    from wuwa_rag.text import unquote_mentions
+    src = "「颗粒」推荐「无间渡」，《青花瓷》也不错"
+    assert unquote_mentions(src, ["颗粒"]) == "颗粒推荐「无间渡」，《青花瓷》也不错"
+    # 空昵称表 / 空串必须原样
+    assert unquote_mentions(src, []) == src
+    assert unquote_mentions("", ["颗粒"]) == ""
+
+
+# ---------- graph._clean_answer：输出清洗的唯一实现 ----------
+# 为什么锁这条：`done.answer` 在流式路径是**旁路重算**的（token 从
+# on_chat_model_stream 抽），与 generate_node 里那份是同一个语义的两次实现。
+# 2026-10-10 评审实测抓到 unquote_mentions 只加在了节点里、漏在 ask_stream，
+# 表现为「流式回答还带「」，下一轮 history 里却已剥掉」。收敛成单个函数后用
+# 这条用例锁住四步都在，新增清洗规则时必须往这里加一条断言。
+
+def test_清洗管线四步都在() -> None:
+    from wuwa_rag.dialog.graph import _clean_answer
+    src = "「颗粒」刚刚让我放歌 [1]\n- 清宵+守岸人+琳奈\n- 清宵+守岸人+琳奈\n暴击固定为80，暴伤275%"
+    got = _clean_answer(src, "用户自称是颗粒")
+    assert "「颗粒」" not in got            # ④ 剥昵称引号
+    assert "[1]" not in got                # ① 剥来源标记
+    assert got.count("- 清宵+守岸人+琳奈") == 1   # ③ 列表去重
+    assert "80%" in got                    # ② 补百分号
+    assert "275%" in got
+
+
+def test_清洗管线无画像时不改动昵称() -> None:
+    from wuwa_rag.dialog.graph import _clean_answer
+    src = "「颗粒」刚刚让我放歌"
+    assert _clean_answer(src, "") == src
+    assert _clean_answer(src, "用户主玩守岸人") == src

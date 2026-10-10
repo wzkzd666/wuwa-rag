@@ -335,6 +335,29 @@ def dedup_list_items(text: str) -> str:
     return "\n".join(out)
 
 
+# ---------- 输出侧：昵称外的引号 ----------
+# aemeath 叙述用户时爱给称呼套引号（实测答案：「颗粒」刚刚让我放了…）。
+# 提示词侧按铁律不写「不要加引号」这类负向指令（negative-example 污染，本项目多次实证），
+# 改为**确定性剥离**：只剥「恰好包住画像昵称」的那一层「」/“”/""，其余引号一概不动
+# —— 歌名《无间渡》、术语【静质量能】、别的「强调」都不受影响。
+_QUOTE_PAIRS = (("「", "」"), ("\u201c", "\u201d"), ('"', '"'), ("‘", "’"), ("'", "'"))
+
+
+def unquote_mentions(text: str, names: list[str]) -> str:
+    """剥掉指定词（用户昵称）外面包裹的引号对。幂等、无昵称时原样返回。"""
+    if not text:
+        return text
+    for n in names:
+        n = (n or "").strip()
+        if not n:
+            continue
+        for left, right in _QUOTE_PAIRS:
+            wrapped = f"{left}{n}{right}"
+            if wrapped in text:
+                text = text.replace(wrapped, n)
+    return text
+
+
 class AnswerFilter:
     """流式答案清洗：① 剥来源标记 `[n]`；② 丢掉重复的列表项。
 

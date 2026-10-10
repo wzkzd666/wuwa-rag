@@ -12,7 +12,7 @@
 
   <!-- ============ 标题 ============ -->
   <text x="45" y="52" font-size="30" font-weight="700" fill="#0F172A">wuwa-rag 架构全景</text>
-  <text x="45" y="80" font-size="14" fill="#64748B">《鸣潮》角色知识助手 · LangGraph 混合检索 RAG · 后端 7 层 / 56 个模块 / 164 条依赖边 / 0 违规 0 环（可执行守卫）· 260 条离线单测作提交门禁</text>
+  <text x="45" y="80" font-size="14" fill="#64748B">《鸣潮》角色知识助手 · LangGraph 混合检索 RAG · 后端 7 层 / 56 个模块 / 165 条依赖边 / 0 违规 0 环（可执行守卫）· 394 条离线单测作提交门禁</text>
   <line x1="45" y1="98" x2="1655" y2="98" stroke="#E2E8F0" stroke-width="1.5"/>
 
   <!-- ============ ① 分层架构 ============ -->
@@ -305,5 +305,5 @@
   <text x="1155" y="1234" font-size="11.5" fill="#475569">· 知识库页 3s 轮询五步入库进度；顶栏播放条轮询 /music/status</text>
   <text x="1155" y="1254" font-size="11.5" fill="#475569">· 凭证只存组件内存、提交即清；渲染层禁用波浪号删除线</text>
 
-  <text x="45" y="1300" font-size="11" fill="#94A3B8">守卫与门禁：scripts/check_layers.py（56 模块 / 164 边 / 0 违规 / 0 环）· uv run pytest（260 条全离线用例，不依赖 PG / Neo4j / Redis / Ollama / 网络，约 3s）。</text>
+  <text x="45" y="1300" font-size="11" fill="#94A3B8">守卫与门禁：scripts/check_layers.py（56 模块 / 165 边 / 0 违规 / 0 环）· uv run pytest（394 条全离线用例，不依赖 PG / Neo4j / Redis / Ollama / 网络，约 3s）。</text>
 </svg>

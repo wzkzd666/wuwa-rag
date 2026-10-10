@@ -189,6 +189,12 @@ async def control(action: str, app_id: str = _APPID) -> str:
             if action in ("play", "pause"):
                 ok, reason = await _confirm_state(ok_states, budget=1.5)
                 return _fmt(True, ok, f"{action}（{cur} → {ok_states[0]}）", reason)
+            if action == "stop":
+                # ⚠️ stop 的确认口径与切歌**完全不同**：stop 不改歌名，拿
+                # 「歌名变了」判会永远假阴性（此前正是这个误判让「关闭音乐」
+                # 看起来像卡住）。口径 = 状态 STOPPED 或会话消失。
+                ok, reason = await _confirm_stop()
+                return _fmt(True, ok, f"{action}", reason)
             ok, reason = await _confirm_switch(before)
             return _fmt(True, ok, f"{action}", reason)
         try:
@@ -212,3 +218,17 @@ async def _confirm_state(want: tuple[str, ...], budget: float = 1.5) -> tuple[bo
         if st in want:
             return True, ""
     return False, f"{budget:.1f}s 内状态没变为 {want[0]}"
+
+
+async def _confirm_stop(budget: float = 1.5) -> tuple[bool, str]:
+    """stop 专用：STOPPED 或**会话消失**都算生效（播放器停了常直接撤会话）。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget
+    while loop.time() < deadline:
+        await asyncio.sleep(_POLL_INTERVAL)
+        cur = await find_session()
+        if cur is None:
+            return True, ""
+        if (await _read(cur))["state"] == "STOPPED":
+            return True, ""
+    return False, "已投递但播放器没停（它可能不实现停止命令）"

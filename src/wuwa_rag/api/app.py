@@ -37,7 +37,7 @@ from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
 from wuwa_rag.dialog.graph import ask, ask_stream, doc_sources
 from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
-from wuwa_rag.dialog.nlu import music_action
+from wuwa_rag.dialog.nlu import detect_slots, extract_characters, music_action
 from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge import entities as kb
 from wuwa_rag.services import music as music_svc
@@ -449,6 +449,23 @@ async def _run_music_best_effort(question: str, user_id: int,
         return ""
 
 
+def _is_music_turn(question: str, history: list[dict] | None) -> bool:
+    """本轮能不能**提前执行**音乐指令 —— 与 graph.intent_node 同口径的双保险。
+
+    ⚠️ 2026-10-10 补：预执行原先只看 `music_action(...) is not None`，缺了图里那句
+    「`not slots and not chars`」。回指分支（「继续…」）在**游戏提问**里也会命中，
+    于是点过歌之后问「继续玩卡卡罗怎么配」，图里判成非音乐、歌却已经被 API 层先放了
+    —— 副作用发生在守卫之前，与用户报的「带入前面点的歌」同根。
+    这里用同步名册快照 + 正则槽位做**单向保守**判定：判错只是不预执行
+    （图里守卫仍在，空串会让 chitchat 照常执行一次），绝不多放歌。
+    """
+    if music_action(question, history) is None:
+        return False
+    if detect_slots(question):
+        return False
+    return not extract_characters(question, sorted(kb.current_names()))
+
+
 async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, key: str,
                                history: list[dict] | None = None):
     user_ctx = await _user_context(user)
@@ -461,7 +478,7 @@ async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, ke
     # 同样会处理音乐动作，不把结果交过去它就会再跑一遍 —— 同一句点歌搜两次、投两次。
     # 空串表示「这一轮没有实际执行」（比如没听清歌名），交给图里照常处理。
     music_result = ""
-    if music_action(question, history) is not None:
+    if _is_music_turn(question, history):
         yield {"stage": "music", "label": "帮家人放首歌"}
         music_result = await _run_music_best_effort(question, user.id, history)
     try:

@@ -19,7 +19,7 @@
      （`core`、`knowledge.graph` …）都算一个模块，不是「纯 .py 文件数」；
    · `build_graph()` 只有 **41** 个键：它用 defaultdict，**只收录有出边的模块**，
      没有任何内部依赖的叶子模块不会出现在键里；
-   · 依赖边 **164** 条、违规 **0**、环 **0**。
+   · 依赖边 **165** 条、违规 **0**、环 **0**。
 2026-09-30 重构遗留的 5 个空包（rag/graph/ingest/retrieval/storage）已于
 2026-10-06 清理；在此之前它们让模块计数虚增 5（55 vs 50）。
 同日新增 `knowledge/domain_terms.py`（单字角色名消歧用的领域词表派生），
@@ -40,7 +40,7 @@ _GUARD = _ROOT / "scripts" / "check_layers.py"
 # 实测基线（2026-10-06）。这些数字会随正常开发变化——
 # 变化时应当**读懂为什么变了**再更新，而不是为了让测试变绿而随手改数。
 EXPECTED_MODULES = 56
-EXPECTED_EDGES = 164
+EXPECTED_EDGES = 165
 EXPECTED_GRAPH_KEYS = 41
 EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 17, 3: 2, 4: 8, 5: 9, 6: 7}
 

@@ -97,3 +97,14 @@ def test_facts_to_context_按上限截断() -> None:
     assert len(parts) == MAX_FACTS_IN_PROMPT
     assert parts[0] == "事实0"
     assert parts[-1] == f"事实{MAX_FACTS_IN_PROMPT - 1}"
+
+
+def test_从注入串取昵称() -> None:
+    from wuwa_rag.services.profile import nicknames_from_context
+    assert nicknames_from_context("用户自称是颗粒") == ["颗粒"]
+    assert nicknames_from_context("用户是老玩家；用户自称是阿星；主玩今汐") == ["阿星"]
+    assert nicknames_from_context("用户名叫小星") == ["小星"]
+    assert nicknames_from_context("喜欢周杰伦") == []
+    assert nicknames_from_context("") == []
+    # 水平自述不是昵称（噪声表兜住）
+    assert nicknames_from_context("用户自称是新手") == []

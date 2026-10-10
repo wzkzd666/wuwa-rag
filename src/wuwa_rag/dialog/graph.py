@@ -44,7 +44,7 @@ from wuwa_rag.knowledge import domain_terms
 from wuwa_rag.knowledge.entities import find_mentions, resolve_candidates
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.retrieve import fetch_chunks
-from wuwa_rag.services import music, persona, tts
+from wuwa_rag.services import music, persona, profile, tts
 from wuwa_rag.services.emotion import detect_emotion
 from wuwa_rag.services.verify import verify_knowledge
 from wuwa_rag.services.websearch import web_search
@@ -60,6 +60,7 @@ from wuwa_rag.text import (
     dedup_list_items,
     fix_percent_units,
     strip_ref_marks,
+    unquote_mentions,
 )
 from wuwa_rag.ww_logger import get_logger
 
@@ -884,6 +885,26 @@ async def _value_blocks(state: RagState) -> list[str]:
     return blocks
 
 
+def _clean_answer(raw: str, user_context: str) -> str:
+    """输出侧确定性清洗的**唯一实现**，generate_node 与 ask_stream 收尾共用。
+
+    四步各司其职，加一步就只改这里：
+    ① `strip_ref_marks` 剥来源标记 `[n]`（提示词只能概率压住）；
+    ② `fix_percent_units` 补回丢失的百分号（术语紧跟裸数值）；
+    ③ `dedup_list_items` 去重重复的列表项（图谱与参考文档给的是同一批队伍、
+       只是角色名先后不同，8B 会读成「还有一批」再列一遍）；
+    ④ `unquote_mentions` 剥昵称外层的引号（模型叙述用户时爱套「」，
+       实测「「颗粒」刚刚让我放…」；昵称取自画像注入串）。
+
+    ⚠️ 为什么必须是函数而不是两处各写一遍：流式的 `done.answer` 是**旁路重算**的
+    （token 从 `on_chat_model_stream` 抽，节点里那份只进 history 与截断覆盖分支），
+    两条管线只要有一条漏步骤就会出现「流式回答没处理、下一轮历史却已处理」的
+    口径分叉——2026-10-10 评审实测抓到 ④ 就是这么漏在 `ask_stream` 里的。
+    """
+    out = dedup_list_items(fix_percent_units(strip_ref_marks(raw)))
+    return unquote_mentions(out, profile.nicknames_from_context(user_context))
+
+
 async def generate_node(state: RagState):
     """生成节点：支持流式与非流式两种调用方式。
 
@@ -947,10 +968,8 @@ async def generate_node(state: RagState):
     answer = "".join(full)
     if answer_ok and truncated and hit:
         answer = _trim_loop(answer, hit)
-    # 输出侧兜底清洗：剥来源标记 `[n]`（提示词只能概率压住）+ 去重重复的列表项（图谱与
-    # 参考文档给的是同一批队伍、只是角色名先后不同，8B 会读成「还有一批」再列一遍）
-    # + 补回缺失的百分号（术语紧跟裸数值，见 text.fix_percent_units）。
-    clean = dedup_list_items(fix_percent_units(strip_ref_marks(answer)))
+    # 输出侧兜底清洗见 _clean_answer（与 ask_stream 收尾共用同一份实现）
+    clean = _clean_answer(answer, state.get("user_context", ""))
     if clean != answer:
         log.info("输出清洗：去掉 %d 个字符（来源标记 / 重复列表项 / 缺失单位）",
                  len(answer) - len(clean))
@@ -1071,13 +1090,16 @@ async def _now_if_needed(state: RagState) -> str:
         return ""
 
 
-async def _chat_turn(state: RagState, hint: str):
+async def _chat_turn(state: RagState, hint: str, *, use_history: bool = True):
     """「不检索」类分支的公共实现：闲聊 chitchat_node 与时间 time_node 共用。
 
     两处的人设口径、云端/本地 system 注入规则、流式累积、复读兜底、情绪判定、
     记忆写回**完全一致**，唯一差别就是那句场景提示 hint —— 所以不复制两份代码：
     双份实现的必然结局是修了一处忘另一处（本项目对「同一语义挂两条判据」已有
     多次踩坑记录）。streaming node：内部累积全文，只在收尾 yield 一次最终状态。
+
+    `use_history=False` 只把**进 prompt 的**对话历史掐掉（音乐轮专用）；
+    `_commit_history` 仍写全量 —— 记忆不能因为一轮音乐就断。
     """
     client, is_cloud, emotion_via_cloud = await _chat_client(state)
     msgs: list = []
@@ -1085,7 +1107,8 @@ async def _chat_turn(state: RagState, hint: str):
     # 本地：不发 system —— aemeath 人设在 Modelfile，发了会覆盖。
     if is_cloud:
         msgs.append(SystemMessage(content=persona.cloud_system()))
-    for m in (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]:
+    history = state.get("history", []) if use_history else []
+    for m in history[-setting.MAX_HISTORY_TURNS * 2:]:
         if m["role"] == "user":
             msgs.append(HumanMessage(content=m["content"]))
         else:
@@ -1127,6 +1150,10 @@ async def _chat_turn(state: RagState, hint: str):
     answer = "".join(full)
     if answer_ok and truncated and hit:
         answer = _trim_loop(answer, hit)
+    # 模型叙述用户时爱给称呼套「」/“”（实测「「颗粒」刚刚让我放…」）——
+    # 与画像注入配合的输出侧确定性剥离，见 text.unquote_mentions。
+    answer = unquote_mentions(answer, profile.nicknames_from_context(
+        state.get("user_context", "")))
 
     # 情绪标签：与 generate_node 使用同一开关（仅在 TTS 可用时判定，按当前用户判）。
     # 闲聊是 playful/cheerful 的高发场景，情绪对语音表现力价值最大。
@@ -1160,6 +1187,13 @@ async def chitchat_node(state: RagState):
     result = await _run_music(state)
     if result:
         hint = f"{hint}\n\n{_MUSIC_RESULT_HINT.format(result=result)}"
+        # ⚠️ 音乐轮**不带对话历史**：history 里躺着前几轮点歌的执行文案（旧歌名），
+        # 模型会把它复述进本轮（实测「关闭音乐」答成「无间渡还在原地打转」，用户报
+        # 「带入前面点的歌」）。本轮工具返回本身就含歌名与状态，够模型说话；
+        # 回指重放（「继续/再放一遍」）的歌名由 music_keyword 走工具，不靠 prompt 历史。
+        async for out in _chat_turn(state, hint, use_history=False):
+            yield out
+        return
     async for out in _chat_turn(state, hint):
         yield out
 
@@ -1503,7 +1537,7 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         log.info("流式清洗：来源标记 %d 处 / 重复列表项 %d 行",
                  answer_filter.removed_marks, answer_filter.removed_lines)
 
-    answer = dedup_list_items(fix_percent_units(strip_ref_marks("".join(full))))
+    answer = _clean_answer("".join(full), final_state.get("user_context", ""))
     # 如果 generate_node 内部已截断，final_state["answer"] 是截断后的权威全文
     if final_state.get("truncated") and final_state.get("answer"):
         answer = final_state["answer"]

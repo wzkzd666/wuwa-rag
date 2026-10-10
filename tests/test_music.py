@@ -32,6 +32,9 @@ from wuwa_rag.dialog.nlu import music_action, needs_clarification
     ("继续播放", "play", ""),
     ("下一首", "next", ""),
     ("换一首", "next", ""),
+    # 「切歌 / 换歌」是最高频说法，此前整组落空（2026-10-10 用户截图复现）
+    ("切歌", "next", ""),
+    ("换歌", "next", ""),
     ("上一首", "prev", ""),
     ("停止播放", "stop", ""),
     ("关闭音乐", "stop", ""),     # 最自然的说法；词表原先漏了它 → 表现为「说了没反应」
@@ -49,6 +52,14 @@ from wuwa_rag.dialog.nlu import music_action, needs_clarification
     ("音量调大", "volume_up", ""),
     ("声音大一点", "volume_up", ""),
     ("大声点", "volume_up", ""),
+    # 动词+方向拆两支（「降低音量呢」是截图原句，修复前整句落空 → 模型编出《稻香》）
+    ("降低音量", "volume_down", ""),
+    ("降低音量呢", "volume_down", ""),
+    ("减小音量", "volume_down", ""),
+    ("音量降低", "volume_down", ""),
+    ("提高音量", "volume_up", ""),
+    ("增大音量", "volume_up", ""),
+    ("音量提高", "volume_up", ""),
     ("静音", "mute", ""),
     ("取消静音", "unmute", ""),
     ("现在在放什么", "status", ""),
@@ -68,6 +79,11 @@ def test_音乐指令能识别(q: str, action: str, keyword: str) -> None:
     "放点音乐",
     "帮我放首歌",
     "",
+    # 新动词支的负样本：方向词后 3 字内没有音量锚，不许命中
+    "大招伤害高不高",
+    "提高共鸣效率",
+    "降低敌人防御",
+    "攻击力减小了是怎么回事",
 ])
 def test_非音乐指令不误判(q: str) -> None:
     assert music_action(q) is None, q
@@ -231,6 +247,44 @@ def test_回指_没有音乐历史时不猜() -> None:
     assert music_action("卡卡的声骸怎么配", _HIST_MUSIC) is None
     # 没有历史时同样不判
     assert music_action("再放一次") is None
+
+
+# ---------- 回指收窄（2026-10-10：裸指代词劫持的回归桩） ----------
+
+@pytest.mark.parametrize("q", [
+    "那个声骸怎么配",       # 点过歌之后问游戏 —— 不许把上一首再放一遍
+    "那个，现在几点",       # 时间问句被「那个」劫持（用户报「带入前面点的歌」形态）
+    "那个守岸人强吗",
+    "还是一样练度够吗",
+])
+def test_回指_裸指代不再劫持上一首(q: str) -> None:
+    assert music_action(q, _HIST_MUSIC) is None
+
+
+@pytest.mark.parametrize("q", ["还是那首", "继续"])
+def test_回指_明确重试词仍然生效(q: str) -> None:
+    assert music_action(q, _HIST_MUSIC) == ("play", "周杰伦的青花瓷")
+
+
+def test_回指_继续播放走直判不重放旧歌() -> None:
+    # 「继续播放」本身是控制词（直判 play、无歌名 → 让播放器 resume），
+    # 不该被回指分支改写成「重放上一首」
+    assert music_action("继续播放", _HIST_MUSIC) == ("play", "")
+
+
+# ---------- API 预执行守卫（与 intent_node 的 not slots and not chars 同口径） ----------
+
+@pytest.mark.parametrize("q,want", [
+    ("关闭音乐", True),
+    ("切歌", True),
+    ("降低音量呢", True),
+    ("播放稻香", True),
+    ("继续玩卡卡罗怎么配", False),   # 回指命中但含角色名 → 不许提前放歌
+    ("那个声骸怎么配", False),
+])
+def test_预执行守卫只放行纯音乐轮(q: str, want: bool) -> None:
+    from wuwa_rag.api.app import _is_music_turn
+    assert _is_music_turn(q, _HIST_MUSIC) is want
 
 
 # ---------- 「没理解」→ 主动反问（clarify）----------

@@ -36,6 +36,7 @@ import configparser
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -314,6 +315,18 @@ def _spawn_detached(exe: str, args: list[str]) -> None:
 
 
 # ---------- 工具 ----------
+def _norm_title(s: str) -> str:
+    return re.sub(r"[\s\-—·（）()《》]", "", (s or "").lower())
+
+
+def _is_same_song(now_title: str, want_name: str, keyword: str) -> bool:
+    """正在放的歌是否就是用户点的这首（SMTC 标题常带 Live/伴奏等后缀，用归一化互含）。"""
+    t, n, k = _norm_title(now_title), _norm_title(want_name), _norm_title(keyword)
+    if not t:
+        return False
+    return bool((n and (t in n or n in t)) or (k and t in k))
+
+
 @mcp.tool()
 async def play_music(keyword: str) -> str:
     """搜索关键词并立即用 QQ音乐 PC 客户端播放最匹配的一首。
@@ -325,6 +338,22 @@ async def play_music(keyword: str) -> str:
     if not songs:
         return f"没搜到与「{keyword}」相关的歌曲"
     s = songs[0]
+    # 同曲短路：点的歌**正在放**就别再投递 —— 重投会让客户端从头播起，且
+    # confirm_switch 会因「歌名没变」回「已接受·未确认」，模型如实转述成
+    # 「是不是卡住了」（2026-10-10 实测：重放《无间渡》被说成系统故障）。
+    try:
+        now = await smtc.read_state()
+    except Exception:  # noqa: BLE001 —— 读不到状态照常投递，只是没法提前短路
+        now = None
+    if now and _is_same_song(now.get("title", ""), s["name"], keyword):
+        if now.get("playing"):
+            return (f"[已确认] 此刻正在播放: {now['title']} - {now.get('artist', '')}"
+                    f"（就是这一首，不用重新投递）")
+        # 同一首但暂停中 → **恢复**而不是重投：重投会让它从头播起，
+        # 用户感受是「唱到一半的歌突然重来」。
+        r = await smtc.control("play")
+        return (f"[已确认] 还是这一首: {now['title']} - {now.get('artist', '')}，"
+                f"已恢复播放（{r}）")
     return (f"{await dispatch(int(s['songid']))}\n"
             f"正在播放: {s['name']} - {s['singer']}（songid={s['songid']}）")
 
@@ -350,6 +379,41 @@ async def play_song_by_id(songid: int) -> str:
     return await dispatch(int(songid))
 
 
+def _client_pids() -> list[int]:
+    pids: list[int] = []
+    try:
+        import psutil
+
+        for p in psutil.process_iter(["name", "pid"]):
+            if (p.info["name"] or "").casefold() == "qqmusic.exe":
+                pids.append(p.info["pid"])
+    except Exception as exc:  # noqa: BLE001 —— psutil 缺失时无法关进程，如实报
+        log.warning("psutil 进程枚举失败: %s", exc)
+    return pids
+
+
+async def _close_client() -> str:
+    """关闭 QQ音乐进程：先礼后兵。taskkill（不带 /F）发 WM_CLOSE 走正常退出，
+    3s 内没退再 /F 强杀 —— QQ音乐可能弹「确认退出」或缩进托盘，礼貌不一定兜得住。
+    """
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    pids = _client_pids()
+    if not pids:
+        return "没有可关闭的进程"
+    for pid in pids:
+        subprocess.run(["taskkill", "/PID", str(pid)],
+                       capture_output=True, creationflags=no_window)
+    for _ in range(8):
+        await asyncio.sleep(0.4)
+        if not _client_pids():
+            return "已关闭客户端进程"
+    for pid in _client_pids():
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                       capture_output=True, creationflags=no_window)
+    await asyncio.sleep(0.6)
+    return "已强制关闭客户端进程" if not _client_pids() else "关闭失败（进程仍在）"
+
+
 @mcp.tool()
 async def player_control(action: str) -> str:
     """控制播放，一个工具覆盖全部动作（减少来回调用）。
@@ -364,8 +428,25 @@ async def player_control(action: str) -> str:
     走 Windows 媒体会话（SMTC）**精确命中 QQ音乐**，不用模拟媒体键 ——
     全局媒体键会被前台那个播放器截经常，且发出去也读不回「到底有没有生效」。
     """
+    act = action.strip().lower()
     try:
-        return await smtc.control(action.strip().lower())
+        if act != "stop":
+            return await smtc.control(act)
+        # stop ≠ pause：用户要的是**彻底停**，不是随时能续。而 QQ音乐**不实现**
+        # SMTC 的 StopRequested（2026-10-10 实测：命令被接受、状态仍 PLAYING）。
+        # 所以三级：发媒体停止（认这个命令的播放器一步到位）→ 没停就关进程
+        # （先 WM_CLOSE 礼貌关，3s 内没退再 /F）→ 客户端本来就没跑就如实报。
+        r = await smtc.control("stop")
+        if r.startswith("[已确认]"):
+            return r                       # 认 StopRequested 的播放器一步到位
+        if "没找到" in r:                   # 连会话都没有
+            return ("[已确认] stop（客户端本来就没在跑）"
+                    if not _client_running() else r)
+        how = await _close_client()
+        if how.startswith("已关闭") or how.startswith("已强制"):
+            return (f"[已确认] stop —— QQ音乐不响应媒体停止命令，{how}；"
+                    "下次点歌会自动冷启动拉起")
+        return f"[已接受·未确认] stop —— 媒体命令被忽略，且{how}"
     except Exception as e:  # noqa: BLE001 —— winrt 没装/系统不支持时给可读原因
         return f"播放控制失败（{type(e).__name__}: {e}）。播放控制需要 winrt 包：uv sync --extra music"
 

@@ -340,3 +340,23 @@ def facts_to_context(facts: list[dict]) -> str:
     if not lines:
         return ""
     return "；".join(lines)
+
+
+# ---------- 输出侧配合：从注入串里取昵称 ----------
+# 模型叙述用户时爱给称呼套上「」/“”（实测答案「颗粒」刚刚让我放了…），
+# 而画像事实本身是干净的（`用户自称是颗粒`）。按提示词铁律不写「别加引号」
+# 的负向指令（negative-example 污染），改由 text.unquote_mentions 确定性剥离，
+# 这里负责告诉它**剥谁的**。
+_CTX_NICK = re.compile(
+    r"(?:自称是|自称|名叫|叫做|名字叫|昵称是|昵称为|称呼为|网名是|游戏名是|ID是|id是)"
+    r"\s*([^；;，。！!？?]{1,12})")
+
+
+def nicknames_from_context(ctx: str) -> list[str]:
+    """从画像注入串（`facts_to_context` 的输出）里取昵称词。取不到返回空表。"""
+    out: list[str] = []
+    for m in _CTX_NICK.finditer(ctx or ""):
+        nick = m.group(1).strip("是为：: ")
+        if nick and not _RE_NICKNAME_NOISE.match(nick) and nick not in out:
+            out.append(nick)
+    return out
