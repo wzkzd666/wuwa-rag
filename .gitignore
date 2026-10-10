@@ -21,6 +21,7 @@ wushi
 .ruff_cache/
 .uv-cache/
 .pytest_cache/
+.qoder-credits
 
 # Frontend caches（包管理器缓存不得入库）
 front/.npm-cache/
