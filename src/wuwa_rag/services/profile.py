@@ -347,15 +347,28 @@ def facts_to_context(facts: list[dict]) -> str:
 # 而画像事实本身是干净的（`用户自称是颗粒`）。按提示词铁律不写「别加引号」
 # 的负向指令（negative-example 污染），改由 text.unquote_mentions 确定性剥离，
 # 这里负责告诉它**剥谁的**。
+#
+# ⚠️ 判据必须**锚在子句开头**（可选前缀「用户」），不能全文搜标记词。
+# 端到端实测踩过：写成裸 `(?:名为|…)` 时「主玩角色名为今汐」也被认成昵称，
+# 于是模型正当引用的「今汐」会被剥掉引号 —— 误剥比不剥更糟。
+# `facts_to_context` 就是按「；」连接各条事实的，所以按子句切分与写入端同源。
 _CTX_NICK = re.compile(
-    r"(?:自称是|自称|名叫|叫做|名字叫|昵称是|昵称为|称呼为|网名是|游戏名是|ID是|id是)"
+    r"^(?:用户|TA|他|她)?\s*"
+    r"(?:自称是|自称|自称叫|名叫|名字叫|名为|叫做|昵称是|昵称为|称呼为|称呼是|被称为"
+    # ⚠️ **长标记必须排在短标记之前**（正则交替是从左到右第一个命中）：
+    # 「叫我」若写在「叫」之后，「用户叫我小星」会先撞上「叫」，
+    # 捕获组剩成「我小星」（实测红过一次）。
+    r"|叫我|喊我|叫|游戏名是|网名是|ID是|id是)"
     r"\s*([^；;，。！!？?]{1,12})")
 
 
 def nicknames_from_context(ctx: str) -> list[str]:
     """从画像注入串（`facts_to_context` 的输出）里取昵称词。取不到返回空表。"""
     out: list[str] = []
-    for m in _CTX_NICK.finditer(ctx or ""):
+    for clause in re.split(r"[；;]", ctx or ""):
+        m = _CTX_NICK.match(clause.strip())
+        if not m:
+            continue
         nick = m.group(1).strip("是为：: ")
         if nick and not _RE_NICKNAME_NOISE.match(nick) and nick not in out:
             out.append(nick)

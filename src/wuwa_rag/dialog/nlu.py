@@ -283,6 +283,19 @@ def needs_clarification(question: str, slots: list[str] | None = None,
 # 裸指代交给 needs_clarification 反问，宁可问一句也不许擅自重放。
 _MUSIC_RETRY_RE = re.compile(
     r"(再试|再放|再来|重试|再唱|再听|刚刚|刚才|上次|继续|还是那)")
+# ⚠️ 回指判据必须躲开**回忆型问句**（2026-10-10 端到端重跑实测抓到）：
+# 「我刚才让你做什么来着？你还记得我吗」里的「刚才」是**时间锚**，整句却在问
+# 「我说过什么」，不是命令重放。一旦命中回指，`intent_node`（graph.py:340，
+# 它**拿得到** state.history）会把上一首的动作与歌名算进 state，
+# `chitchat_node` 随即真的把上一首再投一遍 —— 表现就是用户报的「带入前面点的歌，影响操作」。
+# ⚠️ 这条路径**不在 API 预执行里**：`/ask/stream` 调 `_stream_answer` 时不传 history，
+# 所以 `_is_music_turn` 永远走不到回指分支，拦不住这类句子（别再往那层找）。
+# 判据刻意用「疑问短语」而不是「句子里有问号 / 有疑问词」：
+# 「刚刚那首再放一遍好吗」「再来一首行不行」是**礼貌祈使句**，带疑问词也必须照办，
+# 所以只列「问的是刚才那件事本身」的形态（做什么/叫什么/是什么/哪首/来着…）。
+_MUSIC_RECALL_ASK_RE = re.compile(
+    r"(?:做|干|弄|说|问|讲|喊|叫|让)什么|(?:是|叫)什么|(?:什么|哪)歌|哪首|哪一?首|"
+    r"什么(歌|曲子|名字)|来着|是否记得|记得吗|记不记得|还记得吗")
 
 
 def music_action(question: str, history: list[dict] | None = None) -> tuple[str, str] | None:
@@ -304,7 +317,7 @@ def music_action(question: str, history: list[dict] | None = None) -> tuple[str,
     got = _music_action_direct(q)
     if got is not None:
         return got
-    if history and _MUSIC_RETRY_RE.search(q):
+    if history and _MUSIC_RETRY_RE.search(q) and not _MUSIC_RECALL_ASK_RE.search(q):
         for m in reversed(history):
             if m.get("role") != "user":
                 continue

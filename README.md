@@ -123,6 +123,7 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 - 采用**动词锚定**：控制类语句须出现控制词，点歌类语句须以播放动词开头。据此，「卡卡的声骸怎么配」等游戏问句不会误命中
 - 已覆盖的口语形式包括：引导前缀（我想 / 我要 / 麻烦 / 能不能）、量词（一首 / 一下）、倒装（把音乐关掉）、动词重复（听听小夜曲）、音量表达（调小音乐 / 声音小一点 / 小点声 / 静音 / 降低音量呢 / 提高音量）、切歌表达（下一首 / 换一首 / 切歌 / 换歌）。上述形式均属「相差一字即无法命中」的高频说法，回归用例见 `tests/test_music.py`
 - **重放判定只认明确的重试词**（再试 / 再放 / 刚刚 / 上次 / 还是那…）。裸指代词（那个 / 还是 / 一样）不参与判定：否则点过歌之后问「那个声骸怎么配」会被判成重放，把上一首再放一遍。这类指代不清的说法改由澄清节点反问
+- **反向排除「回忆型问句」**：「我刚才让你做什么来着？你还记得我吗」里的「刚才」是时间锚，整句问的是「我说过什么」而不是命令重放 —— 问句形态（做什么 / 叫什么 / 是什么 / 哪首 / 来着）一律不触发重放。但**礼貌祈使句照常执行**：「刚刚那首再放一遍好吗」带疑问词也必须照办
 - **音乐轮不携带对话历史进入生成**：历史里躺着前几轮点歌的执行文案（旧歌名），模型会把它们复述进本轮（实测「关闭音乐」答成「无间渡还在原地打转」）。本轮工具返回本身已含歌名与状态；写回记忆的仍是全量历史，只是不进 prompt
 - **搜索降级**：QQ 音乐的搜索接口不支持「歌手 + 的 + 歌名」形式（实测「周杰伦的青花瓷」返回 0 条，「周杰伦 青花瓷」返回 4 条）。原串无结果时，依次按「的 → 空格」「仅保留歌名」重试
 
@@ -477,7 +478,7 @@ uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价�
 ### 6. 验证
 
 ```bash
-uv run pytest                            # 单元测试（394 条，**全量离线**，约 4s）
+uv run pytest                            # 单元测试（413 条，**全量离线**，约 5s）
 uv run python -m wuwa_rag.dialog.graph   # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
 ```
@@ -529,7 +530,7 @@ psycopg / neo4j 的异步实现在 uvicorn 自起的 Proactor loop 上会报 `In
 
 诚实列出，避免过度宣称：
 
-- **测试分两层**。`tests/` 有 394 条**离线单测**（见「6. 验证」），守规则层判据；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
+- **测试分两层**。`tests/` 有 413 条**离线单测**（见「6. 验证」），守规则层判据；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
 - **`agent.py` 的 ToolNode 自主选工具路径默认未启用**，主链路走规则条件路由。本项目是 LangGraph DAG 编排，不是多 Agent 系统
 - **图谱抽取是正则规则，不是 LLM 抽取**（这是有意的设计选择，理由见上文）
 - **VLM 链路预留但未接入**：`config.py` 有 qwen3-vl 配置，主链路未使用
@@ -558,7 +559,7 @@ src/wuwa_rag/          # ✅ 已入库
 front/                 # ✅ 已入库   React + TS + Vite 前端
 pgsql/                 # ✅ 已入库   建表 SQL（幂等）
 scripts/               # ✅ 已入库   start.ps1 / stop.ps1 / check_layers.py（架构守卫）
-tests/                 # ✅ 已入库   394 条离线单测（回归基线，可当提交门禁；conftest 强制断网）
+tests/                 # ✅ 已入库   413 条离线单测（回归基线，可当提交门禁；conftest 强制断网）
 
 data/                  # ⚠️ gitignore，未入库（需自行采集生成）
 ├── raw/          角色 wiki markdown（由 wuwa-mcp 爬取）

@@ -314,3 +314,48 @@ def test_没理解_有槽位或角色的短句不澄清() -> None:
     """有锚点就有可答内容，哪怕很短（「心」→ 问的是心，不需要反问）。"""
     assert needs_clarification("那个", ["声骸"], None) is False
     assert needs_clarification("再试", None, ["心"]) is False
+
+
+# ---------- 回指重放：只认「命令」，不认「回忆型问句」 ----------
+# 端到端实测（2026-10-10）抓到：点过歌之后问「我刚才让你做什么来着？你还记得我吗」，
+# `music_action` 命中回指分支 -> `_is_music_turn` 为真（这句既无槽位也无角色名，
+# 守卫拦不住）-> API 在进图**之前**把上一首再投一遍。用户报的
+# 「带入前面点的歌，影响操作」正是这一类，只是换了个触发词。
+_MUSIC_HIST: list[dict] = [
+    {"role": "user", "content": "放一首晴天"},
+    {"role": "assistant", "content": "已经帮你放上去了~"},
+]
+
+
+@pytest.mark.parametrize("q", [
+    "我刚才让你做什么来着？你还记得我吗",
+    "我上次让你干什么来着",
+    "刚刚放的那首叫什么",
+    "刚才那首是什么歌",
+    "刚刚我说过什么来着",
+])
+def test_回忆型问句不触发重放(q: str) -> None:
+    """「刚才」在这里是**时间锚**，整句问的是「我说过什么」，不是命令重放。"""
+    assert music_action(q, _MUSIC_HIST) is None, q
+
+
+@pytest.mark.parametrize("q", [
+    "刚刚那首再放一遍",
+    "再试一次",
+    "继续",
+    "还是那首",
+    "刚才那首再唱一次好吗",      # 礼貌祈使句：带疑问词也**必须**照办
+    "上次那首再来一遍",
+])
+def test_明确重放仍然生效(q: str) -> None:
+    """反向半闸：收窄判据不能把真重放也掐掉（否则「再放一遍」变成没反应）。"""
+    assert music_action(q, _MUSIC_HIST) == ("play", "晴天"), q
+
+
+def test_回指只看最近一条用户消息() -> None:
+    """最近一条不是音乐指令就不重放（不跨多轮回溯、不猜）。"""
+    hist = _MUSIC_HIST + [
+        {"role": "user", "content": "卡卡罗怎么配"},
+        {"role": "assistant", "content": "……"},
+    ]
+    assert music_action("刚刚那首再放一遍", hist) is None, hist

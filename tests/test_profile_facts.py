@@ -108,3 +108,20 @@ def test_从注入串取昵称() -> None:
     assert nicknames_from_context("") == []
     # 水平自述不是昵称（噪声表兜住）
     assert nicknames_from_context("用户自称是新手") == []
+
+
+# 端到端实测（2026-10-10）抓到的两类：判据必须**锚在子句开头**。
+# 漏了锚定时，「主玩角色名为今汐」里的「名为」会被当成昵称标记 ——
+# 于是模型正当引用的「今汐」也会被 unquote_mentions 剥掉引号（误剥比不剥更糟）。
+@pytest.mark.parametrize("ctx,nick", [
+    ("用户名为小探", ["小探"]),            # 真实抽取产物（探针账号实测入库形态）
+    ("用户叫我小星", ["小星"]),
+    ("用户希望被称为阿明", []),            # 没有标记词，不猜
+    ("主玩角色名为今汐", []),             # 「名为」在子句中间 -> 不是昵称
+    ("常用配队名为三幻神", []),            # 同上
+    ("用户喜欢周杰伦", []),
+    ("用户是老玩家；主玩角色名为今汐；用户自称是阿星", ["阿星"]),
+])
+def test_取昵称只认子句开头的标记(ctx: str, nick: list[str]) -> None:
+    from wuwa_rag.services.profile import nicknames_from_context
+    assert nicknames_from_context(ctx) == nick, ctx
