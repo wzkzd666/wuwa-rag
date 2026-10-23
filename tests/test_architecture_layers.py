@@ -39,7 +39,7 @@ _GUARD = _ROOT / "scripts" / "check_layers.py"
 
 # 实测基线（2026-10-06）。这些数字会随正常开发变化——
 # 变化时应当**读懂为什么变了**再更新，而不是为了让测试变绿而随手改数。
-EXPECTED_MODULES = 57
+EXPECTED_MODULES = 58
 # 165 → 166（2026-10-23）：`api/music.py` 的 /music/status 失败路径补了日志，
 # 新增一条 api → ww_logger 出边（方向合规，叶子模块 ww_logger 无环）。
 # 166 → 168（同日）：反馈的 thread_id 判据收进 `core/conversations.THREAD_ID_RE`，
@@ -52,10 +52,14 @@ EXPECTED_MODULES = 57
 # 175 → 177（同日）：召回调试出口 `/debug/retrieval`。刻意**不另写一条检索链**，而是让检索
 # 模块自己把中间量暴露出来 —— 新增 `knowledge.retrieve → knowledge.index.rerank`（L2→L2 同层）
 # 与 `api.app → knowledge.retrieve`（L6→L2）各一条；方向合规、无环。
-EXPECTED_EDGES = 177
+# 177 → 180（同日）：新增 `dialog.quality`（答案级质量闸门）——它出边 3 条：
+# `services.emotion`（L5→L4）、`text`（L5→L0）、`dialog.graph`（同层，只为拿 `_TEAM_FOLLOWUP`
+# 那一份常量，刻意在函数内 import 避开模块级环），方向合规、无环。
+EXPECTED_EDGES = 180
 # 41 → 42（同日）：`knowledge.corpcheck` 是有出边的模块，「有出边的模块数」随之 +1。
-EXPECTED_GRAPH_KEYS = 42
-EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 18, 3: 2, 4: 8, 5: 9, 6: 7}
+# 42 → 43：`dialog.quality` 同样有出边。
+EXPECTED_GRAPH_KEYS = 43
+EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 18, 3: 2, 4: 8, 5: 10, 6: 7}
 
 # 2026-09-30 重构后遗留、2026-10-06 清理掉的空壳包（**无前缀**键名，见模块 docstring ①）。
 REMOVED_EMPTY_PACKAGES = ("rag", "graph", "ingest", "retrieval", "storage")
