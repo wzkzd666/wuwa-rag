@@ -201,3 +201,74 @@ def test_覆盖不全时真的写出warning(tmp_path, monkeypatch) -> None:
 
     assert len(warned) == 1, f"该 warn 的没 warn（诊断被吞了）：{warned}"
     assert "守岸人" in warned[0] and "wuwa-chunk" in warned[0]
+
+
+# ---------- 稠密索引的口径对账（build_index.plan_reconcile） ----------
+# 起因（2026-10-24 实测）：text.py 的清洗规则改了，Chroma 里存的 documents 还是旧文本，
+# 而查询侧已经用新文本 —— 6741 块里有 36 块（全是「编队&队伍轴推荐」）在索引里仍是
+# 一长串 `-`，PG 里早已换成顿号。以前 `wuwa-index` 只有「无脑全量重嵌」一档，
+# 于是这种不一致只能靠几十分钟的 CPU 重嵌来治，实际上没人跑，就一直欠着。
+def _row(cid: str, bc: str, text: str) -> dict:
+    return {"chunk_id": cid, "character": cid.split("::")[0], "module": "Character Strategy",
+            "component": "编队&队伍轴推荐", "tab": "主流队友", "breadcrumb": bc,
+            "text": text, "has_table": True}
+
+
+def test_稠密索引只重嵌口径不一致或缺失的块() -> None:
+    from wuwa_rag.knowledge.index.build_index import plan_reconcile
+    from wuwa_rag.text import embed_input
+
+    same = _row("甲::a", "甲 › a", "队伍组成 | 甲+乙+丙")
+    stale = _row("乙::b", "乙 › b", "队伍组成 | 乙-----乙+丙+丁")
+    ok_cid = embed_input(same["breadcrumb"], same["text"])
+    stored = {
+        "甲::a": ok_cid,                        # 与当前口径一致 → 不必重嵌
+        "乙::b": "乙 › b\n队伍组成 | 乙-----乙+丙+丁",   # 旧口径（未换顿号）→ 必须重嵌
+        "丙::c": "索引里有、PG 里已经没有了",            # 孤儿
+    }
+    todo, orphans = plan_reconcile(stored, [same, stale], force=False)
+    assert [r["chunk_id"] for r in todo] == ["乙::b"], todo
+    assert orphans == ["丙::c"], orphans
+
+
+def test_索引里没有的块也算要补() -> None:
+    """新角色入库只 upsert 该角色；离线重建必须能把 PG 有、索引没有的块补上。"""
+    from wuwa_rag.knowledge.index.build_index import plan_reconcile
+
+    row = _row("新角色::d", "新角色 › d", "正文")
+    todo, orphans = plan_reconcile({}, [row], force=False)
+    assert [r["chunk_id"] for r in todo] == ["新角色::d"]
+    assert orphans == []
+
+
+def test_强制全量时一致的块也重嵌() -> None:
+    """`--full` 的语义必须真的是全量：换 embedding 模型 / 怀疑索引坏了时，
+    口径一致的块也要重跑，否则这个开关名不副实。"""
+    from wuwa_rag.knowledge.index.build_index import plan_reconcile
+    from wuwa_rag.text import embed_input
+
+    row = _row("甲::a", "甲 › a", "正文")
+    stored = {"甲::a": embed_input("甲 › a", "正文")}
+    todo, _ = plan_reconcile(stored, [row], force=True)
+    assert [r["chunk_id"] for r in todo] == ["甲::a"]
+
+
+def test_未知命令行参数直接退出(monkeypatch) -> None:
+    """`--force` 这类笔误若被静默忽略，跑的就是增量而不是使用者以为的全量 ——
+    差的是「改版后旧块还在」这种最难查的故障，所以宁可当场退出。
+
+    下面那条 `_load_chunks` 炸点是**给用例自己上的保险**：守卫一旦失效，
+    这个测试会一路跑进真库 + 真 Chroma + 加载 bge-m3（变异实测真发生了），
+    那测的就不是判据而是重建索引。
+    """
+    import pytest
+
+    from wuwa_rag.knowledge.index import build_index
+
+    def _boom(*_a, **_k):
+        raise AssertionError("参数校验没拦住，已经往下跑去重建索引了")
+
+    monkeypatch.setattr(build_index, "_load_chunks", _boom)
+    monkeypatch.setattr(build_index.sys, "argv", ["wuwa-index", "--force"])
+    with pytest.raises(SystemExit, match="--full"):
+        build_index.main()

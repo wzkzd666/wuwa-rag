@@ -208,7 +208,11 @@ export function TtsSection() {
       {/* 凭据与音色收进次级折叠：这几项「配一次就不动」，全摊开会把
           「朗读服务」的状态与保存按钮挤得很远。默认折叠策略见 credShown。 */}
       <InlineFold
-        title={`凭据与音色${cfg?.configured ? `（已保存 ${cfg.key_hint}）` : '（尚未配置）'}`}
+        // 折叠**标题**也要走三态：读失败时 cfg 是 null，原来会写成「（尚未配置）」，
+        // 与展开后同一屏的 LoadFail 自相矛盾（内容修了一半，标题漏了）。
+        title={`凭据与音色${
+          cfg?.configured ? `（已保存 ${cfg.key_hint}）` : loadErr && !cfg ? '（状态未知：读取失败）' : '（尚未配置）'
+        }`}
         open={credShown}
         onToggle={() => setCredOpen(!credShown)}
       >

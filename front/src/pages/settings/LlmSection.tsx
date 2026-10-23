@@ -290,9 +290,13 @@ export function LlmSection() {
             也可切换到你自己的云端大模型 API —— 配置只属于你，密钥加密存储、绝不回显。
           </p>
           <p className="set-status">
+            {/* 三态：读成功给确定答案；读失败**不许**肯定地报「本地默认」
+                （真实状态可能是云端自定义，只是这次没读到）。 */}
             当前生效：{useCloud
               ? `云端自定义（${model.trim() || cfg?.model || '未选模型'}）`
-              : `本地默认（${cfg?.default_model || 'aemeath'}）`}
+              : loadErr && !cfg
+                ? '状态未知（读取失败）'
+                : `本地默认（${cfg?.default_model || 'aemeath'}）`}
             {useCloud && cfg && !cfg.unlocked && '；密钥本进程尚未解锁，实际仍回落本地'}
             {'。'}
           </p>

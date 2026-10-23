@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ChevronDown, Loader2, RefreshCw, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-react'
 
 import { useStore } from '../store/useStore'
+import LoadFail from './LoadFail'
 import { feedbackDelete, feedbackList } from '../lib/api'
 import type { FeedbackList } from '../types'
 import './UsagePanel.css'
@@ -55,8 +56,11 @@ export default function FeedbackPanel({ days }: { days: number }) {
     <div className="usage-panel">
       <div className="usage-bar">
         <div className="fb-fold-stats">
-          <span className="tag tag-ok"><ThumbsUp size={11} /> {st?.up ?? 0}</span>
-          <span className="tag tag-err"><ThumbsDown size={11} /> {st?.down ?? 0}</span>
+          {/* 还没读到（首次加载中或读失败）就给破折号，不给 0 ——
+              0 赞 0 踩是「有数据且都是零」，与「不知道」是两件事。
+              同屏的差评率本来就是这种写法（下面那行 `??  →—`），照它对齐。 */}
+          <span className="tag tag-ok"><ThumbsUp size={11} /> {!fb ? '—' : st?.up ?? 0}</span>
+          <span className="tag tag-err"><ThumbsDown size={11} /> {!fb ? '—' : st?.down ?? 0}</span>
           <span className="fb-fold-rate">
             差评率 {downRate === null || downRate === undefined ? '—' : `${(downRate * 100).toFixed(0)}%`}
           </span>
@@ -66,12 +70,19 @@ export default function FeedbackPanel({ days }: { days: number }) {
         </button>
       </div>
 
-      {err && <div className="kb-warn">{err}</div>}
+      {err && (
+        <LoadFail
+          what="反馈列表"
+          error={err}
+          note="这不是没有反馈"
+          onRetry={() => void load()}
+        />
+      )}
 
       <div className={`fb-fold ${openFa ? 'fb-fold-open' : ''}`}>
         <button className="fb-fold-head" onClick={() => setOpenFa((v) => !v)}>
           <ChevronDown size={15} className="fb-fold-caret" />
-          <span className="fb-fold-title">全部反馈（{fb?.items.length ?? 0}）</span>
+          <span className="fb-fold-title">全部反馈（{fb ? fb.items.length : '—'}）</span>
         </button>
         {openFa && (
           <div className="fb-fold-body">

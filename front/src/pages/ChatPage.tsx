@@ -8,6 +8,7 @@ import { useStore } from '../store/useStore'
 import MessageBubble from '../components/MessageBubble'
 import Composer from '../components/Composer'
 import ConfirmButton from '../components/ConfirmButton'
+import LoadFail from '../components/LoadFail'
 import './ChatPage.css'
 
 const EXAMPLES = [
@@ -24,6 +25,8 @@ function SessionList() {
   const collapsed = useStore((s) => s.settings.sessionListCollapsed)
   const convs = useStore((s) => s.convs)
   const loadingConvs = useStore((s) => s.loadingConvs)
+  const convsErr = useStore((s) => s.convsErr)
+  const reloadConvs = useStore((s) => s.loadConversations)
   const activeThreadId = useStore((s) => s.activeThreadId)
   const select = useStore((s) => s.selectConversation)
   const create = useStore((s) => s.newConversation)
@@ -82,8 +85,10 @@ function SessionList() {
         </button>
       )}
       <div className="session-scroll">
-        {/* 加载中不许显示「暂无会话」：那是**空状态**，会把「请求还没回来」说成「你没有会话」。
-            loadingConvs/loadingMsgs 之前只写不读，这个区分就一直没生效（见 useStore:335/359）。 */}
+        {/* 三种状态必须分开：加载中（点阵）/ 读失败（LoadFail）/ 真的没有（暂无会话）。
+            前两种此前被合成一种 —— 会话列表请求挂了而本地一条都没有时，这里会说「暂无会话」，
+            用户以为自己从没聊过（判据在 useStore 的 convsErr）。
+            ⚠️ 注释里不写行号：这块代码一行行在长，行号注释必然腐坏。 */}
         {convs.length === 0 && (
           <div className="session-empty">
             {loadingConvs ? (
@@ -92,6 +97,13 @@ function SessionList() {
                 <i />
                 <i />
               </span>
+            ) : convsErr ? (
+              <LoadFail
+                what="会话列表"
+                error={convsErr}
+                note="这不是没有会话"
+                onRetry={() => void reloadConvs()}
+              />
             ) : (
               '暂无会话'
             )}

@@ -132,6 +132,15 @@ interface Store {
   /** 当前会话的消息（服务端拉取的 + 流式中的临时消息） */
   messages: Message[]
   loadingConvs: boolean
+  /**
+   * 会话列表**读取失败**的原因；'' = 没有失败。
+   *
+   * 必须有这个状态：列表读失败时 `convs` 还是上一次的（刻意不清空，见 loadConversations
+   * 的 catch），首次进入就没有上一次的，于是 `convs.length === 0` 与「服务器说你没有会话」
+   * 长得一模一样，三处界面就一起说「暂无会话 / 共 0 个会话 / 还没有任何会话」。
+   * 后端挂了要让用户看到「读不到」，而不是让他以为自己从没聊过。
+   */
+  convsErr: string
   loadingMsgs: boolean
   /** 是否正在流式接收（一个时刻只会有一个会话在跑） */
   busy: boolean
@@ -303,6 +312,10 @@ const bootSettings: Settings = {
   ...(bootAuth ? _migrateSettings(readJSON<Partial<Settings>>(LS_SETTINGS(bootAuth.username)) ?? {}) : {}),
 };
 
+/** 错误对象 → 可读文案（非 Error 的字符串/未知值也不能印成 [object Object]）。
+ *  store 里要展示错误原文的地方只准用这一份，别再各写一遍 instanceof 判断。 */
+const errMsg = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
 export const useStore = create<Store>()((set, get) => {
   /** 把某条消息就地打个补丁（只改当前会话的最后一条流式消息） */
   const patchMsg = (msgId: string, patch: Partial<Message>) =>
@@ -310,7 +323,7 @@ export const useStore = create<Store>()((set, get) => {
 
   /** 401 / 网络异常的统一收尾：登录过期就踢回登录页 */
   const fail = (err: unknown, prefix: string) => {
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = errMsg(err)
     if (err instanceof api.UnauthorizedError) {
       get().clearAuth()
       get().toast('err', msg)
@@ -327,6 +340,7 @@ export const useStore = create<Store>()((set, get) => {
     activeThreadId: '',
     messages: [],
     loadingConvs: false,
+    convsErr: '',
     loadingMsgs: false,
     busy: false,
 
@@ -344,6 +358,7 @@ export const useStore = create<Store>()((set, get) => {
         auth: a,
         settings: { ...DEFAULT_SETTINGS, ...saved },
         convs: [],
+        convsErr: '',
         activeThreadId: '',
         messages: [],
         busy: false,
@@ -357,6 +372,7 @@ export const useStore = create<Store>()((set, get) => {
       set({
         auth: null,
         convs: [],
+        convsErr: '',
         activeThreadId: '',
         messages: [],
         busy: false,
@@ -366,13 +382,13 @@ export const useStore = create<Store>()((set, get) => {
 
     loadConversations: async () => {
       if (!get().auth) {
-        set({ convs: [] })
+        set({ convs: [], convsErr: '' })
         return
       }
       set({ loadingConvs: true })
       try {
         const { conversations } = await api.listConversations('', get().settings.apiBase)
-        set({ convs: conversations })
+        set({ convs: conversations, convsErr: '' })
         // 当前会话在服务端已不存在（别处删了）→ 退回草稿态，别停在一个空壳会话上
         const cur = get().activeThreadId
         if (cur && !conversations.some((c) => c.thread_id === cur)) {
@@ -380,7 +396,9 @@ export const useStore = create<Store>()((set, get) => {
         }
       } catch (err) {
         if (err instanceof api.UnauthorizedError) get().clearAuth()
-        // 其它错误不动列表：保持上一次的可用状态比清空好
+        // 其它错误不动列表：保持上一次的可用状态比清空好 —— 但**必须把失败本身记下来**，
+        // 否则首次加载失败时空列表会被三处界面一起读成「你没有会话」。
+        else set({ convsErr: errMsg(err) })
       } finally {
         set({ loadingConvs: false })
       }
@@ -448,7 +466,7 @@ export const useStore = create<Store>()((set, get) => {
         return false
       }
       // 只清会话与入库记录；界面偏好是另一个维度，不动
-      set({ convs: [], activeThreadId: '', messages: [], ingests: [] })
+      set({ convs: [], convsErr: '', activeThreadId: '', messages: [], ingests: [] })
       return true
     },
 

@@ -22,6 +22,7 @@ export default function SettingsPage() {
   const checkHealth = useStore((s) => s.checkHealth)
   const clearAll = useStore((s) => s.clearAll)
   const convs = useStore((s) => s.convs)
+  const convsErr = useStore((s) => s.convsErr)
   const ingests = useStore((s) => s.ingests)
   const toast = useStore((s) => s.toast)
 
@@ -62,12 +63,17 @@ export default function SettingsPage() {
   // ---- 音乐设置（开关 + 播放器路径）----
   const [mset, setMset] = useState<MusicSetting | null>(null)
   const [msetBusy, setMsetBusy] = useState(false)
+  // 读失败必须单独记：不然 `mset === null` 会被下面那条三元链的最后兜底分支
+  // 读成「音乐功能没开」——把「没读到」说成「是关着的」，而且界面上一句失败提示都没有。
+  const [msetErr, setMsetErr] = useState('')
   const [exeDraft, setExeDraft] = useState<string | null>(null)
   const loadMusicSet = useCallback(async () => {
     try {
       setMset(await api.musicSetting(settings.apiBase))
-    } catch {
-      /* 读不到就让开关保持禁用，不假装有设置 */
+      setMsetErr('')
+    } catch (err) {
+      /* 读不到就让开关保持禁用，不假装有设置 —— 但要如实说「读不到」 */
+      setMsetErr(err instanceof Error ? err.message : String(err))
     }
   }, [settings.apiBase])
   useEffect(() => {
@@ -96,6 +102,10 @@ export default function SettingsPage() {
 
   const loadFacts = async () => {
     setFactsErr('')
+    // 重试期间也要回到「读取中」：只清错误不清数据的话，上一次失败留下的空数组
+    // 会在这几百毫秒里被渲染成「还没有画像，多聊几轮…」——首次加载刻意分的三态，
+    // 在重试这条路上被抹平成一态。
+    setFacts(null)
     try {
       const out = await api.getProfile(apiBase)
       setFacts(out.facts)
@@ -244,6 +254,9 @@ export default function SettingsPage() {
             onToggle={() => toggle('music')}
             hint="开启后可直接说「放首周杰伦的晴天」「暂停」「小声点」">
         <div className="music-set">
+          {msetErr && !mset && (
+            <LoadFail what="音乐设置" error={msetErr} onRetry={() => void loadMusicSet()} />
+          )}
           <label className="music-set-row">
             <input
               type="checkbox"
@@ -254,11 +267,13 @@ export default function SettingsPage() {
             <span>
               启用音乐播放
               <em className="music-set-hint">
-                {mset?.source === 'deployment'
-                  ? '当前由部署配置（.env MUSIC_ENABLED）开启'
-                  : mset?.personal === true
-                    ? '已由你开启'
-                    : '关闭时问「放歌」会得到「音乐功能不可用」的提示'}
+                {msetErr && !mset
+                  ? '状态未知：这次没读到，下面的勾选与路径都不作数'
+                  : mset?.source === 'deployment'
+                    ? '当前由部署配置（.env MUSIC_ENABLED）开启'
+                    : mset?.personal === true
+                      ? '已由你开启'
+                      : '关闭时问「放歌」会得到「音乐功能不可用」的提示'}
                 {mset && !mset.exe && mset.enabled && (
                   <em className="music-set-hint music-set-warn">
                     未设置路径：将以环境变量 <code>QQMUSIC_EXE</code> 为准
@@ -653,12 +668,14 @@ export default function SettingsPage() {
             onToggle={() => toggle('data')}
             hint="会话/消息/入库记录统计，以及清空全部会话（不可恢复）。">
         <div className="set-stats">
+          {/* 会话/消息来自同一次列表读取：读失败时这两个数字是「未知」而不是 0，
+              而右边的入库记录是本地提交回执，照旧给真实数字。 */}
           <div className="stat">
-            <b>{convs.length}</b>
+            <b>{convsErr ? '—' : convs.length}</b>
             <span>会话</span>
           </div>
           <div className="stat">
-            <b>{totalMessages}</b>
+            <b>{convsErr ? '—' : totalMessages}</b>
             <span>消息</span>
           </div>
           <div className="stat">

@@ -5,6 +5,7 @@ import { History, Search, Download, Trash2, MessageSquare, ArrowRight, Inbox, Lo
 import { useStore, previewOf } from '../store/useStore'
 import AdminUsersCard from '../components/AdminUsersCard'
 import ConfirmButton from '../components/ConfirmButton'
+import LoadFail from '../components/LoadFail'
 import * as api from '../lib/api'
 import type { ConversationMeta } from '../types'
 import './HistoryPage.css'
@@ -13,6 +14,8 @@ export default function HistoryPage() {
   const convs = useStore((s) => s.convs)
   // 加载期与空态必须分开（这个字段本来就是为了这个用途加的，别让它再次只写不读）
   const loadingConvs = useStore((s) => s.loadingConvs)
+  const convsErr = useStore((s) => s.convsErr)
+  const reloadConvs = useStore((s) => s.loadConversations)
   const select = useStore((s) => s.selectConversation)
   const remove = useStore((s) => s.deleteConversation)
   const toast = useStore((s) => s.toast)
@@ -24,6 +27,8 @@ export default function HistoryPage() {
   const [kw, setKw] = useState('')
   /** 服务端搜索结果；null = 没在搜索，显示全量列表 */
   const [hits, setHits] = useState<ConversationMeta[] | null>(null)
+  /** 服务端全文搜索**这次失败了**（回落本地过滤），空匹配时要如实说清是哪种「没有」 */
+  const [searchFailed, setSearchFailed] = useState(false)
 
   // 搜索走服务端：转录在服务端存着，只过滤手头这份列表就只能搜到标题和最后一条预览。
   // 300ms 防抖，避免每敲一个字打一次请求。
@@ -31,13 +36,17 @@ export default function HistoryPage() {
     const k = kw.trim()
     if (!k) {
       setHits(null)
+      setSearchFailed(false)
       return
     }
     const t = setTimeout(async () => {
       try {
         setHits((await api.listConversations(k, apiBase)).conversations)
+        setSearchFailed(false)
       } catch {
         setHits(null)   // 搜索失败就退回本地过滤，不打断使用
+        setSearchFailed(true)   // 但要把「退回」记下来：本地只有标题与末条预览，
+                                // 落空时不能一句「没有匹配的会话」把全文搜索没做成也一起说成没有
       }
     }, 300)
     return () => clearTimeout(t)
@@ -97,7 +106,7 @@ export default function HistoryPage() {
             <History size={19} className="grad-text" /> 历史会话
           </h2>
           <p className="page-desc">
-            共 {convs.length} 个会话，仅你本人可见。支持检索、续接对话与导出。
+            {convsErr ? '会话数未知（列表这次没读到）' : `共 ${convs.length} 个会话`}，仅你本人可见。支持检索、续接对话与导出。
           </p>
         </div>
         <button className="btn btn-ghost head-btn" onClick={() => void exportAll()} disabled={convs.length === 0}>
@@ -119,10 +128,24 @@ export default function HistoryPage() {
           <Loader2 size={30} className="spin" />
           <span>正在读取会话列表…</span>
         </div>
+      ) : convsErr && convs.length === 0 ? (
+        // 读失败与「真的没有会话」是两件事：这里以前只会说后者
+        <LoadFail
+          what="会话列表"
+          error={convsErr}
+          note="这不是没有会话"
+          onRetry={() => void reloadConvs()}
+        />
       ) : filtered.length === 0 ? (
         <div className="empty-state">
           <Inbox size={30} />
-          <span>{convs.length === 0 ? '还没有任何会话，去问答页开始吧' : '没有匹配的会话'}</span>
+          <span>
+            {convs.length === 0
+              ? '还没有任何会话，去问答页开始吧'
+              : searchFailed
+                ? '标题与预览里没有匹配（全文搜索这次没读到）'
+                : '没有匹配的会话'}
+          </span>
         </div>
       ) : (
         <div className="hist-list">

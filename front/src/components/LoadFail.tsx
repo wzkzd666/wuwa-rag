@@ -13,15 +13,22 @@ export default function LoadFail({
   what,
   error,
   onRetry,
+  note,
 }: {
   /** 读的是什么，例如「画像」「云端模型配置」 */
   what: string
   error: string
   onRetry: () => void
+  /**
+   * 后半句的定性说法。默认「这不代表没配过」——那是对**配置类**卡片写的
+   * （读失败 ≠ 用户没配）；会话列表/反馈列表要的是另一句（「这不是没有会话」），
+   * 硬套默认值就成了新的谎话。
+   */
+  note?: string
 }) {
   return (
     <div className="set-warn">
-      {what}读取失败：{error}。这不代表没配过 ——
+      {what}读取失败：{error}。{note ?? '这不代表没配过'} ——
       <button type="button" className="btn btn-ghost btn-sm" onClick={onRetry}>
         重试
       </button>

@@ -84,6 +84,7 @@ beforeEach(() => {
     activeThreadId: '',
     busy: false,
     loadingConvs: false,
+    convsErr: '',
     loadingMsgs: false,
     settings: { ...useStore.getState().settings, stream: true, apiBase: '' },
   })
@@ -195,6 +196,28 @@ describe('加载态与清空结果必须可被消费', () => {
     released()
     await p
     expect(useStore.getState().loadingConvs).toBe(false)
+  })
+
+  it('loadConversations 读失败：convsErr 记下原因，列表保留上一次的', async () => {
+    // 这条守的是「读不到 ≠ 没有」：store 里必须有失败原因这个出口，
+    // 否则会话栏/历史页/设置页三处都会把请求挂了读成「暂无会话」。
+    useStore.setState({ convs: [{ thread_id: 'old', title: '上一次读到的', updated_at: '' } as never] })
+    vi.mocked(api.listConversations).mockRejectedValueOnce(new Error('502 Bad Gateway'))
+
+    await useStore.getState().loadConversations()
+
+    expect(useStore.getState().convsErr).toContain('502')
+    expect(useStore.getState().convs).toHaveLength(1)   // 保持上一次的可用状态比清空好
+  })
+
+  it('loadConversations 读成功：必须把 convsErr 清零', async () => {
+    // 只写不清的话，一次偶发失败会永久挂在界面上（重试成功后仍显示「读取失败」）
+    useStore.setState({ convsErr: '上一次的失败' })
+    vi.mocked(api.listConversations).mockResolvedValueOnce({ conversations: [] } as never)
+
+    await useStore.getState().loadConversations()
+
+    expect(useStore.getState().convsErr).toBe('')
   })
 
   it('clearAll：后端失败要如实返回 false，且不许清本地列表', async () => {
