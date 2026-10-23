@@ -95,6 +95,16 @@ if (Test-Path $PidFile) {
     Write-Warn2 "未找到 $PidFile —— 服务可能不是由 start.ps1 启动的，请手动关闭对应窗口"
 }
 
+# 隐藏窗口模式下各服务的控制台输出落在 .runtime/*.out.log（里面可能有一次性的
+# 初始管理员口令），停服务时一并清掉；还有服务没停下来时保留，那是唯一的线索。
+if ($script:failed.Count -eq 0) {
+    $leftovers = @(Get-ChildItem -Path (Join-Path $Root '.runtime') -Filter '*.out.log' -ErrorAction SilentlyContinue)
+    if ($leftovers) {
+        $leftovers | Remove-Item -Force -ErrorAction SilentlyContinue
+        Write-Info "已清理 $($leftovers.Count) 个控制台输出文件（.runtime\*.out.log）"
+    }
+}
+
 # 兜底：结束可能残留的独立服务端口占用（端口来自根 .env，按 PID 精准 kill）。
 # ⚠️ 「按端口 kill 占用者」本身是有杀伤力的动作：谁占了就算谁，不看是不是本项目。
 # 这正是本项目改用 2xxxx 不常用端口的第二个理由（第一个是不与别的项目撞车）——

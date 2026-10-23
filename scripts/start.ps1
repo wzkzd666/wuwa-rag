@@ -34,7 +34,13 @@ param(
     [switch]$NoDocker,
     [switch]$NoMigrate,
     [switch]$NoFront,
-    [switch]$Open
+    [switch]$Open,
+    # 默认**不弹控制台窗口**：celery / api / 前端 三个进程在隐藏窗口里跑，
+    # 各自的 stdout+stderr 落到 `.runtime/<名字>.out.log`（不是 logs/ ——
+    # 那里只有走 ww_logger 的业务日志，而 uvicorn/celery/vite 自己抛的
+    # 绑定失败、traceback 只在控制台上，隐藏窗口不能把它弄丢）。
+    # 要实时看输出时显式开：`.\dev.bat -ShowWindows`。
+    [switch]$ShowWindows
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,6 +56,10 @@ $FrontDir = Join-Path $Root 'front'
 # 端口从根 .env 现取，脚本里一个数字都不写（口径与 dotenv/Compose 一致，见 ports.ps1）
 . (Join-Path $PSScriptRoot 'ports.ps1')
 $Ports = Get-WuwaPorts $Root
+
+# 隐藏窗口模式要把各服务的控制台输出写到 .runtime/<名字>.out.log，
+# 而 Tee-Object **不会自建目录**（目录不存在时整条启动命令报错）——先确保它在。
+if (-not (Test-Path $RunDir)) { New-Item -ItemType Directory -Force -Path $RunDir | Out-Null }
 
 foreach ($d in $LogDir, $RunDir) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
@@ -105,12 +115,31 @@ function Invoke-Native {
 $pids = @()
 function Start-ServiceWindow {
     param([string]$Name, [string]$Title, [string]$WorkDir, [string]$Command)
+    # 不弹窗口 ≠ 看不见输出：隐藏模式下把 stdout+stderr 同时落盘。
+    # logs/ 里只有走 ww_logger 的业务日志，而「uvicorn 抢不到端口」「import 就崩」
+    # 这类信息只出现在控制台上 —— 没有这份文件就变成「服务静默没起来」，最难排查。
+    # 三处实测坑（每一处都是先踩后改，别再改回去）：
+    #   · Out-File 而不是 Tee-Object —— 5.1 的 Tee 写出 UTF-16LE，grep/head 当二进制看不了；
+    #   · 必须再过一道 `[string]$_` —— 原生命令的 stderr 会被 PowerShell 包成 ErrorRecord，
+    #     直接写文件就成了「uv : INFO: Started server process / 所在位置 行:1 字符:121 / +~~~」
+    #     这种格式化噪声（uvicorn、celery 的正常 INFO 全走 stderr，等于整份日志被污染）；
+    #   · EAP 设 Continue —— 默认 Stop 时第一条 stderr 就可能被当异常中断服务。
+    $outLog = Join-Path $RunDir "$Name.out.log"
+    if (-not $ShowWindows) {
+        $Command = "`$ErrorActionPreference='Continue'; $Command 2>&1 |" +
+            " ForEach-Object { [string]`$_ } | Out-File -FilePath '$outLog' -Encoding utf8 -Width 512"
+    }
     $full = "`$host.UI.RawUI.WindowTitle='$Title'; cd '$WorkDir'; $Command"
     $p = Start-Process -FilePath 'powershell.exe' `
         -ArgumentList '-NoExit', '-NoProfile', '-Command', $full `
-        -WorkingDirectory $WorkDir -PassThru
+        -WorkingDirectory $WorkDir -PassThru `
+        -WindowStyle $(if ($ShowWindows) { 'Normal' } else { 'Hidden' })
     $script:pids += [pscustomobject]@{ name = $Name; pid = $p.Id; title = $Title }
-    Write-Ok "$Name 已启动（窗口 PID $($p.Id)）"
+    if ($ShowWindows) {
+        Write-Ok "$Name 已启动（窗口 PID $($p.Id)）"
+    } else {
+        Write-Ok "$Name 已启动（PID $($p.Id)，输出 → .runtime/$Name.out.log）"
+    }
     return $p.Id
 }
 
@@ -251,7 +280,8 @@ try {
     }
     if ($apiReady) { Write-Ok 'FastAPI /health 返回 200' }
     else {
-        Write-Warn2 "API 未在 120s 内就绪，请看「FastAPI :$apiPort」窗口日志（首次加载模型较慢）"
+        $hint = if ($ShowWindows) { "「FastAPI :$apiPort」窗口日志" } else { ".runtime/api.out.log" }
+        Write-Warn2 "API 未在 120s 内就绪，请看 $hint（首次加载模型较慢）"
         # uvicorn 抢不到端口时是**静默**起不来的（只在它自己窗口里抛一句 bind error），
         # 这里顺手把端口当前的占用者打出来，省得对着超时日志猜。
         $apiOwner = Get-PortOwner $apiPort
@@ -315,6 +345,14 @@ try {
     Ollama      http://localhost:$($Ports.Llm)  （外部依赖，端口不由本项目发布）
 
   端口一律来自根目录 .env 顶部的 *_PORT，改端口只改那一个文件。
+
+  $(if ($ShowWindows) { '窗口模式：三个服务各占一个控制台窗口（实时看输出）。' } else { @(
+    '服务模式：不弹窗口。各服务的控制台输出（含 uvicorn/celery/vite 自己的报错）在',
+    '  .runtime\celery.out.log / api.out.log / front.out.log，\stop.ps1 会一并清掉。',
+    '  想实时看输出：.\dev.bat -ShowWindows',
+    '  [注意] 若 .env 没配 ADMIN_PASSWORD，首次启动的那次性管理员口令只会出现在',
+    '     .runtime\api.out.log 里（故意不落 logs/）——读到后请删掉该文件。'
+  ) -join [Environment]::NewLine })
 
   停止全部： .\scripts\stop.ps1   （或 .\dev.bat stop）
   PID 记录： $PidFile

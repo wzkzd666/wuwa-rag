@@ -37,12 +37,15 @@ docker compose up -d                   # PG(pgvector16) / Neo4j 5.26 / Redis / R
 
 .\dev.bat                                # 【一键启动】docker 四件套 + celery + FastAPI(:28000) + 前端(:25173)
                                        # 建表 SQL 幂等自动应用；就绪后轮询 /health 并检查 ollama aemeath
-                                       # 各服务独立窗口，PID 记录到 .runtime/dev.pids.json（运行时状态，与日志分离）
+                                       # 默认**不弹控制台窗口**：celery / API / 前端在隐藏窗口里跑，各自 stdout+stderr 落到
+                                       #   .runtime/<name>.out.log（uvicorn/celery/vite 自己抛的错只在那里，不在 logs/）
+                                       #   要实时看输出：.\dev.bat -ShowWindows
+                                       # PID 记录到 .runtime/dev.pids.json（运行时状态，与日志分离；stop 连 .out.log 一起清）
                                        # ⚠ 停止必须连子进程树一起杀（stop.ps1 用 taskkill /T + 命令行特征兜底）：
                                        #   只杀窗口会让 uv → celery.exe → python 变孤儿（实测两套 Celery 并存抢队列）
 .\dev.bat stop                           # 【一键停止】按 PID 记录关服务窗口 + docker compose stop（保留卷）
                                        # 底层是 scripts/start.ps1 与 scripts/stop.ps1，可直接调用并传参：
-                                       # start.ps1 -NoDocker/-NoMigrate/-NoFront/-Open；stop.ps1 -KeepDocker/-Down
+                                       # start.ps1 -NoDocker/-NoMigrate/-NoFront/-Open/-ShowWindows；stop.ps1 -KeepDocker/-Down
 
                                        # 【必备】生成模型 = Ollama 承载的 "aemeath"（QLoRA 微调 Qwen3-8B，爱弥斯），
                                        # 跑前确认 ollama list 里有它；无本地推理服务进程要起

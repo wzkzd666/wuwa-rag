@@ -509,7 +509,12 @@ Python 用 python-dotenv 的 `${VAR}` 插值、`scripts/ports.ps1` 供启动/停
 .\dev.bat stop         # 按 PID 关服务窗口 + docker compose stop（保留卷）
 ```
 
-底层是 `scripts/start.ps1` 与 `scripts/stop.ps1`，可直接传参：`start.ps1 -NoDocker / -NoMigrate / -NoFront / -Open`、`stop.ps1 -KeepDocker / -Down`。
+底层是 `scripts/start.ps1` 与 `scripts/stop.ps1`，可直接传参：`start.ps1 -NoDocker / -NoMigrate / -NoFront / -Open / -ShowWindows`、`stop.ps1 -KeepDocker / -Down`。
+
+> 默认**不弹一堆控制台窗口**：celery / API / 前端在隐藏窗口里跑，各自的 stdout+stderr 写到
+> `.runtime/celery.out.log`、`api.out.log`、`front.out.log`（uvicorn、celery、vite 自己抛的错只在控制台，
+> 不进 `logs/`，所以这份文件是唯一线索）。要看实时输出就 `.\dev.bat -ShowWindows`；
+> `.\dev.bat stop` 会把这两个目录下的运行时文件一并清掉。
 
 > ⚠️ **停止必须连子进程树一起杀**（`taskkill /T` + 命令行特征兜底）。只杀窗口会让 `uv → celery.exe → python` 变孤儿进程，实测会出现两套 Celery 并存抢队列。
 
