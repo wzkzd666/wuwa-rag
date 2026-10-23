@@ -37,6 +37,10 @@ API = "http://127.0.0.1:28000"
 
 # 每条：问句 / 期望走的路由（intent 判错本身就是故障）/ 是否概括性配队（要追问句）
 CASES = [
+    # 第一条刻意是自我介绍：昵称进了画像之后，后面每一问才有机率把「小满」喊出来，
+    # 而 `check_answer` 的昵称引号那一条（模型爱写成「「小满」」）只有在
+    # **调用方把昵称词递给它**时才可能命中 —— 不递就永远绿，等于没查（见主循环）。
+    {"q": "记住叫我小满", "intent": "chitchat", "team_overview": False},
     {"q": "守岸人配队", "intent": "fact", "team_overview": True},
     {"q": "卡卡罗的共鸣链效果是什么", "intent": None, "team_overview": False},
     {"q": "忌炎六阶突破要多少贝币", "intent": None, "team_overview": False},
@@ -53,6 +57,24 @@ def _login(api: str, user: str, pw: str) -> dict:
     tok = httpx.post(f"{api}/auth/login", json={"username": user, "password": pw},
                      timeout=30).json()["token"]
     return {"Authorization": f"Bearer {tok}"}
+
+
+def _profile_nickwords(headers: dict) -> list[str]:
+    """当前账号画像里的昵称词（取不到就返回空表，不挡评测）。
+
+    复用生产的两个函数拼同一条链：`/profile` 的事实 → `facts_to_context` →
+    `nicknames_from_context`。这样「答案里把昵称套引号」那条检查才真的有人看着。
+    """
+    from wuwa_rag.services.profile import facts_to_context, nicknames_from_context
+
+    try:
+        r = httpx.get(f"{API}/profile", headers=headers, timeout=30)
+        if r.status_code != 200:
+            return []
+        return nicknames_from_context(facts_to_context(r.json().get("facts", [])))
+    except Exception as exc:  # noqa: BLE001 —— 画像是佐料，读不到就跳过那条检查，别把整轮评测弄挂
+        print(f"  (读画像失败，昵称那条例外跳过：{type(exc).__name__})")
+        return []
 
 
 def _json_array(raw: str) -> list | None:
@@ -193,7 +215,11 @@ def main() -> int:
             continue
         d = r.json()
         ans, intent = d.get("answer", ""), d.get("intent", "")
-        issues = check_answer(ans, team_followup=case["team_overview"])
+        # 昵称词从**探针自己的画像**现取，走的是生产链路那两位函数
+        # （`facts_to_context` → `nicknames_from_context`），脚本里不另写一份判据。
+        # 不递的话 `check_answer` 的第④条恒不触发 —— 一条永远不会红的检查等于没有检查。
+        issues = check_answer(ans, team_followup=case["team_overview"],
+                              nicknames=_profile_nickwords(H))
         if case["intent"] and intent != case["intent"]:
             issues.append(f"路由不符：期望 {case['intent']}，实得 {intent or '（空=走了不知道）'}")
         row = {"question": q, "intent": intent, "chars": len(ans), "issues": issues}

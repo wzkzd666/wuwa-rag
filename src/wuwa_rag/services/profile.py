@@ -200,20 +200,51 @@ async def extract_facts_safe(question: str) -> list[str]:
 _RE_LEVEL = re.compile(
     r"(?:萌新|新人|新手|新来的|老玩家|回归玩家|刚入坑|入坑不?久|玩了\s*\d+\s*年)")
 # 昵称/称呼类：自称是X、名叫X、叫做X、姓名：X、称呼为X、游戏ID是X、叫我X
-# ⚠️ 词表必须覆盖抽取模型的**全部**实际输出形态。实测漏了「名叫」这一支：
-#    `extract_facts_safe('我叫小明')` 会输出「用户名叫小明」，若正则不认「名叫」，
-#    该事实就归到 None（不参与覆盖），用户改昵称时旧的仍然留着 —— 正是要修的那个 bug。
-_RE_NICKNAME = re.compile(
-    r"(?:自称|名字|姓名|昵称|称呼|网名|游戏名|名叫|叫做|名字叫|ID|id|Id)"
-    r"\s*(?:是|为|：|:|=)?|"
-    r"(?:叫我|喊我|称呼我)\s*"
-)
-# ⚠️ 两个分支都必须**停在昵称之前**：`_fact_category` 是用 `s[m.end():]` 取昵称的。
-#    第二分支早先写成 `叫我[^，。]{1,12}`，把昵称一起吞进匹配 → `tail` 恒为空 →
-#    「叫我小星」判成 None（实测漏网）。停在「叫我」之后，昵称才落在 tail 里，
-#    并且顺带让 `_RE_NICKNAME_NOISE` 对它生效（「叫我玩家」应判 None）。
+#
+# ⚠️ **标记词表只此一份**（`_NICK_MARKERS`）：取昵称词（`nicknames_from_context`）与
+#    分类（`_fact_category`）都从它构造。以前是两条各写一遍的正则，实测已经漂出两个方向：
+#    · 抽取产物「用户名为小探」「用户**希望被**称呼为小满」——取词的那条认、分类的不认
+#      → 事实不参与覆盖，用户改昵称时旧的仍留着（正是 2026-10-06 要修的形态）；
+#    · 「主玩角色名为今汐」——分类的裸 `search` 认、取词的（锚在子句开头）不认
+#      → 若照它覆盖，会把**真昵称**软删掉（错分类比漏分类严重得多）。
+#    合成一份后两种形态由同一个锚点判：标记必须在子句开头（可带「用户」主语与
+#    「希望/被」这类垫词），昵称词紧跟其后。
 # 明确排除：这些词出现在昵称位说明它是「水平自述」而非真昵称（如「我是玩家」）。
 _RE_NICKNAME_NOISE = re.compile(r"^(?:玩家|人|萌新|新人|新手|老玩家|回归玩家)$")
+
+
+# 标记词表（唯一一份，见上面 `_RE_NICKNAME_NOISE` 处的说明）。
+# ⚠️ 顺序由 `_nicks_by_len_desc` 排：**长的必须排在短的之前**（正则交替从左到右第一个命中）——
+#    「叫我」若排在「叫」之后，「用户叫我小星」会先撞上「叫」，捕获组剩成「我小星」（实测红过一次）。
+_NICK_MARKERS = (
+    "自称是", "自称叫", "自称", "名叫", "名字叫", "名为", "叫做", "叫作", "被称为", "称为",
+    "昵称是", "昵称为", "昵称", "称呼为", "称呼是", "称呼我", "称呼",
+    "姓名是", "姓名为", "姓名", "名字是", "名字为", "名字",
+    "游戏名是", "网名是", "游戏ID是", "游戏ID为", "ID是", "ID为", "id是", "id为",
+    "叫我", "喊我", "叫",
+)
+_MARKER_ALT = "|".join(sorted((re.escape(m) for m in _NICK_MARKERS),
+                              key=lambda e: (-len(e), e)))
+# 判据**锚在子句开头**（可选「用户」主语 + 可选「希望/想/请 + 被」垫词），不能全文搜标记词：
+# 「主玩角色名为今汐」里的「名为」不是昵称（端到端实测踩过，误剥比不剥糟）。
+# `facts_to_context` 就是按「；」连接各条事实的，所以按子句切分与写入端同源。
+_CTX_NICK = re.compile(
+    r"^(?:用户|TA|他|她)?\s*"
+    # 抽取模型实测会写「用户**希望被**称呼为小满」（2026-10-24 真链路抓到），
+    # 只认紧跟主语的标记词就取不到昵称词，`unquote_mentions` 等于没接线。
+    # 垫词只放这几个字，不放 `.*?`：放开了「用户主玩角色被定为今汐」也会被当昵称句。
+    r"(?:希望|想要|想|愿意|请)?\s*(?:被)?\s*"
+    r"(?:" + _MARKER_ALT + r")"
+    r"\s*([^；;，。！!？?]{1,12})")
+
+
+def _nick_word(clause: str) -> str:
+    """子句里被标记词引出的昵称词；不是昵称句 / 命中泛称噪声词则返回 ''。"""
+    m = _CTX_NICK.match((clause or "").strip())
+    if not m:
+        return ""
+    nick = m.group(1).strip("是为：: ")
+    return "" if _RE_NICKNAME_NOISE.match(nick) else nick
 
 
 def _fact_category(fact: str) -> str | None:
@@ -227,15 +258,9 @@ def _fact_category(fact: str) -> str | None:
         return None
     if _RE_LEVEL.search(s):
         return "level"
-    m = _RE_NICKNAME.search(s)
-    if not m:
-        return None
-    # 取「自称是/名叫/称呼为/ID是」后面那段作为昵称候选，挡掉「我是玩家」这类。
-    tail = s[m.end():].strip()
-    tail = tail.strip("，。：:、 ")
-    if not tail or _RE_NICKNAME_NOISE.match(tail):
-        return None
-    return "nickname"
+    # 分类与取词共用上面那一条锚定判据（`_nick_word`）：能取出昵称词的句子才算昵称类。
+    # 用整句 `search` 的老写法会把「主玩角色名为今汐」判成昵称，进而把**真昵称**软删掉。
+    return "nickname" if any(_nick_word(c) for c in re.split(r"[；;]", s)) else None
 
 
 # 否定式自述：「我不主玩今汐了」「不喜欢维里奈」「没在用散华」。
@@ -494,29 +519,14 @@ def facts_to_context(facts: list[dict]) -> str:
 # 的负向指令（negative-example 污染），改由 text.unquote_mentions 确定性剥离，
 # 这里负责告诉它**剥谁的**。
 #
-# ⚠️ 判据必须**锚在子句开头**（可选前缀「用户」），不能全文搜标记词。
-# 端到端实测踩过：写成裸 `(?:名为|…)` 时「主玩角色名为今汐」也被认成昵称，
-# 于是模型正当引用的「今汐」会被剥掉引号 —— 误剥比不剥更糟。
-# `facts_to_context` 就是按「；」连接各条事实的，所以按子句切分与写入端同源。
-_CTX_NICK = re.compile(
-    r"^(?:用户|TA|他|她)?\s*"
-    r"(?:自称是|自称|自称叫|名叫|名字叫|名为|叫做|昵称是|昵称为|称呼为|称呼是|被称为"
-    # ⚠️ **长标记必须排在短标记之前**（正则交替是从左到右第一个命中）：
-    # 「叫我」若写在「叫」之后，「用户叫我小星」会先撞上「叫」，
-    # 捕获组剩成「我小星」（实测红过一次）。
-    r"|叫我|喊我|叫|游戏名是|网名是|ID是|id是)"
-    r"\s*([^；;，。！!？?]{1,12})")
-
-
+# 标记词表与锚定判据在文件上半部（`_NICK_MARKERS` / `_nick_word`）——
+# 与 `_fact_category` **共用同一条**，不在这里写第二份。
 def nicknames_from_context(ctx: str) -> list[str]:
     """从画像注入串（`facts_to_context` 的输出）里取昵称词。取不到返回空表。"""
     out: list[str] = []
     for clause in re.split(r"[；;]", ctx or ""):
-        m = _CTX_NICK.match(clause.strip())
-        if not m:
-            continue
-        nick = m.group(1).strip("是为：: ")
-        if nick and not _RE_NICKNAME_NOISE.match(nick) and nick not in out:
+        nick = _nick_word(clause)
+        if nick and nick not in out:
             out.append(nick)
     return out
 
