@@ -100,6 +100,16 @@ else:
         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+class IndexWriterBusy(RuntimeError):
+    """拿不到稠密索引写锁 —— 另一个进程正在写同一个目录。
+
+    为什么不是 `SystemExit`：这两个写入口也被 Celery worker 调（`index_character`、
+    按角色清旧向量），而任务体的落账包装是 `except Exception`；`SystemExit` 是
+    BaseException，会绕过「先落账再抛」那层，前端五步进度永远停在 running。
+    命令行要的「退出码 1 + 可读原因」由 `main()` 显式转，不靠异常类型越级表达。
+    """
+
+
 @contextmanager
 def dense_writer_lock():
     """同一时刻只准一个进程写稠密索引 —— 并发写会把 HNSW 段写坏，且**当场看不出来**。
@@ -121,7 +131,7 @@ def dense_writer_lock():
         _lock_exclusive(fh)
     except OSError:
         fh.close()
-        raise SystemExit(
+        raise IndexWriterBusy(
             f"另一个进程正在写稠密索引（{path} 被占用）。"
             "并发写会把 Chroma 写坏 —— 等它跑完再跑，或用 logs/vec.log 看进度。"
         )
@@ -202,7 +212,8 @@ def delete_dense_by_character(character: str) -> int:
 
     chunk_id 含内容 hash，wiki 改版后新旧块并存 → 召回到旧知识。
     返回删前的该角色点数（仅日志用途，不保证与 delete 完全原子）。
-    写锁同样要拿：这条路径是 API 进程发起的，而 worker 可能正在建索引。
+    写锁同样要拿：这条是**刷新链**发起的删除，而这时命令行 `wuwa-index`
+    或另一个角色的刷新可能正在写同一个目录 —— 两个进程、一份 HNSW。
     """
     with dense_writer_lock():
         return _delete_dense_by_character(character)
@@ -244,7 +255,14 @@ def main() -> None:
     unknown = [a for a in args if a != "--full"]
     if unknown:
         raise SystemExit(f"wuwa-index 只接受 --full，未知参数：{' '.join(unknown)}")
-    asyncio.run(_main("--full" in args), loop_factory=asyncio.SelectorEventLoop)
+    try:
+        asyncio.run(_main("--full" in args), loop_factory=asyncio.SelectorEventLoop)
+    except IndexWriterBusy as exc:
+        # 「忙」只在命令行这一层变成退出码 1 + 可读原因。
+        # 库内调用方（worker 的 index_character / 刷新链清向量）拿到的仍是普通异常，
+        # 会被任务体的 `except Exception` 正常落账成 fail，前端进度会红；
+        # 换成 SystemExit 就绕过那层，进度永远停在 running。
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

@@ -311,10 +311,24 @@ def _locked_module(tmp_path, monkeypatch):
 def test_第二个写索引的进程必须被当场拒住(tmp_path, monkeypatch) -> None:
     bi = _locked_module(tmp_path, monkeypatch)
     with bi.dense_writer_lock():
-        with pytest.raises(SystemExit, match="另一个进程正在写稠密索引"):
+        with pytest.raises(bi.IndexWriterBusy, match="另一个进程正在写稠密索引"):
             with bi.dense_writer_lock():
                 pass   # 走到这里就已经是缺陷了
     assert (tmp_path / "chroma.lock").exists(), "锁文件要落在 VECTOR_DIR 里，排查时看得见"
+
+
+def test_忙用普通异常而非法退出异常(tmp_path, monkeypatch) -> None:
+    """`SystemExit` 是 BaseException，会绕过 Celery 任务体的 `except Exception` 落账层
+    —— 前端五步进度就会永远停在 running。所以锁抛的必须是 RuntimeError 子类，
+    而「退出码 1」只在 `main()` 那一层转。
+    """
+    bi = _locked_module(tmp_path, monkeypatch)
+    assert issubclass(bi.IndexWriterBusy, RuntimeError)
+    assert not issubclass(bi.IndexWriterBusy, SystemExit)
+    import inspect
+
+    body = inspect.getsource(bi.main)
+    assert "except IndexWriterBusy" in body and "raise SystemExit(str(exc))" in body
 
 
 def test_锁释放后可以再拿(tmp_path, monkeypatch) -> None:

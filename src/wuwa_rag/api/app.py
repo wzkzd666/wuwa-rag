@@ -340,11 +340,12 @@ async def api_admin_users(user: authn.AuthUser = Depends(authn.require_admin)) -
 
 
 # 账号移除时要回收的表（**唯一清单**，tests/test_security_fixes.py 会从 pgsql/*.sql 反推
-# 「带 user_id / submitted_by 列的表」并核对这张清单 —— 以后新加一张用户表又忘了回收，那条会红）。
-# 每张表怎么清只有它自己的模块知道，这里只**组合**，不写第二份 SQL。
+# 「带 user_id / submitted_by / session_id 列的表」并核对这张清单 —— 以后新加一张用户表
+# 又忘了回收，那条会红）。每张表怎么清只有它自己的模块知道，这里只**组合**，不写第二份 SQL。
 PURGED_TABLES = (
     "users", "auth_tokens",                    # 账号与登录令牌（auth.delete_account）
     "sessions", "messages",                    # 会话与转录（conv.clear_conversations 连带 messages）
+    "session_summaries",                       # 会话级衍生（同一批 session_id 归属，跟着转录走）
     "lg.checkpoints",                          # 模型侧记忆（_drop_memory，按 thread key）
     "user_facts",                              # 画像事实（profile.purge_user_facts，**按用户名**）
     "answer_feedback", "llm_usage", "user_settings",   # 评价 / 用量 / 偏好（各自模块 delete_all_for_user）
@@ -391,15 +392,18 @@ async def api_admin_user_delete(user_id: int,
     keys = list(dict.fromkeys(session_keys + orphan_keys))
     purged = {
         "sessions": await conv.clear_conversations(user_id),
-        "memories": len(keys),
+        "memories": 0,                             # 下面按**真的删成的**条数填
         "facts": await purge_user_facts(target["username"]),           # 按**用户名**
         "feedback": await fb.delete_all_for_user(str(user_id)),         # 按 str(id)
         "usage": await usage.delete_all_for_user(str(user_id)),
         "settings": await user_settings.delete_all_for_user(str(user_id)),
         "credentials": await llmstore.purge_credentials(user_id),
     }
+    dropped = 0
     for k in keys:
-        await _drop_memory(k)
+        if await _drop_memory(k):
+            dropped += 1
+    purged["memories"] = dropped
     await authn.delete_account(user_id)
     # 留痕：谁删了谁、各表删了几行（不可恢复的操作，事后必须能追问）
     log.info("管理员 %s(id=%s) 移除用户 %s(id=%s)，回收=%s",
@@ -478,18 +482,22 @@ def _meta_of(evt: dict) -> dict:
     }
 
 
-async def _drop_memory(key: str) -> None:
-    """删掉 LangGraph 里该 thread 的记忆（lg.checkpoints / checkpoint_writes）。
+async def _drop_memory(key: str) -> bool:
+    """删掉 LangGraph 里该 thread 的记忆（lg.checkpoints / checkpoint_writes / checkpoint_blobs）。
 
     删会话必须连记忆一起删：checkpointer 的表**不参与** /conversations 的查询，
     只删转录的话，一旦同一个 thread_id 再被复用（前端本地 id 撞车、或用户手填），
     旧记忆会原地复活。清理失败只告警——不能因为清记忆失败就让用户删不掉会话。
+    返回是否真的删成：**删号是不可恢复操作，回收条数不许把失败的算进去**
+    （以前把 `len(keys)` 当结果，saver 整批失败时响应仍写着「memories: N」）。
     """
     try:
         saver = await get_checkpointer()
         await saver.adelete_thread(key)
+        return True
     except Exception as exc:  # noqa: BLE001 —— 清记忆失败不该让用户删不掉会话
         log.warning("清理会话记忆失败（忽略）：%s", exc)
+        return False
 
 
 async def _sse(events):

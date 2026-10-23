@@ -233,17 +233,27 @@ async def delete_conversation(user_id: int, thread_id: str) -> bool:
 
 
 async def clear_conversations(user_id: int) -> int:
-    """清空该用户全部会话，返回删除的会话数。"""
+    """清空该用户全部会话与转录，返回删除的**会话**数。
+
+    ⚠️ 转录不能只按 `sessions` 里还在的那些行删：本仓多次用手写 SQL 删过 `sessions` 行，
+    而 `messages` 不会跟着走 —— 实测库里躺着 4 条「主人已被删、session 行已没了」的孤儿转录
+    （`u40:…` / `u42:…`）。`session_id` 的前缀本身就是 `u{users.id}:`（见 `thread_key`），
+    所以再按前缀补一刀才收得干净；带冒号的前缀匹不到别的用户（`u1:%` 匹不到 `u10:`）。
+    `session_summaries` 同理：它也按 session_id 归属，今天 0 行、暂无写入方，
+    但「删账号要回收名下全部数据」这条口径不能等有了数据再补。
+    """
     pool = await get_pool()
+    like = f"u{int(user_id)}:%"
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT session_id FROM sessions WHERE user_id = %s", (user_id,)
         )
         sids = [r["session_id"] for r in await cur.fetchall()]
-        if not sids:
-            return 0
         await conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
-        await conn.execute("DELETE FROM messages WHERE session_id = ANY(%s)", (sids,))
+        for table in ("messages", "session_summaries"):
+            if sids:
+                await conn.execute(f"DELETE FROM {table} WHERE session_id = ANY(%s)", (sids,))
+            await conn.execute(f"DELETE FROM {table} WHERE session_id LIKE %s", (like,))
         return len(sids)
 
 

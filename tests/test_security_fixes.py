@@ -350,7 +350,10 @@ def _user_column_tables() -> set[str]:
     import re
 
     marker = "CREATE TABLE IF NOT EXISTS "
-    has_user_col = re.compile("user_id|submitted_by")
+    # `session_id` 也要算：转录与衍生行是按会话归属的，而 `messages` 连 user 列都没有。
+    # 只匹配 user 列的后果实测过：手写 SQL 删掉 sessions 行之后，孤儿转录既没被回收、
+    # 这条守卫也**看不见它**（库里现成就躺着 4 条 u40/u42 的转录）。
+    has_user_col = re.compile("user_id|submitted_by|session_id")
     out: set[str] = set()
     paths = sorted((_ROOT / "pgsql").glob("*.sql")) + sorted((_ROOT / "src" / "wuwa_rag").rglob("*.py"))
     for path in paths:
@@ -405,12 +408,42 @@ def test_删账号端点是admin专属且挡住自删与末位admin() -> None:
 
 def test_删账号的记忆回收取两处并集() -> None:
     """只从 `sessions` 反查 key 会漏：**会话行被手写 SQL 删掉而 checkpointer 还在**。
-    实测库里躺着 3 条这种孤儿记忆（u10 / u40 / u42，主人早已不在 users 里）。
+    实测库里躺着 3 条这种孤儿记忆（u10 / u40 / u42，主人早已不在 users 里；
+    这 3 条已由端点自己跑通后手工清掉，今天实测 `u40/u42` 的 lg 线程 = 0）。
     所以端点必须并上 `conv.memory_keys(user_id)`（按 `u{id}:` 前缀直查 lg.checkpoints）。
     """
     src = (_ROOT / "src/wuwa_rag/api/app.py").read_text(encoding="utf-8")
     body = src[src.index('api_admin_user_delete'):src.index('api_admin_user_delete') + 3000]
     assert "await conv.memory_keys(user_id)" in body, "少了按前缀直查 checkpointer 的那一路"
+
+
+def test_删账号的转录回收也要按前缀补孤儿() -> None:
+    """`clear_conversations` 原先只删 `sessions` 里**还在**的那批 session_id。
+    手写 SQL 删过 sessions 行之后，转录就成了谁够不着的孤儿 —— 实测库里现成躺着 4 条
+    （`u40:ffe8ddde3ee7` 两条 + `u42:438ca97f4e2f` 两条），而删账号端点对它们一无所知。
+    `session_id` 的前缀就是 `u{users.id}:`，所以必须按前缀补一刀；
+    `session_summaries` 同属这批 session_id，一并进来（今天 0 行，但它归会话归属）。
+    """
+    import inspect
+
+    from wuwa_rag.core.conversations import clear_conversations
+
+    body = inspect.getsource(clear_conversations)
+    assert "session_id LIKE" in body, "没按 u{id}: 前缀补删孤儿转录"
+    assert "session_summaries" in body, "衍生表没跟着会话回收"
+    assert 'f"u{int(user_id)}:%"' in body, "前缀没锚住冒号（u1:% 会匹到 u10: 就删错人了）"
+
+
+def test_回收条数只报真的删成的() -> None:
+    """不可恢复操作的回执行必须如实：`memories: len(keys)` 在 saver 整批失败时仍写 N 条，
+    而实际一条没删 —— 这比少报危险（操作员以为清干净了）。
+    """
+    src = (_ROOT / "src/wuwa_rag/api/app.py").read_text(encoding="utf-8")
+    body = src[src.index('api_admin_user_delete'):src.index('api_admin_user_delete') + 3000]
+    assert '"memories": len(keys)' not in body, "把「打算删的条数」当成「删成的条数」"
+    assert "if await _drop_memory(k)" in body, "没按 _drop_memory 的返回值计数"
+    drop = src[src.index("async def _drop_memory"):]
+    assert "return True" in drop and "return False" in drop, "_drop_memory 没出声失败"
     assert "dict.fromkeys" in body, "两路 key 必须并集去重（同一条记忆重复 drop 会白跑一次）"
 
     # 前缀本身也要钉住：LIKE 写成 `%{id}%` 会把 u10 的记忆错删到 u1 名下
