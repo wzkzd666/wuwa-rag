@@ -216,6 +216,7 @@ MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task �
 | `ask` | 20/minute | **登录用户** | 一轮 20s 量级，且与 Ollama 抢同一块 GPU（`OLLAMA_NUM_PARALLEL=1`） |
 | `tts` | 10/minute | 登录用户 | 每次合成都是真实费用 |
 | `outbound` | 20/hour | 登录用户 | `/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，是 SSRF 面 |
+| `debug` | 20/hour | 登录用户（管理员专属端点） | `GET /debug/retrieval` 一次要把双路召回 + RRF + 精排全跑一遍（CPU 上约 19s 量级），且暴露的是**语料内部标识与分数**，不给档位等于白送一个批处理口 |
 | `ingest` | 5/hour | 登录用户 | `/ingest` + `/knowledge/refresh` 跑整条五步链（爬 wiki + BM25 全量重建）并写**全体用户共享的语料**；`/ingest/control`（暂停/取消）不占额度 |
 | `creds` | 10/minute | 登录用户 | 改密/解锁/换加密口令/保存云端与语音凭据这五个端点，每次都要跑 PBKDF2 20 万次（实测单次 ~50ms），`/auth/password` 再加一次 scrypt（~733ms） |
 
@@ -437,6 +438,10 @@ RATE_LIMIT_AUTH=10/minute      # 登录/注册，按 IP —— 挡暴力枚举�
 RATE_LIMIT_ASK=20/minute       # /ask 与 /ask/stream，按登录用户（两者共享同一计数器）
 RATE_LIMIT_TTS=10/minute       # 语音合成，按用户（有真实费用）
 RATE_LIMIT_OUTBOUND=20/hour    # /llm/models、/llm/config/test —— 会向外发请求，SSRF 面收紧
+RATE_LIMIT_INGEST=5/hour       # /ingest 与 /knowledge/refresh 共用一个计数器（跑五步链、改共享语料）
+RATE_LIMIT_DEBUG=20/hour       # /debug/retrieval（管理员）—— 一次把双路+RRF+精排全跑
+                               # 注：改密/解锁/换口令/保存云端与语音凭据这五个端点单独计一档 `creds`，
+                               # 但**数值跟着 RATE_LIMIT_AUTH**（不设独立变量，避免两处常数漂移）。
 RATE_LIMIT_DEFAULT=200/minute  # 其余端点兜底；/health 已豁免（启动脚本轮询用）
 
 # 可选：语音朗读（Qwen-Audio-3.1-TTS-Flash，北京地域）
@@ -537,7 +542,11 @@ uv run python -m wuwa_rag.api.server                        # FastAPI :28000（�
 ```bash
 uv run wuwa-chunk [src目录 [输出jsonl]]   # 默认 data/raw → data/chunks/chunks.jsonl
 uv run wuwa-ingest                        # chunks.jsonl + raw md → S3 + PG
-uv run wuwa-index                         # PG → Chroma 稠密索引 + bm25.pkl 稀疏索引（全量重建）
+uv run wuwa-index                         # PG → bm25.pkl 稀疏索引（全量、秒级）+ Chroma 稠密索引
+                                          # 稠密路默认**增量**：只重嵌「索引里没有」或「存的文本
+                                          # ≠ 当前口径文本」的块，并删掉 PG 已不存在的孤儿 id；
+                                          # `--full` 才是无脑全量。⚠️ 一次只准跑一个（写入口有 OS
+                                          # 文件锁，第二个进程会被当场拒住——并发写实测会写坏 HNSW）
 uv run wuwa-graph                         # chunks.jsonl → 规则抽事实 → Neo4j MERGE
 uv run wuwa-corpcheck                      # 【只读】语料对账：jsonl/PG/Chroma/BM25/Neo4j/raw 六方一比
 uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价于 POST /ingest）
@@ -546,7 +555,7 @@ uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价�
 ### 6. 验证
 
 ```bash
-uv run pytest                            # 单元测试（469 条，**全量离线**，约 5s）
+uv run pytest                            # 单元测试（523 条，**全量离线**，空载约 4.5s）
 cd front && npm test                     # 前端测试（vitest 37 条：store 行为 / 配色令牌 AA / 评价回填合帧 / 时间字节格式化，纯 node、不碰后端）
 uv run python -m wuwa_rag.dialog.graph   # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
@@ -566,29 +575,46 @@ push / PR 上跑：runner **不起 docker、不要 GPU**——正因为测试是
 
 ### API 端点
 
+（下表按 `GET /openapi.json` 的实际 51 个操作逐个核对过权限与限流档位，不是照抄设计稿。
+`/ingest` 一族早先这里写成「管理员」，与代码和知识库页的**刻意设计**不符：提交/暂停/取消/删除
+**自己**提交的记录对全体登录用户开放，只有重爬与删知识库才要管理员。）
+
 | 端点 | 权限 | 限流 | 说明 |
 | --- | --- | --- | --- |
 | `GET /health` | 公开 | **豁免** | 就绪探针（`start.ps1` 轮询用） |
 | `POST /auth/register` `POST /auth/login` | 公开 | 10/min·按 IP | 注册 / 登录（Bearer token） |
+| `GET /auth/me` `POST /auth/logout` | 登录 | 兜底 200/min | 当前身份 / 吊销令牌（并丢弃内存里的 DEK） |
+| `POST /auth/password` | 登录 | **10/min·按用户（creds 共享）** | 改登录密码，自动重绑云端密钥 |
 | `POST /ask` | 登录 | 20/min·按用户 | 同步问答 |
-| `POST /ask/stream` | 登录 | 同上（**共享计数**） | SSE 流式问答（含 stage 进度事件） |
+| `POST /ask/stream` | 登录 | 同上（**共享 ask 计数**） | SSE 流式问答（含 stage 进度事件） |
+| `GET /conversations` `DELETE /conversations` | 登录 | 兜底 200/min | 会话列表 / 清空全部 |
+| `GET/DELETE/PATCH /conversations/{thread_id}` | 登录 | 兜底 200/min | 单会话读、删（**连带清模型侧记忆**）、改名 |
+| `POST /conversations/{thread_id}/regenerate` | 登录 | 同上（**共享 ask 计数**） | 重新生成某条回答 |
+| `GET /profile` `DELETE /profile/fact/{fact_id}` | 登录 | 兜底 200/min | 画像事实（软删单条） |
 | `GET /tts/status` | 登录 | 兜底 200/min | 语音可用性状态 |
 | `POST /tts` | 登录 | 10/min·按用户 | 语音合成（含生效来源、模型/音色展示名） |
-| `GET/PUT/DELETE /tts/config` | 登录 | 兜底 200/min | **用户自持的语音凭据**（只读回掩码；与云端模型共用一套解锁口令） |
-| `GET /llm/config` `PUT /llm/config` `GET /llm/providers` | 登录 | 兜底 200/min | 个人云端模型配置（只读回掩码） |
-| `GET /llm/models` `POST /llm/config/test` | 登录 | **20/hour**·按用户 | 会向用户填的地址发出站请求（SSRF 面，故最紧） |
-| `POST /llm/unlock` `POST /llm/lock` `POST /llm/passphrase` | 登录 | 兜底 200/min | 云端密钥：解锁（密码/口令）/ 锁定 / 换口令 |
-| `POST /auth/password` | 登录 | 兜底 200/min | 改登录密码（自动重绑云端密钥） |
-| `POST /ingest` | 管理员 | 兜底 200/min | 触发角色摄取 `{"character":"忌炎"}` |
-| `GET /ingest/status?character=xxx` | 管理员 | 兜底 200/min | 查询五步流水线进度 |
+| `GET/DELETE /tts/config` | 登录 | 兜底 200/min | 用户自持语音凭据（只回掩码） |
+| `PUT /tts/config` | 登录 | **10/min（creds 共享）** | 保存语音凭据（要跑 PBKDF2） |
+| `GET /llm/config` `DELETE /llm/config` `GET /llm/providers` `POST /llm/enabled` `POST /llm/lock` | 登录 | 兜底 200/min | 个人云端模型配置与开关 |
+| `PUT /llm/config` `POST /llm/unlock` `POST /llm/passphrase` | 登录 | **10/min（creds 共享）** | 保存凭据 / 解锁 / 换加密口令 |
+| `GET /llm/models` `POST /llm/config/test` | 登录 | **20/hour·按用户** | 会向用户填的地址发出站请求（SSRF 面，故最紧） |
+| `POST /ingest` | 登录 | **5/hour·按用户（与重爬共享）** | 触发角色摄取 `{"character":"忌炎"}` |
+| `POST /ingest/control` | 登录 | 兜底 200/min | 暂停/继续/取消（**刻意不占额度**，否则排队时连止损都做不了） |
+| `GET /ingest/status?character=xxx` `GET /ingest/records` | 登录 | 兜底 200/min | 五步进度 / 提交记录 |
+| `DELETE /ingest/records/{record_id}` | 登录 | 兜底 200/min | 删除自己提交的记录账本 |
 | `GET /knowledge/characters` | 登录 | 兜底 200/min | 候选角色名册（唯一真源在数据库） |
-| `GET /usage/summary?days=&user=` | 登录 | 兜底 200/min | token 用量汇总（管理员可指定 `user` 查看单人） |
-| `GET/POST/DELETE /feedback` | 登录 | 兜底 200/min | 答案反馈（删除仅限本人或管理员） |
-| `GET /music/status` | 登录 | 兜底 200/min | 播放状态（顶栏播放条 5 秒轮询，3s 硬超时） |
-| `POST /music/control` | 登录 | 兜底 200/min | 播放控制（动作名与 MCP 工具一致） |
-| `GET/PUT /music/setting` | 登录 | 兜底 200/min | 音乐开关与播放器路径（**即时生效，无需重启**） |
+| `POST /knowledge/refresh` | **管理员** | **5/hour（与 /ingest 共享）** | 按角色清库重爬五步链 |
+| `DELETE /knowledge/characters/{character}` | **管理员** | 兜底 200/min | 删角色知识库（文档/索引/图谱） |
+| `GET /usage/summary?days=&user=` | 登录 | 兜底 200/min | token 用量汇总（管理员可指定 `user`） |
+| `GET/POST /feedback` `DELETE /feedback/{record_id}` | 登录 | 兜底 200/min | 答案反馈（删除仅限本人或管理员） |
+| `GET /feedback/mine?target_ids=…` | 登录 | 兜底 200/min | 回填本人评价（参数名是 **target_ids**） |
+| `GET /music/status` `POST /music/control` `GET/PUT /music/setting` | 登录 | 兜底 200/min | 音乐（路由常驻；功能没开时 `available=false`，开关**即时生效不重启**） |
+| `GET /admin/users` `DELETE /admin/users/{user_id}` | **管理员** | 兜底 200/min | 用户清单 / **移除账号并回收其名下全部数据**（不可恢复；不许自删、不许删末位管理员） |
+| `GET /debug/retrieval?question=…` | **管理员** | **20/hour·按用户** | 召回调试：双路 + RRF + 精排的中间量与闸门判定（与主链共用同一份实现） |
 
 超限返回 `429` + `Retry-After` 秒数 + 中文错误体。限额与开关全部可经 `.env` 覆盖（见「配置环境变量」一节）。
+⚠️ **同一个能力必须共用一个计数器**：`ask` / `ingest` / `creds` 三组各自 `shared_limit(scope=...)`，
+分开计数就等于换个端点把配额翻倍。
 
 ---
 
@@ -604,7 +630,10 @@ psycopg / neo4j 的异步实现在 uvicorn 自起的 Proactor loop 上会报 `In
 
 诚实列出，避免过度宣称：
 
-- **测试分三层**。`tests/` 有 469 条**离线单测**（见「6. 验证」），守规则层判据；`front/` 有 37 条 vitest 用例守 store 行为、配色令牌的可读性契约、评价回填的合帧调度与展示格式化（`npm test`，不起浏览器、不碰后端）；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
+- **测试分三层**。`tests/` 有 523 条**离线单测**（见「6. 验证」），守规则层判据；`front/` 有 37 条 vitest 用例守 store 行为、配色令牌的可读性契约、评价回填的合帧调度与展示格式化（`npm test`，不起浏览器、不碰后端）；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引与 reranker 权重，手动跑 `uv run python tests/eval_retrieval.py`；**精排不可用时会直接拒跑**，免得把「模型没起来」印成「闸门 1.0000」），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative；标注形态有三种：显式 `chunk_id`、按元数据的 `relevant_selector`、逐字 `relevant_passages` 片段锚点）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比即可判断效果。
+  基线（2026-10-24 在完整语料 6741 块上重测，topk=6，走生产同一份链路）：**人工标注 5 条 recall=1.0000**、片段锚点 1 条 recall=1.0000、选择器标注 8 条 recall=0.7875（天花板 0.9583），**正样本合计 14 条 recall=0.8786 / 天花板 0.9762 / 真缺口 0.0976 / MRR 0.8238**，负样本闸门判空率 **1.0000**。
+  ⚠️ 读数前必须知道的两件事：① **天花板** = `min(topk, 相关数)/相关数`，相关块多于 topk 时召不全不是缺陷（数值表那一组 9 个相关块、topk=6，recall=0.67 已是满分），只有 `recall < ceiling` 才是真缺口；② 绝对值受评测集规模与标注松紧影响，**只用于同一评测集上的前后对比**。
+  早先这里写的「Avg Recall@6 = 0.3867、数值表 recall=0.00、单字角色 recall=0.10」是**首版评测口径错误时的数字**（当时把 `TOPK_RERANK_IN` 误当 topk、且没走精排，还包含单字名识别修复前的形态），已被上面这轮重测替掉。
 - **`agent.py` 的 ToolNode 自主选工具路径默认未启用**，主链路走规则条件路由。本项目是 LangGraph DAG 编排，不是多 Agent 系统
 - **图谱抽取是正则规则，不是 LLM 抽取**（这是有意的设计选择，理由见上文）
 - **VLM 链路预留但未接入**：`config.py` 有 qwen3-vl 配置，主链路未使用
@@ -633,7 +662,7 @@ src/wuwa_rag/          # ✅ 已入库
 front/                 # ✅ 已入库   React + TS + Vite 前端
 pgsql/                 # ✅ 已入库   建表 SQL（幂等）
 scripts/               # ✅ 已入库   start.ps1 / stop.ps1 / check_layers.py（架构守卫）
-tests/                 # ✅ 已入库   469 条离线单测（回归基线，可当提交门禁；conftest 强制断网）
+tests/                 # ✅ 已入库   523 条离线单测（回归基线，可当提交门禁；conftest 强制断网）
 
 data/                  # ⚠️ gitignore，未入库（需自行采集生成）
 ├── raw/          角色 wiki markdown（由 wuwa-mcp 爬取）
