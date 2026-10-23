@@ -980,7 +980,9 @@ DEK     ──KEK_pp──> dek_by_pp       KEK_pp  = 加密口令 + key_salt �
     ② 改到这类共用函数时，**必须在按角色那条调用路上也验一次**，只验全量等于没验。
     用例在 `tests/test_ingest_control.py`：口径不一致要重嵌 / 索引缺失要补 / **只删本次角色的孤儿** /
     别人的块一律不许动 / `--full` 必须名副其实 / 未知参数直接退出；
-    变异验证过两条：把比对退化成「只看 id 在不在」恰好第一条红，把孤儿范围放宽到全库恰好「别人的块」那条红。
+    变异验证过两条（都是当场红、还原即绿）：把文本比对退化成「只看 id 在不在」→
+    「不一致要重嵌」那条红；把孤儿范围放宽回全库 → 「只删本次角色的孤儿」与
+    「别人的块一律不许动」两条一起红（前者也存了别人的块，说明这条判据被两处同时看着）。
 - `knowledge/knowledge/graph/extract.py` 的抽取规则依赖 `knowledge/crawl/chunker.py` 产出的 module/component/breadcrumb 结构；wiki 改版先坏的是抽取。⚠️ **不要因为字段覆盖率低就接 LLM 补抽**——57 角色实测：skills/chains/materials 均 100%，weapons 96.5%，其余缺口经逐项辨明**全部源于 wiki 数据源本身缺失**，LLM 抽不出原文没有的信息：① `echoes` 29.8% 是设计使然（38 个角色的声骸被并入 `echo_builds`，总覆盖 55/57）；② 丽贝卡/露西缺 weapons/teammates 因其原文「声骸」0 次、「配队」0 次；③ `attrs` 84.2% 缺的 9 个角色原文**没有「基础资料」段**（对比卡卡罗有 `- 属性：导电`），其中 4 个漂泊者是刻意设计。
 - 检索/切块/重排所有参数集中在 `config.py` Settings（.env 可覆盖，`get_settings()` lru_cache 单例）。
 
