@@ -11,11 +11,14 @@ from dataclasses import asdict
 
 import redis as redis_lib
 from celery import Celery, chain
+from celery.schedules import crontab
 from wuwa_mcp.core.container import get_container
 
 from wuwa_rag.config import ensure_dirs, get_settings
 from wuwa_rag.core.db import close_pool, get_cursor
 from wuwa_rag.knowledge import domain_terms
+from wuwa_rag.knowledge.corpcheck import collect as corpcheck_collect
+from wuwa_rag.knowledge.corpcheck import counts as corpcheck_counts
 from wuwa_rag.knowledge.crawl.chunker import chunk_markdown
 from wuwa_rag.knowledge.crawl.pipeline import _load_chunks as load_chunks_by_char
 from wuwa_rag.knowledge.crawl.pipeline import ingest_one, purge_character
@@ -55,6 +58,20 @@ celery_app = Celery(
     accept_content=["json"],
 )
 celery_app.conf.update(task_track_started=True, result_expires=3600)
+
+# ───────────── 定时任务（要另外起一个 beat 进程才会有） ─────────────
+# ⚠️ worker 本身不会定时跑任何东西：`--pool=solo` 的那个进程只管队列。
+#    要让下面这张表生效，得显式起 beat（**默认不起**，免得悄悄多出第三个进程改动手感）：
+#        uv run celery -A wuwa_rag.tasks.worker:celery_app beat --schedule .runtime/celerybeat-schedule --loglevel=info
+#    为什么值得起：2026-10-24 实测过一次「派生索引被删到只剩 119 块，而五步链、
+#    日志、前端进度点全部报绿」，靠人复测基线才发现。corpcheck 一天跑一次就能第二天早上看见。
+celery_app.conf.beat_schedule = {
+    "corpcheck-daily": {
+        "task": "wuwa_rag.tasks.corpcheck",
+        # 04:20：本地机器大概率空闲；避开整点是因为整点常有别的计划任务
+        "schedule": crontab(hour=4, minute=20),
+    },
+}
 
 
 class CharacterNotFound(Exception):
@@ -540,6 +557,31 @@ async def _delete_character_async(character: str) -> None:
     rows = await load_all_chunks()     # 池刚被关掉，这里会按需重开
     build_sparse(rows)                 # BM25 全量重建，剔除残留块
     await close_pool()
+
+
+# ───────────── 定时：语料对账（只读，不改任何数据） ─────────────
+@celery_app.task(name="wuwa_rag.tasks.corpcheck")
+def corpcheck_task() -> dict:
+    """跑一遍只读对账，把结论写进日志。返回 {fail, warn} 计数。
+
+    定时任务**不许把语料改坏**：这里只调 `corpcheck.collect()`（纯读）。
+    失败也只记日志不抛 —— 抛出去会让 beat 的下一次调度背上"任务失败"的噪音，
+    而对账本身发现不一致就是它的正常工作状态（fail>0 时该由人去看 `wuwa-corpcheck`）。
+    """
+    try:
+        findings = _run(corpcheck_collect())
+        fail_n, warn_n = corpcheck_counts(findings)
+        if fail_n:
+            log.error("定时语料对账：%d 条 fail（请手动跑 uv run wuwa-corpcheck 看明细与补救命令）",
+                      fail_n)
+        elif warn_n:
+            log.warning("定时语料对账：%d 条 warn（不拦路）", warn_n)
+        else:
+            log.info("定时语料对账：PG / jsonl / Chroma / BM25 / Neo4j / raw 六方一致")
+        return {"fail": fail_n, "warn": warn_n}
+    except Exception as exc:  # noqa: BLE001 —— 对账跑不起来不该让 beat 一直重试
+        log.error("定时语料对账执行失败（忽略，下轮再试）：%s: %s", type(exc).__name__, exc)
+        return {"fail": -1, "warn": -1}
 
 
 # ───────────── CLI 入口（可选） ─────────────

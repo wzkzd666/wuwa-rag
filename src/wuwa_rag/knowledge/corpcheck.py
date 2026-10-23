@@ -176,7 +176,7 @@ def _bm25_ids() -> set[str]:
     return set(BM25Index.load().chunk_ids)
 
 
-async def _collect() -> list[Finding]:
+async def collect() -> list[Finding]:
     s = get_settings()
     out: list[Finding] = []
 
@@ -254,9 +254,18 @@ async def _collect() -> list[Finding]:
     return out
 
 
+def counts(findings: list[Finding]) -> tuple[int, int]:
+    """(fail 条数, warn 条数) —— **唯一一份**计数口径。
+
+    CLI 用它决定退出码、定时任务用它决定日志级别；两处各数一遍迟早会不一致
+    （而「warn 算不算 fail」正是这条命令最容易被改坏的地方）。
+    """
+    return (sum(1 for f in findings if f.level == FAIL),
+            sum(1 for f in findings if f.level == WARN))
+
+
 def _report(findings: list[Finding]) -> int:
-    fails = [f for f in findings if f.level == FAIL]
-    warns = [f for f in findings if f.level == WARN]
+    fail_n, warn_n = counts(findings)
     for f in findings:
         mark = "✗" if f.level == FAIL else "!"
         fix = f"   → {f.fix}" if f.fix else ""
@@ -264,10 +273,10 @@ def _report(findings: list[Finding]) -> int:
     if not findings:
         print("✓ 语料与三路索引、图谱、raw 全部一致")
     else:
-        print(f"合计：fail {len(fails)} 条 / warn {len(warns)} 条")
-    return 1 if fails else 0
+        print(f"合计：fail {fail_n} 条 / warn {warn_n} 条")
+    return 1 if fail_n else 0
 
 
 def main() -> None:
-    findings = asyncio.run(_collect(), loop_factory=asyncio.SelectorEventLoop)
+    findings = asyncio.run(collect(), loop_factory=asyncio.SelectorEventLoop)
     raise SystemExit(_report(findings))
