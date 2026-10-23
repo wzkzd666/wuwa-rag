@@ -228,15 +228,19 @@ def main() -> int:
             print("     ·", i)
         results.append(row)
 
+    # 探针账号自己就是那个临时 admin，而端点刻意**不许自删**，所以这里仍走 SQL。
+    # 删的口径与 `DELETE /admin/users/{id}` 保持一致：转录与记忆按 `u{id}:` 前缀删，
+    # 不靠 `sessions` 里还在的那批 session_id（本项目实测过「sessions 行没了、
+    # messages 还在」的孤儿形态）；各表身份列两套口径（用户名 / str(id)）也照端点的注释。
     with psycopg.connect(get_settings().PG_DSN, autocommit=True) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT id FROM users WHERE username=%s", ("evalanswers_probe",))
             uid = cur.fetchone()[0]
-            cur.execute("SELECT session_id FROM sessions WHERE user_id=%s", (uid,))
-            sids = [x[0] for x in cur.fetchall()]
-            cur.execute("DELETE FROM messages WHERE session_id = ANY(%s)", (sids,))
+            like = f"u{uid}:%"
+            cur.execute("DELETE FROM messages WHERE session_id LIKE %s", (like,))
+            cur.execute("DELETE FROM session_summaries WHERE session_id LIKE %s", (like,))
             for tbl in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
-                cur.execute(f"DELETE FROM lg.{tbl} WHERE thread_id = ANY(%s)", (sids,))
+                cur.execute(f"DELETE FROM lg.{tbl} WHERE thread_id LIKE %s", (like,))
             cur.execute("DELETE FROM sessions WHERE user_id=%s", (uid,))
             cur.execute("DELETE FROM auth_tokens WHERE user_id=%s", (uid,))
             cur.execute("DELETE FROM user_facts WHERE user_id=%s", ("evalanswers_probe",))

@@ -89,20 +89,25 @@ def main() -> int:
 
     if "--keep" not in sys.argv:
         # 账号连它名下的数据一起删（含 lg 里的模型侧记忆：只删 sessions 会留下孤儿记忆，
-        # 那正是 `DELETE /admin/users/{id}` 补 `memory_keys()` 一路要防的形态）
+        # 那正是 `DELETE /admin/users/{id}` 补 `memory_keys()` 一路要防的形态）。
+        # 探针自己就是那个临时 admin，端点不许自删，所以这里仍走 SQL；但口径与端点一致：
+        # 转录与记忆按 `u{id}:` **前缀**删（不靠 sessions 里还在的那批行），
+        # 并且要清 `llm_usage` —— 少这一条就专门造孤儿：2026-10-24 清库时那 22 行
+        # 「主人已不存在的用量行」就是这么攒出来的。
         with _conn(autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("SELECT id FROM users WHERE username = %s", (PROBE_USER,))
             uid = cur.fetchone()[0]
-            cur.execute("SELECT session_id FROM sessions WHERE user_id = %s", (uid,))
-            sids = [r[0] for r in cur.fetchall()]        # ⚠️ 同步池返回**元组行**，按位置取
-            cur.execute("DELETE FROM messages WHERE session_id = ANY(%s)", (sids,))
+            like = f"u{uid}:%"
+            cur.execute("DELETE FROM messages WHERE session_id LIKE %s", (like,))
+            cur.execute("DELETE FROM session_summaries WHERE session_id LIKE %s", (like,))
             for tbl in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
-                cur.execute(f"DELETE FROM lg.{tbl} WHERE thread_id = ANY(%s)", (sids,))  # noqa: S608
+                cur.execute(f"DELETE FROM lg.{tbl} WHERE thread_id LIKE %s", (like,))
             cur.execute("DELETE FROM sessions WHERE user_id = %s", (uid,))
             cur.execute("DELETE FROM auth_tokens WHERE user_id = %s", (uid,))
+            cur.execute("DELETE FROM llm_usage WHERE user_id = %s", (str(uid),))
             cur.execute("DELETE FROM user_facts WHERE user_id = %s", (PROBE_USER,))
             cur.execute("DELETE FROM users WHERE id = %s", (uid,))
-        print("探针账号已清理（含模型侧记忆）")
+        print("探针账号已清理（含模型侧记忆与用量行）")
 
     bad = {q: h for q, h in hits_all.items() if h}
     print("结论：无逐字回显，不需要输出侧清洗" if not bad else f"结论：{len(bad)} 问出现回显，需要处理")
