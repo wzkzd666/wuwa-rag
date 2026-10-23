@@ -91,6 +91,7 @@ wuwa-ingest = "wuwa_rag.knowledge.crawl.pipeline:main"
 wuwa-index = "wuwa_rag.knowledge.index.build_index:main"
 wuwa-graph = "wuwa_rag.knowledge.graph.build_graph:main"
 wuwa-ingest-character = "wuwa_rag.tasks.worker:ingest_cli"
+wuwa-corpcheck = "wuwa_rag.knowledge.corpcheck:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }

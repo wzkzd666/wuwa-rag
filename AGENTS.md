@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：454 条，**全量离线**，约 5s
+uv sync --extra dev && uv run pytest    # 单元测试：462 条，**全量离线**，约 5s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -60,6 +60,10 @@ uv run wuwa-ingest                      # chunks.jsonl + raw md -> S3 + PG（doc
 uv run wuwa-index                       # PG -> Chroma 稠密索引 + bm25.pkl 稀疏索引（全量重建）
 uv run wuwa-graph                       # chunks.jsonl -> 规则抽事实 -> Neo4j MERGE
 uv run wuwa-ingest-character 忌炎        # 单角色 5 步链入队（等价于 POST /ingest）
+uv run wuwa-corpcheck                    # 【只读】语料对账：chunks.jsonl / PG / Chroma / BM25 / Neo4j / raw
+                                       #   六方一比，不一致就列出并给补救命令；有 fail 退出码 1（warn 不拦路）。
+                                       #   三次真事故的共同指纹都是「派生索引彼此一致、和真源对不上」，
+                                       #   这条把当时手写的对账固化下来。见「语料对账」一节。
 
 uv run python -m wuwa_rag.dialog.graph    # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                  # lint（line-length=100）
@@ -173,6 +177,36 @@ uv run ruff check src                  # lint（line-length=100）
 怀疑坏了就照上面的命令重生成，不要手改文件；三方对账口径仍是
 「jsonl 行数 == PG chunks 行数 == PG distinct character 覆盖数」。
 
+### 语料对账（`knowledge/corpcheck.py`，2026-10-24 新增）
+
+`uv run wuwa-corpcheck`：**只读**，不写任何数据。一次跑清六方 ——
+`chunks.jsonl` / PG `chunks` / Chroma（点数 + 存的**文本口径**）/ `bm25.pkl` / Neo4j 名册 / `data/raw` 哈希。
+
+为什么要这条命令（三次事故同一个形状：**派生索引看起来没事，真源其实对不上**，而每次排查都是临时手写一遍脚本）：
+
+| 事故 | 当时看得见的 | 看不见的 | 靠什么发现 |
+|---|---|---|---|
+| 2026-09-22 `ON CONFLICT (hash)` | PG=Chroma=BM25=6448，逐角色也对得上 | 124 个跨角色同文本的块被静默丢弃 | `jsonl 6572 ≠ PG 6448` |
+| 2026-10-23 jsonl 0 字节 | 五步链全绿、库里 6741 块完好 | 产物整角色没了（下一次按角色增量重写会只剩一个角色） | `ls data/chunks/` |
+| 2026-10-24 索引文本陈旧 | Chroma 点数 6741、id 全对 | 36 块配队文本存的还是改版前的 `-` 串，与查询侧不同口径 | 本轮临时写的对账脚本（现已固化） |
+
+三条设计判据（改这个模块前先读）：
+
+- **逐角色比，不只看总数**：A 角色多 10 块、B 角色少 10 块时全局计数完全对齐，
+  而 B 的答案永远召不回那 10 块 —— 124 块那起事故就是这个形状。
+- **缺与多分开报**：「库里有、索引没有」是召不回；「索引里有、库已删」是召回旧知识。
+  症状相反，不能合成一句「数量不一致」。
+- **warn 不拦路，fail 才给非 0 退出码**；缺席类问题聚合成**一条**（`data/raw` 整目录不在时
+  逐角色刷 58 行会把真正要看的 fail 埋掉 —— 对账输出是给人一眼读完的）。
+  每条 fail 直接带可抄的补救命令（`uv run wuwa-chunk` / `wuwa-ingest` / `wuwa-index` / `wuwa-graph`）。
+
+判据都是纯函数（吃 dict/set，不碰服务），8 条用例全离线在 `tests/test_corpcheck.py`；
+取数那层（PG/Chroma/BM25/Neo4j/raw）任何一路读不了只记 warn 并跳过，**不让对账工具自己变成故障源**。
+实测：现网跑 `PG=6741 chunks.jsonl=6741 Chroma=6741 BM25=6741 图谱角色=58 raw 文件=58` → ✓ 退出 0；
+把 `CHUNKS_DIR`/`RAW_DIR` 指到空目录 → ✗ 退出 1（1 条 fail + 1 条聚合 warn，不刷屏）。
+
+⚠️ 它**不覆盖 S3/图片**，也不覆盖 `tool_calls`/`llm_usage` 这类运行期表 —— 只管「检索用的语料一致性」。
+
 ### 问答链（`dialog/graph.py`，LangGraph StateGraph）
 
 `intent → {chitchat: chitchat | time: time | clarify: clarify | fact: graph→verify | semantic: vector→verify | hybrid: graph→vector→verify}`
@@ -240,10 +274,10 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 - 公开函数去掉了下划线前缀（`_build_prompt` → `build_prompt`），因为跨模块调用了。
 - `graph.py` 曾长期**再导出** `doc_sources`，只因 `api/app.py` 从 `dialog.graph` 导入它。2026-10-23 引用来源改成「文档面包屑 + 联网溯源」的统一口径 `prompt.all_sources` 后，app.py 改用它，`doc_sources` 那份纯转发随最后一个消费者一起删了——**留着就是无人使用的间接层**。守卫用例同步改钉 `graph.all_sources is prompt.all_sources`（`test_config_and_prompt.py`）。
 - `graph.py` 因此不再需要 `lock_focus` 与 `chunk_text` 之外的部分文本工具导入；改 prompt 逻辑一律去 `prompt.py`，别在 `graph.py` 里加回来（加回去会形成两份实现，本项目对「同一语义两处判据」已有大量踩坑记录）。
-- 架构守卫（`scripts/check_layers.py`）当前报 **56 模块 / 166 条依赖边 / 0 违规 / 0 环**，其中已包含 `dialog.prompt`（4 条出边：`config` `dialog.state` `text` `ww_logger`）与 `api.ratelimit`（2 条：`config` `ww_logger`），方向均合规。
-  - 📌 2026-10-06 清掉了 5 个 2026-09-30 重构遗留的空壳包（`rag/` `graph/` `ingest/` `retrieval/` `storage/`，只含 `__init__.py`、贡献 0 条依赖边、全项目零引用），模块计数由虚增的 54 回落到真实的 **49**（边数 132 不变）。删除走的是**回收站**（可恢复）。此后随新模块增加，2026-10-07 为 **56 模块 / 164 边**，2026-10-23 复核 **56 模块 / 165 边**；同日 `/music/status` 的失败路径补日志，新增一条 `api.music → ww_logger` 出边 → **166 边**。
+- 架构守卫（`scripts/check_layers.py`）当前报 **57 模块 / 173 条依赖边 / 42 个有出边的模块 / 0 违规 / 0 环**，其中已包含 `dialog.prompt`（4 条出边：`config` `dialog.state` `text` `ww_logger`）与 `api.ratelimit`（2 条：`config` `ww_logger`），方向均合规。
+  - 📌 2026-10-06 清掉了 5 个 2026-09-30 重构遗留的空壳包（`rag/` `graph/` `ingest/` `retrieval/` `storage/`，只含 `__init__.py`、贡献 0 条依赖边、全项目零引用），模块计数由虚增的 54 回落到真实的 **49**（边数 132 不变）。删除走的是**回收站**（可恢复）。此后随新模块增加，2026-10-07 为 **56 模块 / 164 边**，2026-10-23 复核 **56 模块 / 165 边**；同日 `/music/status` 的失败路径补日志，新增一条 `api.music → ww_logger` 出边 → **166 边**；同日反馈帽同源与 thread_id 判据收口 → **168 边**；2026-10-24 新增 `knowledge/corpcheck.py`（语料对账 CLI，见「语料对账」一节）→ **57 模块 / 173 边**（它的 5 条出边：`config` `core.db` `text` 是 L2→L0，`knowledge.index.bm25` `knowledge.graph.neo4j_client` 是同层，方向合规、无环）。
     - ⚠️ 最大的误删风险点：`wuwa_rag/graph`（空壳，已删）与 `wuwa_rag/knowledge/graph`（活跃包，含 `extract.py` / `neo4j_client.py` / `build_graph.py`）**同名不同物**。清理后已逐个核验 9 个活跃包完好。
-    - 核验方式（可复用，零外部依赖）：守卫模块数应等于**分层小计之和**；`pkgutil.walk_packages` 扫描到的模块数应与守卫一致；被删的旧包名 `importlib.import_module` 应抛 `ModuleNotFoundError`；全部 py 文件 `py_compile` 通过。（2026-10-07 复核：**56 模块 = `3+10+17+2+8+9+7`，164 条依赖边，0 违规 0 环**。）
+    - 核验方式（可复用，零外部依赖）：守卫模块数应等于**分层小计之和**；`pkgutil.walk_packages` 扫描到的模块数应与守卫一致；被删的旧包名 `importlib.import_module` 应抛 `ModuleNotFoundError`；全部 py 文件 `py_compile` 通过。（2026-10-24 复核：**57 模块 = `3+10+18+2+8+9+7`，173 条依赖边，0 违规 0 环**。）
   - ⚠️ 守卫的模块数会把**只含 `__init__.py` 的空包**也计入。将来若见「模块数 > 分层小计之和」，先查是否又留下了空壳目录。
 
 ### ⚠️ 提示词铁律：只写正面要求（negative-example contamination）
@@ -1095,9 +1129,9 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **454 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **462 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
-十四个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
+十五个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
 | 文件 | 守什么 |
 |---|---|
@@ -1114,9 +1148,10 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_text.py` | **`text.py` 全部清洗规则的实测基线**：图标残渣 5 正 8 负、`fix_percent_units` 六条红线（`27%5%`/`1%.20%`/术语前瞻/量纲）、`[n]` 剥离与 COST 还原、AnswerFilter 流式（含「短答案整段重复」回归）、`lock_focus`、dedup 只丢整行相同、**两条输出口都只过 `_clean_answer`**（源码判据，防再出现「④ 补了 ①②③ 漏」） |
 | `test_guard.py` | 防复读闸：整句重复三次必中/两次放行、周期块循环（计数后缀形态）从最早块截断、退化块后跟正常内容也能算出切点、材料表/技能 13 行/短碎句负样本不命中、流式逐 token 触发 |
 | `test_team_prune.py` | 名册归一五类形态（漂泊者补男属性/剥括号/剥位置词/前缀最长匹配/纯槽位→None）+「绝不猜着切」红线；`_covers` 逐位不摊平、等价对互 True、占位串判定、镜像指纹 |
+| `test_corpcheck.py` | **语料对账的八条判据**：总数相同但逐角色不同要报、缺/多两个方向分开报、稠密索引**文本口径**不一致要报（只比 id 抓不到那 36 块）、raw 哈希漂移 fail 而缺席只 warn（聚合一条，不刷屏）、图谱名册缺角色 fail / 多垃圾名 warn、退出码只看 fail（warn 不拦路）、fail 必须自带可抄的补救命令 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → **454 条 / 5.09s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → **462 条 / 5.6s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 ✅ **2026-10-24 这条约定真的变成机器门禁了**（`.github/workflows/ci.yml`，学自 uv/vite 项目的通行写法）：
 `backend`（`uv sync --frozen --extra dev` → ruff → `scripts/check_layers.py` → pytest）+
@@ -1134,13 +1169,22 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 `eval_retrieval.py` 刻意不进 CI：它要真实 Chroma/BM25 与 reranker 权重，且文件名不以 `test_` 开头，
 pytest 收不到（缺索引时不会假失败）。
 
+❌ **顺手记一条「调研说有、实测证伪」**（免得下一个人再照着改一遍）：本轮子智能体报告称
+`test_offline_gate.py`（守卫的守卫）里「断言在被污染的环境条件下恒成立 = 又一类结构假绿」。
+直接做变异测试复核：把 `_block_external_network` 的 **connect 分支**改成空转 →
+`test_非回环连接必须被拦` 恰好红；再把 **getaddrinfo 分支**改成直落真解析 →
+`test_非回环DNS解析必须被拦` 恰好红。两条分支各自都能红，**结论不成立**，那条不改。
+（同一份报告里另有两条也不成立：`tools/qqmusic_mcp` 与 `TtsSection.tsx` 的路径写错了目录、
+「MusicBar 的 setSt 缺 alive 保护」在 React 18 下无害 —— 记这个是为了重申老规矩：
+**子智能体的每一条都要先读代码再动手**。）
+
 三条写用例时必须遵守的经验（都是实际踩过的）：
 
 - ⚠️ **断言要验 `characters`，不能只验 `intent`**。单字名 bug 期间 `intent_node('心的声骸怎么配')` 返回 `intent='hybrid'`、`chars=[]`——只看 intent 全绿，功能其实已废（空 chars 反而**更容易**满足「未指名」判据，intent 照样合理）。所以每条路由用例都双断言。
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 454 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 462 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：

@@ -19,7 +19,7 @@
      （`core`、`knowledge.graph` …）都算一个模块，不是「纯 .py 文件数」；
    · `build_graph()` 只有 **41** 个键：它用 defaultdict，**只收录有出边的模块**，
      没有任何内部依赖的叶子模块不会出现在键里；
-   · 依赖边 **165** 条、违规 **0**、环 **0**。
+   · 依赖边 **173** 条、违规 **0**、环 **0**。
 2026-09-30 重构遗留的 5 个空包（rag/graph/ingest/retrieval/storage）已于
 2026-10-06 清理；在此之前它们让模块计数虚增 5（55 vs 50）。
 同日新增 `knowledge/domain_terms.py`（单字角色名消歧用的领域词表派生），
@@ -39,14 +39,18 @@ _GUARD = _ROOT / "scripts" / "check_layers.py"
 
 # 实测基线（2026-10-06）。这些数字会随正常开发变化——
 # 变化时应当**读懂为什么变了**再更新，而不是为了让测试变绿而随手改数。
-EXPECTED_MODULES = 56
+EXPECTED_MODULES = 57
 # 165 → 166（2026-10-23）：`api/music.py` 的 /music/status 失败路径补了日志，
 # 新增一条 api → ww_logger 出边（方向合规，叶子模块 ww_logger 无环）。
 # 166 → 168（同日）：反馈的 thread_id 判据收进 `core/conversations.THREAD_ID_RE`，
 # 于是 `core.feedback` 与 `api.usage` 各多一条 → conversations 的出边（同层内引用，方向合规）。
-EXPECTED_EDGES = 168
-EXPECTED_GRAPH_KEYS = 41
-EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 17, 3: 2, 4: 8, 5: 9, 6: 7}
+# 168 → 173（2026-10-24）：新增 `knowledge.corpcheck`（语料对账 CLI，把三次真实事故
+# 的「三方对账」口径固化成一条命令）。它出边 5 条：config / core.db / text（L2→L0）、
+# knowledge.index.bm25 与 knowledge.graph.neo4j_client（L2→L2 同层），方向全部合规、无环。
+EXPECTED_EDGES = 173
+# 41 → 42（同日）：`knowledge.corpcheck` 是有出边的模块，「有出边的模块数」随之 +1。
+EXPECTED_GRAPH_KEYS = 42
+EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 18, 3: 2, 4: 8, 5: 9, 6: 7}
 
 # 2026-09-30 重构后遗留、2026-10-06 清理掉的空壳包（**无前缀**键名，见模块 docstring ①）。
 REMOVED_EMPTY_PACKAGES = ("rag", "graph", "ingest", "retrieval", "storage")
