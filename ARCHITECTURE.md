@@ -13,10 +13,10 @@
 graph BT
     L0["L0 基础<br/>config · ww_logger · text"]
     L1["L1 内核 core<br/>security · db · authdb · conversations · llm · llmstore"]
-    L2["L2 知识 knowledge<br/>crawl · graph · index · retrieve · entities · s3"]
+    L2["L2 知识 knowledge<br/>crawl · graph · index · retrieve · entities · s3 · corpcheck"]
     L3["L3 任务 tasks<br/>worker"]
     L4["L4 服务 services<br/>persona · emotion · tts · verify · websearch · profile · music"]
-    L5["L5 对话 dialog<br/>graph · prompt · state · nlu · tools · agent · guard · memory"]
+    L5["L5 对话 dialog<br/>graph · prompt · state · nlu · tools · agent · guard · memory · quality"]
     L6["L6 接口 api<br/>app · auth · ratelimit · usage · music · server"]
 
     L1 --> L0
@@ -76,6 +76,9 @@ uv run python scripts/check_layers.py --dot    # 额外输出 Graphviz DOT
 > 清理后已核验：9 个活跃包完好（含与旧 `wuwa_rag/graph` **同名但不同物**的
 > `knowledge/graph`）、49 个模块全部可导入、5 个旧包名确认不可再导入、
 > 42 个 py 文件语法编译通过。
+> 📌 那两个数是**当时**的快照，不是现在的规模：随模块增加，2026-10-24 实测为
+> **58 模块 / 182 条依赖边 / 0 违规 / 0 环**（`uv run python scripts/check_layers.py` 现算；
+> 基线由 `tests/test_architecture_layers.py` 钉住，改了不改基线就红）。
 >
 > ⚠️ 脚本的模块数会把**只含 `__init__.py` 的空包**也计入，所以将来若再看到
 > 「模块数 > 分层小计之和」，先查是不是又留下了空壳目录。
@@ -118,6 +121,9 @@ knowledge/
 │                 + **角色名提及判定的唯一实现** `find_mentions`（单字名走分词、多字名走正则；
 │                   nlu / entities / graph 三处共用，别再各写一套）
 ├── retrieve.py   混合召回：dense(30) + sparse(30) → RRF(k=60) → rerank → top6
+│                 + `recall_stages` / `debug_recall`（调试出口与主链**共用同一份实现**，
+│                   看到的分数就是问答现场的分数）
+├── corpcheck.py  【只读】六方对账 CLI `wuwa-corpcheck`：jsonl / PG / Chroma / BM25 / Neo4j / raw
 └── s3.py         RustFS/S3 抽象层（换后端只改这一层）
 ```
 
@@ -164,9 +170,9 @@ LangGraph 编排层，也是全项目最厚的一层。
 
 | 模块 | 内容 |
 |---|---|
-| `app.py` | 全部路由：`/ask` `/ask/stream`(SSE) `/ingest` `/ingest/status` `/llm/*` `/tts` `/profile` `/admin/users` … |
+| `app.py` | 全部路由：`/ask` `/ask/stream`(SSE) `/ingest` `/ingest/status` `/ingest/control` `/llm/*` `/tts` `/profile` `/conversations*` `/admin/users`（含 `DELETE`，删账号并回收其名下全部数据） `/debug/retrieval`（管理员，召回中间量） … |
 | `auth.py` | 注册/登录/token 校验、`get_current_user` / `require_admin` 依赖 |
-| `ratelimit.py` | 限流（slowapi）：`limit_auth` / `limit_ask` / `limit_tts` / `limit_outbound` / `limit_ingest` / `limit_creds` 六档（后两档必须 `shared_limit`：同一能力的多个入口共用一个计数器） + `install(app)` |
+| `ratelimit.py` | 限流（slowapi）：`limit_auth` / `limit_ask` / `limit_tts` / `limit_outbound` / `limit_ingest` / `limit_creds` / `limit_debug` 七档（`ask`·`ingest`·`creds` 三档必须 `shared_limit`：同一能力的多个入口共用一个计数器，分开数等于换个端点配额翻倍；`creds` 的**数值跟着 `RATE_LIMIT_AUTH`**、只有 `auth` 一个变量） + `install(app)` |
 | `usage.py` | token 用量汇总（`/usage/summary`）：管理员看全员、普通用户强制只看自己（越权在后端拦） |
 | `music.py` | 播放状态与控制（`/music/status` `/music/control` `/music/setting`）—— 前端顶栏播放条的数据来源 |
 | `server.py` | uvicorn 启动入口（**唯一**需要 `SelectorEventLoop` 的 async 入口之一） |
