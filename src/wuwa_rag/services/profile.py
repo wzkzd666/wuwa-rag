@@ -27,6 +27,7 @@ import json
 import re
 
 from wuwa_rag.core.authdb import get_pool
+from wuwa_rag.core.conversations import _like_pattern as conv_like
 from wuwa_rag.core.llm import get_tool_llm
 from wuwa_rag.knowledge.entities import CHARACTER_ALIASES, current_names
 from wuwa_rag.ww_logger import get_logger
@@ -237,7 +238,78 @@ def _fact_category(fact: str) -> str | None:
     return "nickname"
 
 
-async def save_facts(user_id: str, session_id: str, facts: list[str]) -> int:
+# 否定式自述：「我不主玩今汐了」「不喜欢维里奈」「没在用散华」。
+# 这类话**不是**一条新的可覆盖事实，而是要把旧事实撤掉。不处理就会出现
+# 「用户都说不喜欢 X 了，档案里还挂着『主玩 X』并继续注入 prompt」——
+# 同类覆盖只对 nickname/level 生效（这两类同一时刻只有一个值），
+# 而「主玩角色/常用配队」刻意不覆盖（一个人可以有多个本命），所以否定语义必须单独走。
+# ⚠️ 刻意**不含**「换成/改成」：那后面跟的是**新的**对象（「主玩换成长离了」里的
+# 长离是要留下的那个），拿它去反查删除正好删错。旧值没被说出来，安全做法是不删。
+# 「没在练」「不再玩」「不太喜欢」都要认：中间那层副词/介词是可选的，
+# 但**枚举**着写，不给 `.*`（给了就会把「不谋而合地选了同一支队伍」判成否定句，
+# 实测这类误判会静默删掉用户的真实事实 —— 撤销比不撤销危险）。
+_RE_NEGATION = re.compile(
+    r"(?:不|别|没|无)(?:再|太|怎么|那么|在|想|愿意)?(?:喜欢|爱|主玩|玩|用|练|抽|做|打)")
+# 对象词后面常挂的语气/时态字，剥掉才能拿去 LIKE 匹配（「今汐了」匹配不到「今汐」吗？
+# 能——但反过来会把「了」带进别句；剥干净更稳，也方便日志读出「撤的是什么」）。
+_OBJ_TAIL_CHARS = "了呀呢吧啊的过啦哦噢嗯.。,，、!！~～ \t"
+
+
+def negated_objects(text: str) -> list[str]:
+    """一句话里**所有**被否定掉的对象词（「不喜欢今汐，也不想练散华」→ 两个）。"""
+    out: list[str] = []
+    for m in _RE_NEGATION.finditer(text or ""):
+        obj = _object_after(m.end(), text)
+        if obj and obj not in out:
+            out.append(obj)
+    return out
+
+
+def _object_after(pos: int, text: str) -> str:
+    """从否定动词之后截出对象词；截不出来返回 ''。
+
+    只做字符级切分，不碰名册也不叫模型：无论输入是用户原话还是抽取出来的一句短陈述
+    （「用户说不喜欢今汐了」），否定动词后面那一段就是对象。
+    宁可返回 ''（什么都不撤），也不要去猜 —— 猜错就是静默删掉用户真实信息
+    （本模块的第一条老规矩：宁可不分类/不覆盖，不可错覆盖）。
+    """
+    tail = (text or "")[pos:].strip()
+    if not tail:
+        return ""
+    # ⚠️ 先切标点、后剥语气字：顺序反了会把「今汐了」整个当对象（实测 LIKE 撤不掉，
+    # 因为档案里那条写的是「主玩今汐」）。切开之后才看得清真正的名字。
+    obj = re.split(r"[，。！？、；;\s]", tail)[0].strip(_OBJ_TAIL_CHARS)[:8]
+    # 下限 2 字是刻意的：单字名（椿/心）走 LIKE 会连带命中「鉴心」「开心」这类，
+    # 撤错比不撤危险。宁可不撤销（多留一条旧事实，无害），也不误撤（静默丢信息）。
+    return obj if len(obj) >= 2 else ""
+
+
+def negated_object(fact: str) -> str:
+    """单句版本：取被否定的那一个对象词（多个对象时只看第一个）。"""
+    got = negated_objects(fact)
+    return got[0] if got else ""
+
+
+async def _retract_matching(conn, user_id: str, obj: str, fact: str) -> int:
+    """软删该用户「提到 `obj` 且不是否定式」的活跃事实，返回条数。
+
+    读出来在 Python 里判否定式，而不是在 SQL 里写 `NOT LIKE '%不%'`：
+    后者是第二套否定判据，与 `_RE_NEGATION` 迟早漂移（会把「不谋而合」这类误判）。
+    """
+    cur = await conn.execute(
+        "SELECT id, fact FROM user_facts WHERE user_id = %s AND valid_to IS NULL AND fact LIKE %s",
+        (user_id, conv_like(obj)),
+    )
+    rows = await cur.fetchall()
+    doomed = [r["id"] for r in rows if r["fact"] != fact and not _RE_NEGATION.search(r["fact"])]
+    if doomed:
+        await conn.execute("UPDATE user_facts SET valid_to = now() WHERE id = ANY(%s)", (doomed,))
+        log.info("画像否定撤销 user=%s 对象=%s 软删 %d 条", user_id, obj, len(doomed))
+    return len(doomed)
+
+
+async def save_facts(user_id: str, session_id: str, facts: list[str],
+                     utterance: str = "") -> int:
     """去重入库，**同类覆盖**。返回实际新增条数。
 
     三道处理，顺序不可换：
@@ -246,20 +318,48 @@ async def save_facts(user_id: str, session_id: str, facts: list[str]) -> int:
       ② 同类覆盖：`category` 非空时，先把该用户同 category 的活跃事实软删
          （`valid_to=now()`）—— 这就是「可更新」；`category` 为 None 则跳过本步，
          行为与旧版一致（叠加）；
+      ②b 否定撤销：句子是否定式（「不喜欢今汐了」）时，把**提到同一对象**的
+         肯定式活跃事实软删（`negated_object` / `_retract_matching`）。
+         为什么②不够：nickname/level 同一时刻只有一个值，覆盖天然正确；
+         而「主玩角色/常用配队」刻意不参与覆盖（一个人可以有多个本命），
+         于是「我不主玩 X 了」以前**什么都不会发生**，档案里那条继续注入；
       ③ 插入新事实。
+
+    参数 `utterance` = **用户这一轮的原话**。撤销必须以它为主：实测抽取器对否定句
+    三种表现都有（`我不喜欢今汐了，之前说主玩今汐` → 只回正面的「主玩今汐」、
+    `我没在用莫宁，换成琳奈了` → 只回「使用角色琳奈」、`我最近不主玩维里奈了` →
+    正确回否定句）。只看抽取结果就等于**六成场景撤不掉**。有了原话，
+    正面那条也会被顺手拦下（下面 skipped 那段），不必去改抽取提示词 ——
+    试过加「撤回也要成为一条」的规则，实测反而把否定抽取整批压成空数组（4/6 变 0），
+    已回退；这条经验记在 AGENTS「画像」一节，别用同样的措辞再试一遍。
     """
-    if not facts:
+    # 光「facts 为空」不足以提前返回：抽取器实测会把整句否定丢成空数组，
+    # 而这时用户原话里的「不喜欢 X」仍然要求撤掉旧事实。
+    if not facts and not negated_objects(utterance):
         return 0
     pool = await get_pool()
     added = 0
     replaced = 0
+    retracted = 0
+    skipped = 0   # 抽取器回成正面、被原话里的否定拦下的条数
     async with pool.connection() as conn:
+        # 先按**用户原话**里的否定对象撤旧：抽取器可能已经把否定丢掉了（见 docstring），
+        # 这时只有原话还留着「不喜欢今汐」这个信号。
+        objs = negated_objects(utterance)
+        for o in objs:
+            retracted += await _retract_matching(conn, user_id, o, "")
         for fact in facts:
             cur = await conn.execute(
                 "SELECT 1 FROM user_facts WHERE user_id = %s AND fact = %s AND valid_to IS NULL",
                 (user_id, fact),
             )
             if await cur.fetchone() is not None:
+                continue
+            if objs and not _RE_NEGATION.search(fact) and any(o in fact for o in objs):
+                # 这句已经把 X 撤掉了，抽取器却还回一条正面的「主玩 X」——正面那条不许入库
+                skipped += 1
+                log.info("画像否定撤销 user=%s 丢弃正面事实 %r（对象 %s 已被否定）",
+                         user_id, fact, "、".join(objs))
                 continue
             cat = _fact_category(fact)
             if cat:
@@ -272,6 +372,13 @@ async def save_facts(user_id: str, session_id: str, facts: list[str]) -> int:
                     replaced += cur.rowcount
                     log.info("画像同类覆盖 user=%s category=%s 软删旧事实 %d 条",
                              user_id, cat, cur.rowcount)
+            # ②b 否定撤销：「不喜欢今汐了」要把「主玩今汐」那条撤掉。
+            # 放在插入**之前**：新事实自己也在待插入队列里，先删干净再插，
+            # 否则同一句话刚插进去就被自己的对象匹配删掉（否定式那条要留着——
+            # 「用户不喜欢 X」本身就是有用的口吻线索）。
+            obj = negated_object(fact)
+            if obj:
+                retracted += await _retract_matching(conn, user_id, obj, fact)
             await conn.execute(
                 "INSERT INTO user_facts (user_id, session_id, fact, category, confidence, source)"
                 " VALUES (%s, %s, %s, %s, %s, 'chat')",
@@ -279,8 +386,10 @@ async def save_facts(user_id: str, session_id: str, facts: list[str]) -> int:
             )
             added += 1
     if added:
-        log.info("画像入库 user=%s 新增 %d 条%s", user_id, added,
-                 f"（覆盖旧 {replaced} 条）" if replaced else "")
+        log.info("画像入库 user=%s 新增 %d 条%s%s%s", user_id, added,
+                 f"（覆盖旧 {replaced} 条）" if replaced else "",
+                 f"（否定撤销 {retracted} 条）" if retracted else "",
+                 f"（拦下正面事实 {skipped} 条）" if skipped else "")
     return added
 
 

@@ -55,7 +55,9 @@ EXPECTED_MODULES = 58
 # 177 → 180（同日）：新增 `dialog.quality`（答案级质量闸门）——它出边 3 条：
 # `services.emotion`（L5→L4）、`text`（L5→L0）、`dialog.graph`（同层，只为拿 `_TEAM_FOLLOWUP`
 # 那一份常量，刻意在函数内 import 避开模块级环），方向合规、无环。
-EXPECTED_EDGES = 180
+# 180 → 181（同日）：画像的否定撤销要走「用户原话」这条判据，`services.profile`
+# 复用 `core.conversations._like_pattern` 转义 LIKE 元字符（不另写一份转义，方向 L4→L1）。
+EXPECTED_EDGES = 181
 # 41 → 42（同日）：`knowledge.corpcheck` 是有出边的模块，「有出边的模块数」随之 +1。
 # 42 → 43：`dialog.quality` 同样有出边。
 EXPECTED_GRAPH_KEYS = 43

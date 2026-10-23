@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：477 条，**全量离线**，约 5s
+uv sync --extra dev && uv run pytest    # 单元测试：500 条，**全量离线**，约 5s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -342,7 +342,7 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 
 ### 答案级质量闸门（`dialog/quality.py` + `tests/eval_answers.py`，2026-10-24）
 
-测试分三层，此前只有前两层：**判据层**（477 条离线单测，规则对不对）、
+测试分三层，此前只有前两层：**判据层**（500 条离线单测，规则对不对）、
 **检索效果层**（`eval_retrieval.py`，召不召得回），而**答案本身坏掉**的一类
 （角标漏剥、百分比丢单位、列表重复、追问缺失、第三人称搬运）只能等用户撞上后再记进本文件。
 `dialog.quality.check_answer` 把这些已知形态钉成确定性规则（零 LLM），
@@ -861,6 +861,25 @@ _stream_answer_inner():
 - 分类用**规则**而非让抽取模型多输出字段：`_EXTRACT_SYSTEM` 的措辞是多轮实测换来的（见其注释），动它要连解析链路一起重验。
 - **老库迁移**：`ALTER TABLE user_facts ADD COLUMN IF NOT EXISTS category TEXT`（`authdb._DDL` 与 `pgsql/001_init.sql` 两处都有，前者才是运行时建表入口）。历史事实 `category=NULL` → 不参与覆盖；需要的话用 `_fact_category` 回填一次，否则用户改昵称时旧的那条仍留着。
 - 实测（同一探针用户连说 7 句）：3 个昵称 + 2 个水平 → 收敛为「阿星」+「老玩家」各 1 条；2 个主玩角色（守岸人/今汐）**都保留**；注入串 `用户是老玩家；用户自称是阿星；主玩角色：今汐；主玩守岸人`。
+- **否定撤销（2026-10-24 补，`negated_objects` / `_retract_matching`）**：「我不喜欢今汐了」
+  不是「多一条事实」，而是**要把旧的那条撤掉**。同类覆盖只管 nickname/level（同一时刻只有一个值），
+  「主玩角色/常用配队」刻意不参与覆盖，所以以前的行为是「用户都说不喜欢了，档案里还挂着
+  『主玩今汐』并继续注入 prompt」。
+  - ⚠️ 判据取在**用户原话**上，不取在抽取结果上。实测同一类意思有三种抽取输出
+    （「我最近不主玩维里奈了」→正确回否定句；「我不喜欢今汐了，之前说主玩今汐」→只回正面的
+    `主玩今汐`；「现在不喜欢了，改玩长离」→回空数组）。只看 facts 就六成场景撤不动。
+    `save_facts(..., utterance=原话)` 因此同时做两件事：按原话里的对象软删肯定式旧事实，
+    并**拦下**本轮刚抽回来的那条正面事实（不然前脚撤完后脚写回去）；
+    `if not facts: return 0` 也随之改成「没有新事实、但有否定对象」时照样放行。
+  - 试过给 `_EXTRACT_SYSTEM` 加一条「撤回也要成为一条」——实测**把否定抽取整批压成空数组**
+    （原来 6 个句式里 3 个能出否定句，改完 0 个），已回退。这段 prompt 的措辞是几次实测换来的
+    （见它上面的注释：给类别清单/具名示例会诱导模型编造），别再往「让它输出否定」这个方向试。
+  - 对象词**下限 2 字**是刻意的（单字名椿/心走 LIKE 会连累「鉴心」「开心」）；
+    **宾语提前**的句式撤不动（「…现在不喜欢了」后面没有宾语，对象在前半句甚至上一轮）——
+    取不到对象就什么都不撤，猜一个去删等于静默丢用户事实。这条边界单独写成了用例。
+  - 端到端实测（真 API + 真 qwen3:8b 抽取，非推断）：「我是小满，主玩今汐」→
+    `['用户主玩今汐','用户叫小满']`；再说「我不喜欢今汐了，改玩长离」→
+    `['不喜欢今汐','改玩长离','用户叫小满']` —— 正面那条已软删，否定本身留着当口吻线索。
 
 **⚠️ 画像注入覆盖两个分支（2026-10-06 修的缺口）**：`user_context` 原先**只在 `generate_node` → `prompt.build_prompt` 注入**，而闲聊走 `_chat_turn`（`chitchat_node` / `time_node` 共用）**完全拿不到画像**——于是「我是颗粒」的昵称确实入了库，但下一句「你好呀」走闲聊时模型一无所知，表现为「记住了却用不上」。现在 `_chat_turn` 也注入（`_PROFILE_HINT`）。
 
@@ -1256,7 +1275,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **477 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **500 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
 十六个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
@@ -1264,7 +1283,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 |---|---|
 | `test_entity_names.py` | 角色名提及判定：单字名正样本 12 条 + 常用词负样本 10 条 |
 | `test_intent_routing.py` | 意图分流（双断言 intent+chars）、`is_self_intro` 30 条、`is_identity` 边界 |
-| `test_profile_facts.py` | 画像 `_fact_category` 22 条、注入串拼接与 `MAX_FACTS_IN_PROMPT` 截断 |
+| `test_profile_facts.py` | 画像 `_fact_category` 22 条、注入串拼接与 `MAX_FACTS_IN_PROMPT` 截断、**否定撤销 35 条**（正样本取对象、肯定式/成语/「换成X」不许触发、一句多对象、单测撤销只删肯定式、LIKE 元字符转义、空 facts 也放行、宾语提前是**已知边界**） |
 | `test_ratelimit_cors.py` | 限流各档、豁免、429 头、CORS 顺序、真实 app 接线完整性（含 **`ask`/`ingest`/`creds` 三组必须各自共用一个计数器** —— 分开计就等于换个端点把配额翻倍） |
 | `test_architecture_layers.py` | 分层方向、循环依赖、计数基线、空包清理与同名子包未误删 |
 | `test_config_and_prompt.py` | config 默认值口径、prompt 拆分后 `all_sources` 再导出与提示词构建、**联网溯源去重与失败原因**（含 `web_*` 三字段每轮清零）、**端口四处对账**（compose 宿主机侧只准引用 `${VAR}`；`.env` 的 `*_PORT` == `config.py` 默认；`ports.ps1` 与 `vite.config.ts` 的兜底值必须等于代码默认；一律不许退回常用端口或落进 Windows 动态区 49152+）、**SSE `done` 事件与落库 meta 同键**（`_done_event` 是唯一构造器，加键忘了进 `_meta_of` 就红）、**日志大类名单与 `get_logger` 调用点双向一致** |
@@ -1279,7 +1298,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_answer_quality.py` | **答案级闸门 8 条**：干净答案一条不报（负样本）、空答案、`[n]` 残留、百分比裸数值、重复列表行、昵称引号（**没给昵称不许猜**）、情绪标签泄漏（曾写成查键 → 恒不报）、配队追问的三态 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → 465 条 / 5.7s；第十一轮（一格两支队伍：`split_teams` 收进 entities 供抽取/读取两侧共用 + `wuwa-graph` 改为先清出边再写）再补 1 条 → 466 条 / 5.21s；第十二轮（精排异常判空 + 召回调试出口共用同一份实现）再补 3 条 → **469 条 / 5.0s**；第十三轮（答案级质量闸门 + 判分层的三层假绿自检）再补 8 条 → **477 条**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → 465 条 / 5.7s；第十一轮（一格两支队伍：`split_teams` 收进 entities 供抽取/读取两侧共用 + `wuwa-graph` 改为先清出边再写）再补 1 条 → 466 条 / 5.21s；第十二轮（精排异常判空 + 召回调试出口共用同一份实现）再补 3 条 → **469 条 / 5.0s**；第十三轮（答案级质量闸门 + 判分层的三层假绿自检）再补 8 条 → 477 条；第十四轮（画像否定撤销，判据取在用户原话上）再补 23 条 → **500 条 / 5.28s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 ✅ **2026-10-24 这条约定真的变成机器门禁了**（`.github/workflows/ci.yml`，学自 uv/vite 项目的通行写法）：
 `backend`（`uv sync --frozen --extra dev` → ruff → `scripts/check_layers.py` → pytest）+
@@ -1312,7 +1331,7 @@ pytest 收不到（缺索引时不会假失败）。
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 477 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 500 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：

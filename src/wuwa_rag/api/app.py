@@ -434,8 +434,10 @@ def _spawn_profile_task(username: str, session_id: str, question: str) -> None:
     async def job():
         try:
             facts = await extract_facts_safe(question)
-            if facts:
-                await save_facts(username, session_id, facts)
+            # 用户原话一起传下去：画像的**否定撤销**以原话为准（抽取器实测会把
+            # 「不喜欢今汐」丢成正面的「主玩今汐」，甚至丢成空数组 —— 只看 facts 撤不掉）。
+            # 所以这里不再用 `if facts:` 拦：没有新事实也可能有要撤的旧事实。
+            await save_facts(username, session_id, facts, utterance=question)
         except Exception:  # noqa: BLE001 —— fire-and-forget 后台任务，异常只记日志不外抛
             log.exception("画像任务异常（忽略）")
 

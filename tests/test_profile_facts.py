@@ -25,7 +25,14 @@ from __future__ import annotations
 
 import pytest
 
-from wuwa_rag.services.profile import MAX_FACTS_IN_PROMPT, _fact_category, facts_to_context
+from wuwa_rag.services.profile import (
+    MAX_FACTS_IN_PROMPT,
+    _fact_category,
+    _retract_matching,
+    facts_to_context,
+    negated_object,
+    negated_objects,
+)
 
 # (事实文本, 期望 category)。期望值取自 2026-10-06 实测输出，非推测。
 NICKNAME_FACTS = [
@@ -125,3 +132,147 @@ def test_从注入串取昵称() -> None:
 def test_取昵称只认子句开头的标记(ctx: str, nick: list[str]) -> None:
     from wuwa_rag.services.profile import nicknames_from_context
     assert nicknames_from_context(ctx) == nick, ctx
+
+
+# ---------- 否定撤销（「我不主玩今汐了」要把「主玩今汐」撤掉） ----------
+
+
+@pytest.mark.parametrize("fact", [
+    "用户说不喜欢今汐了",
+    "用户说不主玩维里奈了",
+    "用户说没在练散华",
+    "用户不再用守岸人了",
+])
+def test_否定式能取出对象(fact: str) -> None:
+    assert negated_object(fact)
+
+
+@pytest.mark.parametrize("fact,expect", [
+    ("用户说不喜欢今汐了", "今汐"),
+    ("用户说不主玩维里奈了", "维里奈"),
+    ("用户说没在练散华，还是长离顺手", "散华"),
+])
+def test_否定式取到的对象就是那一个名字(fact: str, expect: str) -> None:
+    """对象词取错 = 撤错事实，比不撤更糟，所以按名字逐条钉。"""
+    assert negated_object(fact) == expect
+
+
+@pytest.mark.parametrize("fact", [
+    "用户主玩今汐",                    # 肯定式：什么都不许撤
+    "用户喜欢今汐",
+    "用户说今汐很可爱",
+    "用户主玩角色换成长离了",           # 「换成X」里的 X 是**要留下**的那个
+    "用户和长离一起玩了三年",           # 「不」字不在动词前，不该命中
+    "用户不谋而合地选了同一支队伍",      # 成语里的「不」不是否定
+    "用户说不太喜欢椿",                 # 单字名刻意不撤：LIKE %椿% 会连累别的句子
+    "",
+    "用户",
+])
+def test_这些句子不许触发撤销(fact: str) -> None:
+    assert negated_object(fact) == ""
+
+
+class _Cur:
+    def __init__(self, rows):
+        self._rows = rows
+        self.rowcount = len(rows)
+
+    async def fetchall(self):
+        return self._rows
+
+
+class _Conn:
+    """假 conn：记录 execute 调用。authdb 的池是 dict_row，所以这里也按 dict 行返回。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.calls = []
+
+    async def execute(self, sql, args=None):
+        self.calls.append((" ".join(sql.split()), args))
+        return _Cur(self._rows if "SELECT" in sql.upper() else [])
+
+
+@pytest.mark.asyncio
+async def test_撤销只删肯定式且不动新事实自己() -> None:
+    conn = _Conn([
+        {"id": 1, "fact": "用户主玩今汐"},
+        {"id": 2, "fact": "用户不喜欢今汐"},          # 否定式旧记录：不许再删
+        {"id": 3, "fact": "用户不喜欢今汐了"},          # 与本轮新事实**同文**：不许删
+    ])
+    new = "用户不喜欢今汐了"
+    n = await _retract_matching(conn, "7", "今汐", new)
+    assert n == 1, f"只应撤掉那条肯定式，实得 {n}"
+    upd = [c for c in conn.calls if c[0].upper().startswith("UPDATE")]
+    assert upd and upd[0][1][0] == [1], upd   # execute 的第二参是**参数元组**
+    sel = conn.calls[0][1]
+    assert sel[0] == "7" and sel[1].endswith("%"), f"LIKE 模式要带通配且转义：{sel}"
+
+
+@pytest.mark.asyncio
+async def test_LIKE_元字符不变成通配() -> None:
+    """对象词取自用户原话，`%`/`_` 不转义就会「撤掉所有事实」（和会话搜索同一道坑）。"""
+    conn = _Conn([])
+    await _retract_matching(conn, "7", "100%_x", "用户不玩100%_x了")
+    pattern = conn.calls[0][1][1]
+    assert chr(92) + "%" in pattern and chr(92) + "_" in pattern, pattern   # 反斜杠显式拼，别写转义
+
+
+def test_save_facts_里真的接了否定撤销() -> None:
+    """`negated_object` / `_retract_matching` 单测全绿 ≠ 入库那条链接上了。
+
+    本仓反复栽在「函数写好了、没人调用」——所以直接在源码上钉一次：
+    插入之前必须先跑否定撤销，且顺序在同类覆盖之后（覆盖是「同类换值」，
+    撤销是「按对象删别的类别」，两步都要在 INSERT 前完成）。
+    """
+    import inspect
+
+    from wuwa_rag.services.profile import save_facts
+
+    body = inspect.getsource(save_facts)
+    assert "negated_object(fact)" in body and "_retract_matching(" in body
+    assert body.index("_retract_matching(") < body.index("INSERT INTO user_facts")
+
+
+def test_一句里可以否定多个对象() -> None:
+    assert negated_objects("我不喜欢今汐了，也不想练散华") == ["今汐", "散华"]
+    assert negated_objects("我主玩今汐") == []
+
+
+def test_撤销以用户原话为准并拦下正面事实() -> None:
+    """抽取器实测会把「我不喜欢今汐了，之前说主玩今汐」整句抽成正面的「主玩今汐」。
+
+    只按 facts 判否定就完全撤不掉，所以 `save_facts` 必须**另外拿到用户原话**
+    （参数 `utterance`）：① 按原话里的对象撤旧；② 把本轮抽回来的正面事实拦下不入库。
+    """
+    import inspect
+
+    from wuwa_rag.services.profile import save_facts
+
+    sig = inspect.signature(save_facts)
+    assert "utterance" in sig.parameters, "撤销只能靠用户原话，这个参数不能省"
+    body = inspect.getsource(save_facts)
+    assert "negated_objects(utterance)" in body, "没按原话取否定对象"
+    assert "_RE_NEGATION.search(fact)" in body, "没拦下被否定对象对应的正面事实"
+
+
+def test_没有新事实时也要能撤销() -> None:
+    """抽取器把整句否定丢成空数组是实测形态之一；`if not facts: return 0` 会把撤销一起挡掉。"""
+    import inspect
+
+    from wuwa_rag.services.profile import save_facts
+
+    body = inspect.getsource(save_facts)
+    assert "if not facts and not negated_objects(utterance)" in body, "早退没放行否定撤销"
+
+
+def test_宾语提前式的否定撤不动但也不许乱撤() -> None:
+    """已知边界（2026-10-24 端到端实测）：「之前不是说主玩今汐吗，现在不喜欢了」
+    —— 否定词后面**没有宾语**（中文把对象放在前半句、甚至上一轮），取不到对象。
+
+    取不到就必须什么都不撤。这不是偷懒：猜一个对象去删，错一次就是静默删掉
+    用户没说过要删的事实（本模块第一条老规矩：宁可不撤，不可误撤）。
+    真要覆盖这类句式得拿名册/上下文做实体绑定，代价与收益不划算，暂不做。
+    """
+    assert negated_objects("之前不是说主玩今汐吗，现在不喜欢了") == []
+    assert negated_object("现在不喜欢了") == ""
