@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import itertools
-import re
 from functools import lru_cache
 
 import chromadb
 from chromadb.config import Settings
 
 from wuwa_rag.config import get_settings
-from wuwa_rag.knowledge.entities import TEAM_SLOTS, normalize_character_name, normalize_team
+from wuwa_rag.knowledge.entities import (
+    TEAM_SLOTS,
+    normalize_character_name,
+    normalize_team,
+    split_teams,
+)
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.index.bm25 import BM25Index
 from wuwa_rag.knowledge.index.embeddings import BgeM3Embeddings
@@ -90,20 +94,6 @@ def _is_placeholder_team(team: str) -> bool:
 
 
 # 「一队只有 3 个位置」= entities.TEAM_SLOTS（领域事实，只在那一处定义）。
-
-
-def _split_teams(raw: str) -> list[str]:
-    """把一条 teams 值拆成多支队伍串（有的 chunk 把两支队伍挤在同一格）。
-
-    实测 折枝 页的值：`作为副输出：折枝+今汐/珂莱塔+守岸人/维里奈/白芷；作为主输出：折枝+散华/釉瑚+…`
-    —— 整串当一支队伍念出来会变成 6 个人。
-    """
-    out: list[str] = []
-    for piece in re.split(r"[；;\n]", raw or ""):
-        piece = piece.split("：")[-1].strip()      # 去掉「作为副输出：」这类前缀
-        if piece:
-            out.append(piece)
-    return out
 
 
 def _team_key(team: str) -> tuple[str, ...]:
@@ -208,7 +198,7 @@ def _teams_block(rows: list[dict], *, char: str, named: list[str], has_multi: bo
         owner = (r.get("页面主人") or "").strip()
         owner = normalize_character_name(owner) or owner
         for raw in (r.get("原始队伍") or []):
-            for t in _split_teams(raw):
+            for t in split_teams(raw):
                 # 名字归一（见 characters.normalize_team）：清掉 wiki 表格里的
                 # 别名与粘连 —— `漂泊者·湮灭`→`漂泊者-男-湮灭`、
                 # `渊武其他输出`→`渊武`、`维里奈（高熟练度）`→`维里奈`、

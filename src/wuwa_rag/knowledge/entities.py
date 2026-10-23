@@ -381,6 +381,26 @@ def normalize_character_name(tok: str, known: set[str] | None = None) -> str | N
     return None
 
 
+def split_teams(raw: str) -> list[str]:
+    """把一条「配队」文本拆成若干支队伍串（wiki 会把两支队伍挤在同一格）。
+
+    实测 折枝 页的表格第二列：
+        `作为副输出：折枝+今汐/珂莱塔+守岸人/维里奈/白芷；作为主输出：折枝+散华/釉瑚+守岸人/维里奈/白芷`
+    整串当一支队伍念出来是 6 个人。**必须在抽取前拆**：`normalize_team` 会把 `；` 与
+    「作为主输出：」在归一时吃掉，抽进图谱后剩下的就是一根 5 段的串，读取侧再拆也来不及
+    （2026-10-24 实测：存量图谱里正是那一根，问「守岸人配队」时被当成一支 6 人队念出去）。
+
+    两个入口都要用它：`knowledge/graph/extract.py`（抽取侧）与
+    `knowledge/retrieve.py`（读取侧，读到的**存量值**也可能是挤在一起写的）。
+    """
+    out: list[str] = []
+    for piece in re.split(r"[；;\n]", raw or ""):
+        piece = piece.split("：")[-1].strip()      # 去掉「作为副输出：」这类前缀
+        if piece:
+            out.append(piece)
+    return out
+
+
 def normalize_team(team: str, known: set[str] | None = None) -> str:
     """把一条队伍串逐格归一到标准角色名，无法归一的格剔除（幂等）。
 

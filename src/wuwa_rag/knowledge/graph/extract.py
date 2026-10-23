@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from wuwa_rag.config import get_settings
-from wuwa_rag.knowledge.entities import normalize_character_name, normalize_team
+from wuwa_rag.knowledge.entities import normalize_character_name, normalize_team, split_teams
 from wuwa_rag.ww_logger import get_logger
 
 log=get_logger('rag')
@@ -354,8 +354,12 @@ def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
             h = h.strip()
             if not re.search(r"[+＋]", h):
                 continue
-            for mate in re.split(r"[+＋/]", h):
-                _add(mate, h)
+            # 先按「;；:换行」把挤在同一格的**多支队伍**拆开，再逐支归一。
+            # 顺序不能颠倒：normalize_team 只认 `+` 与 `/`，会把 `；作为主输出：`
+            # 当成名字碎片吃掉，抽进图谱就剩一根 5 段串（实测 折枝 页，2026-10-24）。
+            for comb in split_teams(h):
+                for mate in re.split(r"[+＋/]", comb):
+                    _add(mate, comb)
 
     # 来源 2：配队推荐（表格首行第二列的组合串）
     for d in chunks:
@@ -367,8 +371,9 @@ def _extract_teammates(chunks: list[dict], self_name: str) -> list[dict]:
             comb = _clean(cells[1])
             if not re.search(r"[+＋]", comb):
                 continue
-            for mate in re.split(r"[+＋/]", comb):
-                _add(mate, comb)
+            for team in split_teams(comb):
+                for mate in re.split(r"[+＋/]", team):
+                    _add(mate, team)
 
     return out
 

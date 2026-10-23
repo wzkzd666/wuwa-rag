@@ -218,6 +218,13 @@ async def _main() -> None:
     log.info("待处理角色: %s", names)
 
     for n in names:
+        # 重建**必须先清该角色的出边**再写：队友关系是 `SET rel.teams = 去重累加`，
+        # 只 upsert 不清的话，上一版抽取的结果会永远留在图里。
+        # 实测（2026-10-24）：抽取侧修好「一格两支队伍」后重跑 `wuwa-graph`，
+        # 拆开的两条确实进来了，但那根 5 段老串和它们**并存** —— 读取侧于是同时给出
+        # 「一支 6 人队」和「两支 3 人队」，看着像抽取没修好。
+        # 只删**出边**：入边属于别人的页面、本轮不会由别人重建（三条铁律见 _C_DELETE_CHAR）。
+        await delete_character(n)
         await upsert_character(extract_character(chunks, n))
 
     await close_driver()

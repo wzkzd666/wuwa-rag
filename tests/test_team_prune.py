@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-from wuwa_rag.knowledge.entities import normalize_character_name, normalize_team
+from wuwa_rag.knowledge.entities import normalize_character_name, normalize_team, split_teams
 from wuwa_rag.knowledge.retrieve import (
     _covers,
     _is_placeholder_team,
-    _split_teams,
     _team_groups,
     _team_key,
 )
@@ -117,8 +116,33 @@ def test_占位串判定_去槽位后真人名不足两个() -> None:
 
 def test_一条值拆多支队伍并剥前缀() -> None:
     raw = "作为副输出：折枝+今汐/卡卡罗+守岸人；作为主输出：折枝+散华/釉瑚+莫宁"
-    out = _split_teams(raw)
+    out = split_teams(raw)
     assert out == ["折枝+今汐/卡卡罗+守岸人", "折枝+散华/釉瑚+莫宁"]
+
+
+def test_抽取侧也必须先拆再归一() -> None:
+    """这条钉的是**事故的真实成因**：读取侧一直会拆 `；`，但抽取侧不拆 ——
+    `normalize_team` 在归一时把 `；作为主输出：` 吃掉了，于是存量图谱里留下一根
+    5 段串（`折枝+今汐/珂莱塔+守岸人/维里奈/白芷+散华/釉瑚+守岸人/维里奈/白芷`），
+    读取侧再拆已经来不及，实测问「守岸人配队」时被当成一支 6 人队念出去。
+
+    判据：抽出来的每支队伍，`+` 段数不得超过 `TEAM_SLOTS`（一队只有 3 个位置）。
+    """
+    from wuwa_rag.knowledge.entities import TEAM_SLOTS
+    from wuwa_rag.knowledge.graph.extract import _extract_teammates
+
+    cell = ("| 折枝配队 | 作为副输出：折枝+今汐/珂莱塔+守岸人/维里奈/白芷；"
+            "作为主输出：折枝+散华/釉瑚+守岸人/维里奈/白芷 |")
+    chunks = [{"character": "折枝", "component": "角色养成推荐",
+               "breadcrumb": "折枝 › 角色养成推荐 › 配队推荐", "text": cell}]
+    got = _extract_teammates(chunks, "折枝")
+    teams = [r["team"] for r in got]
+    assert teams, "一格两支队伍的行现在应当抽出队伍"
+    over = [t for t in teams if len([p for p in t.split("+") if p.strip()]) > TEAM_SLOTS]
+    assert not over, f"抽出了超过 {TEAM_SLOTS} 段的串（= 两支队伍没拆开）：{over}"
+    # 两支都在：副输出那支含今汐，主输出那支含散华
+    joined = " | ".join(teams)
+    assert "今汐" in joined and "散华" in joined
 
 
 def test_镜像队伍指纹相同() -> None:
