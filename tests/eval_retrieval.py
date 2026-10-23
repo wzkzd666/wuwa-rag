@@ -371,6 +371,20 @@ def main() -> int:
         print(f"提示：{len(multi)} 个片段锚点命中多块（跨角色同文本），按多目标计，"
               f"precision 会被压低（最多 {max(multi)} 块）")
 
+    # 精排可用性体检（**只有 rerank 档需要**）：`rerank()` 现在把任何异常都降级成空列表
+    # —— 生产侧那是对的（判空比拿坏分数继续走强），但对本脚本是**反的**：
+    # 权重没下 / HF_HOME 指错 / 显存被抢时，负样本会「全部判空」而空是它期望的结果，
+    # 于是 `negative_gate_empty_rate` 直接印 1.0000 —— 那正是基线表里「闸门健康」的那个数字。
+    # 报告里看不出区别，只有 preflight 能。判据复用 `rerank.status()`，不另写一份探测。
+    if args.stage == "rerank":
+        from wuwa_rag.knowledge.index.rerank import status as rerank_status
+
+        ok, why = rerank_status()
+        if not ok:
+            print(f"\n⚠️ 精排模型不可用，这份评测**不能**跑（跑出来的闸门率是假的）：{why}")
+            print("   修好权重/HF_HOME/显存再来；只想看精排前的召回池用 --stage recall。")
+            return 2
+
     print(f"开始评测 (stage={args.stage}, topk={topk})…")
     rep = evaluate(dataset, chunks, topk, args.stage)
 
