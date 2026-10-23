@@ -1577,6 +1577,20 @@ messages」这条**正确**逻辑，测出来的是替身不像真而不是代�
   ① 颜色对比：遍历 DOM 用 `getComputedStyle` 按 alpha 合成底色后算比值（这个不需要视口）；
   ② 规则是否真的生效：查**构建产物** `dist/assets/*.css` 里有没有那条选择器
      （`grep -o "kb-search:focus-within{[^}]*}"` 这种），比读源码更接近真相。
+  ③ **交互与故障态可以在没有视口时验**（2026-10-24 实测可行）：`take_snapshot` 与
+     `evaluate_script` 都能用， pointer 类 `click` 工具会报 `NATIVE_BROWSER_VIEWPORT_UNAVAILABLE`，
+     但 **JS 里 `element.click()` 对 React 完全有效**；受控 input 用
+     `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set` 赋值后再派发
+     `input` 事件即可（注册账号就是这么走通的）。
+     要造「读失败」这一类界面状态，**别停后端**（会牵连在线服务）：
+     在页面里包一层 `window.fetch`，对特定路径返回 `new Response('{"detail":"…"}', {status: 503})`，
+     再点折叠卡头/`重试` 按钮触发重读 —— 这就是一次真的组件渲染，只是数据源被换掉了。
+     ⚠️ 两个坑：① 手改 `localStorage` 里的登录态要按 zustand 的 `{state, version}` 结构写，
+     直接塞 `/auth/login` 的响应体会读成「登录已过期」（实测踩过）；② 卡片是**折叠的**时候
+     内容区根本不在 DOM 里，先点卡头再判状态。
+     本轮用这套办法验了 `LoadFail` 四处收敛：**画像 / 知识库 / 用量 / 云端模型**四处都渲染出
+     各自的文案与 `重试` 按钮（点 `重试` 确实重新发了请求），`用户清单` 那处因登录态 hack 没走通，
+     **如实记为「未做浏览器实测」**（同一组件、同一 props，tsc + vitest + 产物 CSS 三条已过）。
 
 - **列表行不是按钮**：会话行用 `div` + `tabIndex` + `keydown`，不要加 `role="button"`
   （行内有删除按钮，嵌套可点击元素对读屏是非法结构）；`onClick` 里必须判
