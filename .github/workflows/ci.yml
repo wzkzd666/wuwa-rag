@@ -3,10 +3,11 @@
 # 为什么敢在 CI 里跑全量测试（AGENTS.md 的硬约定是「全量离线」）：
 #   · `tests/` 全部用例不碰 PG / Neo4j / Redis / Chroma / Ollama / 网络，
 #     conftest 还会主动拦截非回环连接（`_block_external_network`）；
-#   · 逐条核过：454 条里对 `get_cursor` / `authdb` / `neo4j_client` 的引用**要么被
+#   · 逐条核过：用例里对 `get_cursor` / `authdb` / `neo4j_client` 的引用**要么被
 #     monkeypatch 掉，要么只是读源码文本做对账**，没有一条真的连库。
 #   · 实测口径（2026-10-24）：把 PG/Neo4j/Redis/S3/Ollama 全部指向不可达端口
-#     （`PG_PORT=1 NEO4J_URI=bolt://127.0.0.1:1 …`）跑一遍 → **453 通过**，
+#     （`PG_PORT=1 NEO4J_URI=bolt://127.0.0.1:1 …`）跑一遍 → **453 通过 / 当时共 454 条**
+#     （条数会长，这里只留「断网能全绿」这条结论，具体数以 `uv run pytest` 现跑为准），
 #     唯一红的是 `test_端口_env_是唯一真源且与各消费方一致`：它断言的正是「这些环境变量
 #     没被改过」，所以改端口必然让它红 —— 那是**配置一致性**断言，不是连库依赖。
 #     CI 不设这些变量，因此这条也是绿的。
@@ -22,6 +23,13 @@
 # 不跑的东西（刻意）：`tests/eval_retrieval.py`（要真实向量索引 + reranker 权重，不是 pytest 收集的
 #   用例，缺索引会假失败）、`--extra music`（`pycaw`/`winrt-*` 是 Windows-only，装上必挂）、
 #   `--extra train`（ms-swift 训练依赖，与门禁无关）。
+#
+# ⚠️ 有一条**只能在 CI 上才算验完**：`build_index.dense_writer_lock` 的加锁调用分两支
+#   （Windows `msvcrt.locking` / POSIX `fcntl.flock`），本地只有 Windows。
+#   `tests/test_ingest_control.py` 里那三条用**同进程两个 fd** 互斥的写法，Windows 侧实测过
+#   （变异：把 `_lock_exclusive` 换成空函数 → 第二次获取不再被拒）；
+#   POSIX 侧的依据是 flock 的锁挂在 open file description 上、两次 `open()` 就是两个 OFD。
+#    ubuntu 上这条若红，先去看这个假设，别急着改判据。
 
 name: CI
 
