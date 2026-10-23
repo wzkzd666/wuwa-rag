@@ -247,6 +247,24 @@ async def clear_conversations(user_id: int) -> int:
         return len(sids)
 
 
+async def memory_keys(user_id: int) -> list[str]:
+    """该用户在 checkpointer 里**实际存在**的 thread key（直接从 `u{id}:` 前缀反查）。
+
+    为什么不能只靠 `sessions` 表拿 key：`clear_conversations` 之前有人手写 SQL 删过
+    `sessions` 行，而 `lg` schema 里的记忆不会跟着走 —— 实测库里就躺着 3 条
+    「主人已经不存在的孤儿记忆」（u10/u40/u42）。按前缀直接查 `lg.checkpoints`
+    才能把这种残留也捞回来；`thread_key` 的前缀是 `u{users.id}:`，
+    id 是整数且不含冒号，所以这个 LIKE 不会误伤别的用户（`u1:%` 匹不到 `u10:`）。
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT DISTINCT thread_id FROM lg.checkpoints WHERE thread_id LIKE %s",
+            (f"u{int(user_id)}:%",),
+        )
+        return [r["thread_id"] for r in await cur.fetchall()]
+
+
 async def append_message(user_id: int, thread_id: str, role: str,
                          content: str, meta: dict | None = None) -> int:
     """追加一条转录。返回消息 id。

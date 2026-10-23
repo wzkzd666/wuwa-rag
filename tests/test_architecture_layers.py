@@ -47,7 +47,9 @@ EXPECTED_MODULES = 57
 # 168 → 173（2026-10-24）：新增 `knowledge.corpcheck`（语料对账 CLI，把三次真实事故
 # 的「三方对账」口径固化成一条命令）。它出边 5 条：config / core.db / text（L2→L0）、
 # knowledge.index.bm25 与 knowledge.graph.neo4j_client（L2→L2 同层），方向全部合规、无环。
-EXPECTED_EDGES = 173
+# 173 → 175（同日）：`DELETE /admin/users/{id}` 只做**组合**（各表怎么清只有它自己的模块知道），
+# 于是 `api.app` 新增两条出边 → `core.settings`、`core.feedback`（L6→L1，方向合规）。
+EXPECTED_EDGES = 175
 # 41 → 42（同日）：`knowledge.corpcheck` 是有出边的模块，「有出边的模块数」随之 +1。
 EXPECTED_GRAPH_KEYS = 42
 EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 18, 3: 2, 4: 8, 5: 9, 6: 7}

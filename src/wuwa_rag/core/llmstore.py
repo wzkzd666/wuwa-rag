@@ -918,3 +918,20 @@ async def delete_tts_config(user_id: int) -> bool:
             )
     log.info("user=%s 已删除语音配置", user_id)
     return True
+
+
+async def purge_credentials(user_id: int) -> int:
+    """删掉该用户的**全部自持凭据**（云端模型 + 语音），并丢弃内存里的 DEK。
+
+    整行删除（不是像 `delete_tts_config` 那样只清字段）：账号都没了，
+    不存在「保留另一半凭据」的场景。
+    ⚠️ `lock(user_id)` 必须跟做 —— 只删行不丢内存，同一进程内后续请求
+    仍可能命中 `_DEK_RAW[user_id]`，表现成「用户已删除却还在用他的云端 Key」。
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute("DELETE FROM user_llm_configs WHERE user_id = %s RETURNING user_id",
+                                 (user_id,))
+        n = len(await cur.fetchall())
+    lock(user_id)
+    return n

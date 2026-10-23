@@ -129,3 +129,14 @@ async def delete_feedback(record_id: int) -> str | None:
                           (record_id,))
         row = await cur.fetchone()
     return row[0] if row else None
+
+
+async def delete_all_for_user(user_id: str) -> int:
+    """删掉该用户的全部评价（账号被移除时回收）。
+
+    与 `delete_feedback(record_id)` 不是一回事：那条是「撤一条评价」，
+    这条是「数据主体消失了」。两个动作都存在，谁都不许顺手替谁。
+    """
+    async with get_cursor() as cur:
+        await cur.execute("DELETE FROM answer_feedback WHERE user_id = %s RETURNING id", (str(user_id),))
+        return len(await cur.fetchall())

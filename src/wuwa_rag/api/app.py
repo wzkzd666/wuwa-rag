@@ -30,7 +30,9 @@ from wuwa_rag.api import ratelimit as rl
 from wuwa_rag.api import usage as usage_api
 from wuwa_rag.config import get_settings
 from wuwa_rag.core import conversations as conv
+from wuwa_rag.core import feedback as fb
 from wuwa_rag.core import llmstore, usage
+from wuwa_rag.core import settings as user_settings
 from wuwa_rag.core.authdb import close_pool, ensure_schema
 from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
@@ -46,6 +48,7 @@ from wuwa_rag.services.profile import (
     extract_facts_safe,
     facts_to_context,
     get_facts,
+    purge_user_facts,
     save_facts,
     soft_delete_fact,
 )
@@ -334,6 +337,74 @@ async def api_profile_delete(fact_id: int,
 async def api_admin_users(user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
     """管理员：全部用户 + 各自画像条数。"""
     return {"users": await all_users_stats()}
+
+
+# 账号移除时要回收的表（**唯一清单**，tests/test_security_fixes.py 会从 pgsql/*.sql 反推
+# 「带 user_id / submitted_by 列的表」并核对这张清单 —— 以后新加一张用户表又忘了回收，那条会红）。
+# 每张表怎么清只有它自己的模块知道，这里只**组合**，不写第二份 SQL。
+PURGED_TABLES = (
+    "users", "auth_tokens",                    # 账号与登录令牌（auth.delete_account）
+    "sessions", "messages",                    # 会话与转录（conv.clear_conversations 连带 messages）
+    "lg.checkpoints",                          # 模型侧记忆（_drop_memory，按 thread key）
+    "user_facts",                              # 画像事实（profile.purge_user_facts，**按用户名**）
+    "answer_feedback", "llm_usage", "user_settings",   # 评价 / 用量 / 偏好（各自模块 delete_all_for_user）
+    "user_llm_configs",                        # 自持凭据密文（llmstore.purge_credentials + lock）
+)
+# 刻意**不**回收的，理由必须写在这儿（否则下一个人会当遗漏补上）：
+EXCLUDED_TABLES = {
+    "crawl_runs": "入库账本记的是**语料来源史**（谁在什么时候把哪个角色爬进来的）。"
+                  "删账号不该改写语料史：留着才能回答「这段语料哪来的」。",
+}
+
+# ⚠️ 身份列**两套并存**是 schema 的历史事实，实测值：
+#   user_facts.user_id   = 'admin' / 'e2eprobe4385'      ← 用户名
+#   answer_feedback.user_id / llm_usage / user_settings = '1' / '30'  ← users.id 的字符串形式
+#   sessions / auth_tokens / user_llm_configs.user_id   = 1 / 30       ← bigint
+# 传错的后果不是报错，而是**一条都删不掉**（表现为「删了用户，看板里还有他的名字」），
+# 所以下面每个调用都显式注释用的是哪一种。
+@app.delete("/admin/users/{user_id}")
+async def api_admin_user_delete(user_id: int,
+                                user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """移除账号并回收他名下的全部数据（不可恢复）。
+
+    为什么必须有这条：以前「删用户」只能手写 SQL 删 `users` 行，其余全留在库里 ——
+    实测本仓库里就躺着 5 位「authdb 里已不存在的主人」的会话与画像。
+    对开源分发这是隐私回收缺口（用户要求删号做不到），对维护者这也是清理探针账号的正路。
+
+    两道护栏：不许删自己（删完当前会话立刻没人能登进来）、
+    不许删最后一个 admin（同理，整套鉴权会失去入口，只能重装）。
+    """
+    target = await authn.get_user_brief(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user_id == user.id:
+        raise HTTPException(status_code=400, detail="不能删除自己这个账号")
+    if target["role"] == "admin" and await authn.count_admins() <= 1:
+        raise HTTPException(status_code=400, detail="这是最后一个管理员，删掉后就没人能进管理端了")
+
+    # 模型侧记忆要**两处并集**：① 会话表里还在的（删行前必须先取 key）；
+    # ② checkpointer 里实际存在的（`sessions` 行早被人手写 SQL 删过、记忆还在的孤儿）。
+    # 只取①的话，「删了用户却留下他能被模型回忆起来的过去」正好是这次要治的缺口。
+    session_keys = [conv.thread_key(user_id, conv.client_thread_id(r["session_id"]))
+                    for r in await conv.list_conversations(user_id, limit=1000)]
+    orphan_keys = await conv.memory_keys(user_id)
+    keys = list(dict.fromkeys(session_keys + orphan_keys))
+    purged = {
+        "sessions": await conv.clear_conversations(user_id),
+        "memories": len(keys),
+        "facts": await purge_user_facts(target["username"]),           # 按**用户名**
+        "feedback": await fb.delete_all_for_user(str(user_id)),         # 按 str(id)
+        "usage": await usage.delete_all_for_user(str(user_id)),
+        "settings": await user_settings.delete_all_for_user(str(user_id)),
+        "credentials": await llmstore.purge_credentials(user_id),
+    }
+    for k in keys:
+        await _drop_memory(k)
+    await authn.delete_account(user_id)
+    # 留痕：谁删了谁、各表删了几行（不可恢复的操作，事后必须能追问）
+    log.info("管理员 %s(id=%s) 移除用户 %s(id=%s)，回收=%s",
+             user.username, user.id, target["username"], user_id, purged)
+    return {"ok": True, "removed": target["username"], "purged": purged}
 
 
 # ── 问答（登录即可） ─────────────────────────────

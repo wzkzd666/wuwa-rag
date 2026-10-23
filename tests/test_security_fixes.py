@@ -337,3 +337,82 @@ def test_入库失败原因对非管理员只给一句话() -> None:
     # 取消哨兵必须原样透出（下游靠它显示「已取消」）
     assert _public_step_error("chunk", CANCEL_ERROR, is_admin=False) == CANCEL_ERROR
     assert _public_step_error("chunk", None, is_admin=False) is None
+
+
+# ---------- 账号移除（数据回收） ----------
+def _user_column_tables() -> set[str]:
+    """从**建表语句**里反推「有用户身份列的表」。
+
+    两处都要扫：`pgsql/*.sql`（部署时幂等应用的那份）和 `src/**/*.py` 里的 `_DDL`
+    字符串（`user_llm_configs` 就只活在 llmstore 里）。只扫一处会漏表 —— 而漏掉的
+    那张表在删账号时**不会报错**，只会把数据留在库里当孤儿。
+    """
+    import re
+
+    marker = "CREATE TABLE IF NOT EXISTS "
+    has_user_col = re.compile("user_id|submitted_by")
+    out: set[str] = set()
+    paths = sorted((_ROOT / "pgsql").glob("*.sql")) + sorted((_ROOT / "src" / "wuwa_rag").rglob("*.py"))
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        # 按标记切开逐段看，不用带反斜杠的正则（本仓的工具链吃掉过太多次）
+        for chunk in text.split(marker)[1:]:
+            body = chunk.split(");", 1)[0]            # 建表语句体
+            head = body.split("(", 1)[0].strip()      # 表名
+            if len(head.split()) == 1 and has_user_col.search(body):
+                out.add(head)
+    return out
+
+
+def test_用户回收清单覆盖每张有用户列的表() -> None:
+    """新增一张用户表却忘了回收 = 静默留孤儿数据。这条把它变成当场红。
+
+    本仓实测已经躺着这种孤儿：5 位「authdb 里已不存在的主人」的会话与画像
+    —— 正因为以前「删用户」只能手写一条 DELETE FROM users。
+    """
+    from wuwa_rag.api.app import EXCLUDED_TABLES, PURGED_TABLES
+
+    tables = _user_column_tables()
+    assert tables, "反推没拿到任何表：多半是上面的建表语句正则没匹配上，这条会恒真"
+    accounted = set(PURGED_TABLES) | set(EXCLUDED_TABLES)
+    missing = tables - accounted
+    assert not missing, f"这些表带用户列却没进回收清单（既不回收也不说明理由）：{sorted(missing)}"
+    assert all(str(r).strip() for r in EXCLUDED_TABLES.values()), "不回收必须写清理由"
+
+
+def test_删账号端点是admin专属且挡住自删与末位admin() -> None:
+    """不可恢复的管理操作：权限与两道护栏都要在，缺一就能把整套鉴权删没。"""
+    from wuwa_rag.api import app as app_mod
+    from wuwa_rag.api import auth as authn
+
+    routes = [r for r in app_mod.app.routes
+              if getattr(r, "path", "") == "/admin/users/{user_id}"]
+    assert len(routes) == 1, f"应当只挂一条，实际 {len(routes)}"
+    assert "DELETE" in routes[0].methods
+    def _walk(dep):
+        for sub in getattr(dep, 'dependencies', []) or []:
+            yield sub
+            yield from _walk(sub)
+
+    calls = [d.call for d in _walk(routes[0].dependant)]
+    assert authn.require_admin in calls, "删账号必须是 admin 专属（get_current_user 不够）"
+
+    src = (_ROOT / "src/wuwa_rag/api/app.py").read_text(encoding="utf-8")
+    body = src[src.index('api_admin_user_delete'):]
+    assert "不能删除自己这个账号" in body, "少了「不许自删」护栏"
+    assert "最后一个管理员" in body, "少了「末位 admin」护栏"
+
+
+def test_删账号的记忆回收取两处并集() -> None:
+    """只从 `sessions` 反查 key 会漏：**会话行被手写 SQL 删掉而 checkpointer 还在**。
+    实测库里躺着 3 条这种孤儿记忆（u10 / u40 / u42，主人早已不在 users 里）。
+    所以端点必须并上 `conv.memory_keys(user_id)`（按 `u{id}:` 前缀直查 lg.checkpoints）。
+    """
+    src = (_ROOT / "src/wuwa_rag/api/app.py").read_text(encoding="utf-8")
+    body = src[src.index('api_admin_user_delete'):src.index('api_admin_user_delete') + 3000]
+    assert "await conv.memory_keys(user_id)" in body, "少了按前缀直查 checkpointer 的那一路"
+    assert "dict.fromkeys" in body, "两路 key 必须并集去重（同一条记忆重复 drop 会白跑一次）"
+
+    # 前缀本身也要钉住：LIKE 写成 `%{id}%` 会把 u10 的记忆错删到 u1 名下
+    csrc = (_ROOT / "src/wuwa_rag/core/conversations.py").read_text(encoding="utf-8")
+    assert 'f"u{int(user_id)}:%"' in csrc, "memory_keys 的 LIKE 前缀口径变了"

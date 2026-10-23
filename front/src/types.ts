@@ -208,6 +208,8 @@ export interface UserFact {
  * 权限判定在后端 `require_admin`，前端只做展示。
  */
 export interface AdminUserRow {
+  /** users.id 主键 —— 移除账号的路径参数用它，不用用户名（避免改名/重名歧义） */
+  id: number
   username: string
   /** 后端存 admin / guest；类型留宽，将来加新角色不至于显示成空白 */
   role: string

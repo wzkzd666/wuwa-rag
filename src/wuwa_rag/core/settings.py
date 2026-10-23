@@ -46,3 +46,14 @@ def _dumps(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False)
+
+
+async def delete_all_for_user(user_id: str) -> int:
+    """删掉该用户的全部偏好设置（账号被移除时回收；见 api 的用户回收端点）。
+
+    各张「有 user_id 列」的表都在**自己的模块**里给出这条删除，
+    不在调用方拼 SQL —— 那是本仓最忌讳的第二判据（新表一定会被漏掉）。
+    """
+    async with get_cursor() as cur:
+        await cur.execute("DELETE FROM user_settings WHERE user_id = %s", (str(user_id),))
+        return cur.rowcount

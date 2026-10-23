@@ -106,6 +106,16 @@ export function adminUsers(base?: string): Promise<AdminUsersOut> {
   return request('/admin/users', { method: 'GET' }, base)
 }
 
+/** DELETE /admin/users/{id} —— 移除账号并回收他名下的全部数据（不可恢复）。
+ *  后端两道护栏（不许删自己、不许删最后一个管理员）失败时给的是中文 detail，
+ *  由调用方原样显示；user_id 是整数主键，路径参数由 FastAPI 校验，不做字符串拼接。 */
+export function adminDeleteUser(
+  userId: number,
+  base?: string,
+): Promise<{ ok: boolean; removed: string; purged: Record<string, number> }> {
+  return request(`/admin/users/${userId}`, { method: 'DELETE' }, base)
+}
+
 /** GET /health */
 export function health(base?: string): Promise<{ ok: boolean }> {
   return request('/health', { method: 'GET' }, base)

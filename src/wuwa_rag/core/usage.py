@@ -193,3 +193,15 @@ async def daily_usage(days: int = 7, only_user: str | None = None) -> list[dict]
         }
         out.append(row)
     return out
+
+
+async def delete_all_for_user(user_id: str) -> int:
+    """删掉该用户的全部用量行（账号被移除时回收）。
+
+    ⚠️ `llm_usage.user_id` 存的是**字符串形式的 users.id**（见 `scope()` 的写入侧），
+    所以这里必须先 `str()` 再比：类型不一致时 PostgreSQL 不报错，只是**一条都删不掉**，
+    表现为「删了用户，用量看板里还有他的名字」。
+    """
+    async with get_cursor() as cur:
+        await cur.execute("DELETE FROM llm_usage WHERE user_id = %s RETURNING id", (str(user_id),))
+        return len(await cur.fetchall())

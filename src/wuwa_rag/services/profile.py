@@ -319,10 +319,10 @@ async def all_users_stats() -> list[dict]:
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
-            SELECT u.username, u.role, u.created_at,
+            SELECT u.id, u.username, u.role, u.created_at,
                    COUNT(f.id) FILTER (WHERE f.valid_to IS NULL) AS facts
             FROM users u LEFT JOIN user_facts f
-              ON f.user_id = u.username
+              ON f.user_id = u.username   -- ⚠️ 画像按**用户名**挂，不是 users.id（列名叫 user_id 但存的是名字）
             GROUP BY u.id ORDER BY u.created_at
             """
         )
@@ -373,3 +373,21 @@ def nicknames_from_context(ctx: str) -> list[str]:
         if nick and not _RE_NICKNAME_NOISE.match(nick) and nick not in out:
             out.append(nick)
     return out
+
+
+async def purge_user_facts(username: str) -> int:
+    """硬删该用户的全部画像事实（账号被移除时回收）。
+
+    ⚠️ 参数是**用户名**不是 users.id：`user_facts.user_id` 这列名存实亡，
+    库里实测存的是 `'admin'` / `'e2eprobe4385'` 这样的**用户名**，
+    而 `answer_feedback.user_id` 存的是字符串化的 `users.id`。
+    同一个 schema 里两套身份，传错**不会报错、只会一条都删不掉** —— 所以签名按真实语义命名。
+
+    与 `soft_delete_fact` 分开是有意的：软删是「这条不再注入 prompt，但历史还在」，
+    而账号已经不存在时留着「用户自称是××」没有任何用途，
+    只会变成一堆永远关联不上主人的文本（实测库里就躺着已删用户的会话与画像）。
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute("DELETE FROM user_facts WHERE user_id = %s RETURNING id", (username,))
+        return cur.rowcount

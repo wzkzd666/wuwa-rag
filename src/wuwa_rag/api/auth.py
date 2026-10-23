@@ -164,6 +164,37 @@ async def revoke_token(token: str) -> None:
         await conn.execute("DELETE FROM auth_tokens WHERE token = %s", (token,))
 
 
+async def get_user_brief(user_id: int) -> dict | None:
+    """{username, role}；不存在 → None。删用户前两道护栏要用它。"""
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT username, role FROM users WHERE id = %s", (user_id,))
+        return await cur.fetchone()
+
+
+async def count_admins() -> int:
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) AS n FROM users WHERE role = 'admin'")
+        row = await cur.fetchone()
+    return int(row["n"])
+
+
+async def delete_account(user_id: int) -> None:
+    """只删**账号本身**：users 行 + 该用户全部登录令牌。
+
+    为什么不在这儿顺手把会话/画像/反馈也删了：那些表的写法各自在自己模块里
+    （`core/conversations` / `services/profile` / `core/feedback` / …），
+    在这儿再写一遍 DELETE 就是本仓最忌讳的「同一语义两处判据」——
+    将来某张表加了列，这里必然是漏掉的那一份。
+    完整回收在 api 的 purge 端点里组合，见 `PURGED_TABLES`。
+    """
+    pool = await get_pool()
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM auth_tokens WHERE user_id = %s", (user_id,))
+        await conn.execute("DELETE FROM users WHERE id = %s", (user_id,))
+
+
 # ---------- FastAPI 依赖 ----------
 
 class AuthUser(BaseModel):

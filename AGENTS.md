@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：462 条，**全量离线**，约 5s
+uv sync --extra dev && uv run pytest    # 单元测试：465 条，**全量离线**，约 5s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -693,6 +693,40 @@ wiki 以后出现同形新词也不会被误切。这也是它敢替代旧 `_RE_
 
 **口令与令牌**（`api/auth.py`）：`hashlib.scrypt`（格式 `scrypt$salt$hash`）+ `secrets.token_hex(32)` Bearer token，token 落 `auth_tokens` 表 → **重启 API 不掉线**。登录失败统一报「用户名或密码错误」（不泄露用户名存在性）。
 
+**账号移除（2026-10-24 补，`DELETE /admin/users/{user_id}`）**
+
+开源分发后这是隐私缺口（用户要求删号做不到），也是维护者清理探针账号的唯一正路 ——
+此前只能手写 `DELETE FROM users`，其余全留：实测库里躺着 5 位「authdb 里已不存在的主人」的
+会话与画像、8 枚孤儿令牌、3 条「主人已删」的 `lg` 记忆。
+
+- **组合而非重写 SQL**：每张表怎么清只有它自己的模块知道（`conv.clear_conversations` /
+  `profile.purge_user_facts` / `fb.delete_all_for_user` / `usage.delete_all_for_user` /
+  `user_settings.delete_all_for_user` / `llmstore.purge_credentials` / `auth.delete_account`）。
+  端点只负责按顺序调用 + 留痕。清单常量 `PURGED_TABLES` / `EXCLUDED_TABLES` 在 `api/app.py`，
+  并由 `test_用户回收清单覆盖每张有用户列的表` **从建表语句反推**核对（`pgsql/*.sql` + `src/**/*.py`
+  里的 `_DDL` 两处都扫）：以后新增一张带 `user_id`/`submitted_by` 的表而忘了回收 → 当场红
+  （变异验证过：临时造一张 `mut_probe_things(user_id)` 恰好让它红）。
+- ⚠️ **身份列有两套口径，是本仓最容易静默失效的地方**（实测值）：
+  `user_facts.user_id` 存的是**用户名**（`'admin'`），而 `answer_feedback` / `llm_usage` /
+  `user_settings` 存的是**字符串化的 `users.id`**（`'1'`），`sessions` / `auth_tokens` /
+  `user_llm_configs` 是 **bigint `users.id`**。传错**不报错，只是一条都删不掉**，
+  表现为「删了用户，用量看板里还有他的名字」。所以 `purge_user_facts` 的形参刻意叫
+  `username` 而不是 `user_id`，端点里每个调用都注明用的是哪一种。
+- **模型侧记忆取两路并集**：`sessions` 反查的 key ∪ `conv.memory_keys(user_id)`
+  （按 `u{id}:` 前缀**直查 `lg.checkpoints`**）。只取前一路会漏掉「会话行被手写 SQL 删掉、
+  checkpointer 还在」的孤儿 —— 实测真有 3 条（u10/u40/u42）。前缀 LIKE 写成 `%{id}%` 会把
+  `u10:` 错算到 `u1` 名下，所以钉在 `u{int(id)}:`，并有源码判据用例看着这一行。
+- **两道护栏**：不许删自己、不许删最后一个 admin（否则整套鉴权失去入口只能重装）。
+  实测：自删 `400 不能删除自己这个账号`、游客 `403 需要管理员权限`。
+- `crawl_runs` **刻意不回收**（理由写进 `EXCLUDED_TABLES`）：入库账本记的是**语料来源史**，
+  删账号不该改写语料史。
+- 实测闭环（6 个靶子账号逐个「删前逐表数 → DELETE → 删后复查」）：服务端回报的回收数与
+  独立算出的行数**逐表相等**（如 e2eprobe4385：画像 6=6、用量 125=125；ui_probe3：会话 1、
+  记忆 1、用量 3），删后各表残留 0、`lg` 里 `u{id}:` 残留 0。
+  前端在 `AdminUsersCard` 走全站唯一的两步确认（待确认文案「再点一次永久移除」，
+  自己那行 `disabled` 且 `title` 写「不能删除自己这个账号」），浏览器实测点完出
+  「已移除 smoke_target：会话 0 · 画像 0 · 评价 0 · 用量 0」并从列表消失。
+
 **权限矩阵**（FastAPI 依赖）：
 
 | 端点 | 权限 |
@@ -700,7 +734,7 @@ wiki 以后出现同形新词也不会被误切。这也是它敢替代旧 `_RE_
 | `/auth/register` `/auth/login` | 公开 |
 | `/ask` `/ask/stream` `/profile` `/auth/me` `/auth/logout` `/auth/password` | 登录即可（`get_current_user`） |
 | `/llm/providers` `/llm/config` `/llm/config/test` `/llm/models` `/llm/unlock` `/llm/lock` `/llm/passphrase` | 登录即可（个人云端模型配置，见下节） |
-| `/knowledge/refresh` `/knowledge/characters` DELETE、`/admin/users` | admin 专属（`require_admin`） |
+| `/knowledge/refresh` `/knowledge/characters` DELETE、`/admin/users` GET、`/admin/users/{id}` DELETE | admin 专属（`require_admin`） |
 | `/ingest` `/ingest/status` `/ingest/records` `/ingest/control` | 登录即可（2026-10-23 校正：矩阵曾写 admin 专属，与代码和知识库页的**刻意设计**不符——「提交 / 暂停 / 取消 / 删除**自己**提交的记录」对全体登录用户开放，只有重爬与删知识库才 require_admin；`_may_control` 负责校验只能控自己的） |
 
 ⚠️ **FastAPI 依赖链两个坑（实测）**：① 依赖函数的参数必须 `= Depends(...)`，否则类型被当**请求体字段** → 422 `missing body.user`；② 依赖的返回类型必须是 Pydantic `BaseModel`（`AuthUser`），dict 子类报 Invalid args。
@@ -1129,7 +1163,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **462 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **465 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
 十五个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
@@ -1144,14 +1178,14 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_ingest_control.py` | 入库暂停/继续/取消旗标、状态聚合与操作留痕、**分块 0 块必须失败**（且失败时不许先把 jsonl 写坏）、**覆盖不全只 warn 不拦路**（PG 挂了也不能带崩入库）、**BM25 缓存随磁盘指纹失效**（文件没变不重载、变了必重载）、**稠密索引按文本口径对账**（口径不一致才重嵌、索引里没有要补、PG 已不存在的孤儿要删、`--full` 必须名副其实、未知参数直接退出） |
 | `test_music.py` | 音乐 NLU 正/负样本（差一字即漏的动词锚定）、可用性四层判定、as_user 契约 |
 | `test_qqmusic_mcp.py` | MCP server 侧：常驻会话、工具面收敛、搜索降级重试 |
-| `test_security_fixes.py` | 2026-10-09 安全修复回归桩：默认凭据/CORS/XFF/verify 分片/TTS workspace/错误体不泄原文/must_change/`_DECRYPT_ERRORS` 接住 InvalidToken、**反馈键列拒而不截断 + 帽只定义在 core 一处**、**ILIKE 元字符转义**；**云端 chat 客户端禁跟随重定向**（openai SDK 默认 True，会把 `validate_base_url` 只核过第一跳的地址 302 进内网 = SSRF 第二跳） |
+| `test_security_fixes.py` | 2026-10-09 安全修复回归桩 + **账号回收对账**（从建表语句反推「带用户列的表」核对 `PURGED_TABLES`/`EXCLUDED_TABLES`、两道护栏、记忆两路并集与前缀口径）：默认凭据/CORS/XFF/verify 分片/TTS workspace/错误体不泄原文/must_change/`_DECRYPT_ERRORS` 接住 InvalidToken、**反馈键列拒而不截断 + 帽只定义在 core 一处**、**ILIKE 元字符转义**；**云端 chat 客户端禁跟随重定向**（openai SDK 默认 True，会把 `validate_base_url` 只核过第一跳的地址 302 进内网 = SSRF 第二跳） |
 | `test_text.py` | **`text.py` 全部清洗规则的实测基线**：图标残渣 5 正 8 负、`fix_percent_units` 六条红线（`27%5%`/`1%.20%`/术语前瞻/量纲）、`[n]` 剥离与 COST 还原、AnswerFilter 流式（含「短答案整段重复」回归）、`lock_focus`、dedup 只丢整行相同、**两条输出口都只过 `_clean_answer`**（源码判据，防再出现「④ 补了 ①②③ 漏」） |
 | `test_guard.py` | 防复读闸：整句重复三次必中/两次放行、周期块循环（计数后缀形态）从最早块截断、退化块后跟正常内容也能算出切点、材料表/技能 13 行/短碎句负样本不命中、流式逐 token 触发 |
 | `test_team_prune.py` | 名册归一五类形态（漂泊者补男属性/剥括号/剥位置词/前缀最长匹配/纯槽位→None）+「绝不猜着切」红线；`_covers` 逐位不摊平、等价对互 True、占位串判定、镜像指纹 |
 | `test_corpcheck.py` | **语料对账的八条判据**：总数相同但逐角色不同要报、缺/多两个方向分开报、稠密索引**文本口径**不一致要报（只比 id 抓不到那 36 块）、raw 哈希漂移 fail 而缺席只 warn（聚合一条，不刷屏）、图谱名册缺角色 fail / 多垃圾名 warn、退出码只看 fail（warn 不拦路）、fail 必须自带可抄的补救命令 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → **462 条 / 5.6s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → **465 条 / 5.7s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 ✅ **2026-10-24 这条约定真的变成机器门禁了**（`.github/workflows/ci.yml`，学自 uv/vite 项目的通行写法）：
 `backend`（`uv sync --frozen --extra dev` → ruff → `scripts/check_layers.py` → pytest）+
@@ -1184,7 +1218,7 @@ pytest 收不到（缺索引时不会假失败）。
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 462 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 465 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：
