@@ -109,11 +109,37 @@ def resolve_selector(sel: dict, chunks: list[dict]) -> set[str]:
     return out
 
 
+def resolve_passages(passages: list[str], chunks: list[dict]) -> dict[str, list[str]]:
+    """把「原文片段」解析成命中它的 chunk_id 列表（可能 0 条，也可能多条）。
+
+    为什么要这第三种标注：显式 `chunk_id` 里含正文 hash（`角色::H2::H3::H4::sha8`），
+    **重分块或清洗规则一改就全体腐烂**，评测集会静默指向不存在的块；
+    选择器（`relevant_selector`）按元数据匹配，遇到 wiki 改组件名（`声骸推荐`→`声骸套装推荐`）
+    也一样会错位。逐字片段是语料里最稳定的东西，代价是它必须真的逐字一致。
+
+    匹配文本用的是读取端 `chunk_text`（与建索引/精排同一份清洗口径），
+    所以「清洗规则改了」不会让标注一起烂掉。
+    """
+    from wuwa_rag.text import chunk_text
+
+    # 每块只清洗一次：p 在外层循环时 chunk_text 会被重复跑 P×N 遍（N=语料块数），
+    # 而它是正则清洗、并不便宜。体检段落与 evaluate 都调本函数，别把常数放大十倍。
+    texts = [(r["chunk_id"], chunk_text(r)) for r in chunks]
+    out: dict[str, list[str]] = {}
+    for p in passages:
+        out[p] = [cid for cid, t in texts if p in t]
+    return out
+
+
 def resolve_relevant(item: dict, chunks: list[dict]) -> tuple[set[str], str]:
     """返回 (相关 chunk_id 集合, 标注来源)。来源用于分组报告。"""
     explicit = set(item.get("relevant_chunk_ids") or [])
     if explicit:
         return explicit, "manual"
+    passages = item.get("relevant_passages") or []
+    if passages:
+        hits = resolve_passages(passages, chunks)
+        return {cid for ids in hits.values() for cid in ids}, "passage"
     sel = item.get("relevant_selector")
     if sel:
         return resolve_selector(sel, chunks), "selector"
@@ -193,8 +219,11 @@ def evaluate(dataset: list[dict], chunks: list[dict], topk: int, stage: str) -> 
 
     positive = [r for r in results if r["n_relevant"] > 0]
     negative = [r for r in results if r["n_relevant"] == 0]
-    manual = [r for r in positive if r["source"] == "manual"]
-    selector = [r for r in positive if r["source"] == "selector"]
+    # 按标注来源分组（三种标注的可信度不同，混在一起会互相污染，见 print_report 的说明）。
+    # 新增一种标注形态只要往 `groups` 里加一项，不再复制一遍聚合块。
+    groups = {"manual": [r for r in positive if r["source"] == "manual"],
+              "selector": [r for r in positive if r["source"] == "selector"],
+              "passage": [r for r in positive if r["source"] == "passage"]}
 
     return {
         "stage": stage,
@@ -209,15 +238,12 @@ def evaluate(dataset: list[dict], chunks: list[dict], topk: int, stage: str) -> 
                 "precision": _avg(positive, "precision"),
                 "mrr": _avg(positive, "mrr"),
             },
-            # 人工标注与选择器标注分开报：前者可信，后者是宽松上界，混在一起会互相污染
-            "manual_only": {"n": len(manual), "recall": _avg(manual, "recall"),
-                            "recall_ceiling": _avg(manual, "recall_ceiling"),
-                            "recall_gap": _avg(manual, "recall_gap"),
-                            "precision": _avg(manual, "precision"), "mrr": _avg(manual, "mrr")},
-            "selector_only": {"n": len(selector), "recall": _avg(selector, "recall"),
-                              "recall_ceiling": _avg(selector, "recall_ceiling"),
-                              "recall_gap": _avg(selector, "recall_gap"),
-                              "precision": _avg(selector, "precision"), "mrr": _avg(selector, "mrr")},
+            **{f"{name}_only": {
+                   "n": len(rows), "recall": _avg(rows, "recall"),
+                   "recall_ceiling": _avg(rows, "recall_ceiling"),
+                   "recall_gap": _avg(rows, "recall_gap"),
+                   "precision": _avg(rows, "precision"), "mrr": _avg(rows, "mrr")}
+               for name, rows in groups.items()},
             "negative_gate_empty_rate": (
                 round(sum(1 for r in negative if r["gate_ok"]) / len(negative), 4)
                 if negative else None
@@ -245,8 +271,11 @@ def print_report(rep: dict) -> None:
               f"precision={d['precision']:.4f} MRR={d['mrr']:.4f}")
 
     print("【按标注可信度分组】—— 看 manual 那行做参数决策，selector 是宽松上界仅供趋势参考")
-    _row("人工标注 (manual)", s["manual_only"])
-    _row("选择器标注 (selector)", s["selector_only"])
+    for label, key in (("人工标注 (manual)", "manual_only"),
+                       ("选择器标注 (selector)", "selector_only"),
+                       ("片段锚点标注 (passage)", "passage_only")):
+        if s.get(key, {}).get("n"):
+            _row(label, s[key])
     _row("正样本合计", s["positive"])
     neg = s["negative_gate_empty_rate"]
     neg_txt = f"{neg:.4f}" if neg is not None else "n/a"
@@ -314,6 +343,7 @@ def main() -> int:
     print(f"语料: {len(chunks)} 块")
 
     # 标注体检：显式 id 必须真实存在，否则指标恒为 0 且看不出来
+    # （片段标注的体检在 resolve 之后另有一段，见 passages）
     all_ids = {r["chunk_id"] for r in chunks}
     stale = [(i["id"], c) for i in dataset for c in (i.get("relevant_chunk_ids") or [])
              if c not in all_ids]
@@ -322,6 +352,24 @@ def main() -> int:
         for iid, c in stale:
             print(f"    {iid}: {c}")
         return 2
+
+    # 片段标注的体检：逐字匹配不到 = 语料改写过或标注抄错了，
+    # 静默跳过的话指标会虚低到看不出来（和上面显式 id 那一段同一条纪律）。
+    # 全量锚点**一次**解析（每次调用都要清洗整份语料），两处检查复用同一个结果。
+    anchors = resolve_passages(sorted({q for i in dataset
+                                       for q in (i.get("relevant_passages") or [])}), chunks)
+    broken = [(i["id"], q) for i in dataset for q in (i.get("relevant_passages") or [])
+              if not anchors[q]]
+    if broken:
+        print(f"\n⚠️ 发现 {len(broken)} 个片段锚点在语料里找不到（指标会虚低）：")
+        for iid, q in broken[:10]:
+            print(f"    {iid}: {q[:60]}")
+        return 2
+    multi = [len(anchors[q]) for i in dataset for q in (i.get("relevant_passages") or [])
+             if len(anchors[q]) > 1]
+    if multi:
+        print(f"提示：{len(multi)} 个片段锚点命中多块（跨角色同文本），按多目标计，"
+              f"precision 会被压低（最多 {max(multi)} 块）")
 
     print(f"开始评测 (stage={args.stage}, topk={topk})…")
     rep = evaluate(dataset, chunks, topk, args.stage)

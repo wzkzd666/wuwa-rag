@@ -16,16 +16,18 @@
   {
     "id": "chain_manual",
     "query": "散华共鸣链效果",
-    "relevant_chunk_ids": ["散华::角色养成::共鸣链::-::05ec07c1"],
+    "relevant_passages": [
+      "| 剑修五蕴 | 施放共鸣解放·焦瞑冻土时，回复10点共鸣能量。并且5秒内的下次重击·爆裂伤害提升120%。 |"
+    ],
     "scene": "fact",
-    "note": "人工标注：散华共鸣链仅 1 块"
+    "note": "人工标注：散华共鸣链仅 1 块。2026-10-24 由 chunk_id 换成片段锚点——chunk_id 含正文 hash，重分块或清洗规则一改就全体腐烂，逐字片段不会"
   },
   {
     "id": "semantic_mech_manual",
     "query": "守岸人的核心机制是什么",
     "relevant_chunk_ids": ["守岸人::Character Strategy::角色机制::核心机制::c712419a"],
     "scene": "semantic",
-    "note": "人工标注：点名「核心机制」，对应唯一块"
+    "note": "人工标注：点名「核心机制」，对应唯一块。试过换片段锚点，但该块正文里没有非面包屑的唯一逐字行（面包屑会跨角色重复），故仍用显式 chunk_id，重分块后需回头核对"
   },
   {
     "id": "multi_team_manual",
