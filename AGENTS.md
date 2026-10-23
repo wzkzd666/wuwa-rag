@@ -71,6 +71,8 @@ uv run wuwa-corpcheck                    # 【只读】语料对账：chunks.jso
                                        #   这条把当时手写的对账固化下来。见「语料对账」一节。
 
 uv run python -m wuwa_rag.dialog.graph    # RAG 冒烟：跑 3 个内置问题
+uv run python tests/smoke_endpoints.py    # 【要服务在跑】全栈冒烟：14 个只读端点 + 一轮 SSE，
+                                       #   断状态码与响应键集合（改过端点接线/日志名单/回收清单后跑一次）
 uv run ruff check src                  # lint（line-length=100）
 ```
 
@@ -1483,6 +1485,14 @@ pytest 收不到（缺索引时不会假失败）。
   ⚠️ 人工标注 precision=0.1667 恰等于 `1/6`，是 topk=6 下的**数学上限**（6 条里只有 1 条相关），不是检索差。
 - **`tests/ab_topk_rerank_in.py`**：`TOPK_RERANK_IN` 的 A/B 实测脚本（一次性诊断用，非测试）。2026-10-06 跑过 20/25/30/40 四档，**结论是维持 20**——详见 `config.py` 该参数的注释（含完整数据表与「首版 A/B 因把 `TOPK_RERANK_IN` 误当 `topk` 而得出相反结论」的教训）。
 - **`tests/measure_rerank_gate.py`**：`RERANK_MIN_SCORE` 该不该按槽位分档的实测脚本（一次性诊断用，非测试，同样不离线）。2026-10-24 跑过，**结论是不分档**——数字与推理在「审过但决定不改的四条」。它与 `/debug/retrieval` 共用同一份 `recall_stages` + `rerank`，所以看到的分数就是问答现场用的分数。
+- **`tests/smoke_endpoints.py`**：全栈冒烟（要 `.\dev.bat` 在跑，非离线；文件名不以 `test_` 开头，pytest 不收集）。
+  14 个只读端点 + 一轮 SSE，逐个断「HTTP 200 且响应里有那些键」，外加 `done` 的键集合
+  （少一个键 = 前端某个面板拿到 undefined）。补的是**「判据层单测全绿但端点接线断了也不会红」**这一层，
+  今天改过 `ww_logger` 名单、`conversations` 删除口径、`api/app` 回收清单、`retrieve` 重构，全靠它兜。
+  2026-10-24 首跑全通过（token=120 stage=4 done=1 error=0）。
+  两条形状顺手钉在这儿，别再当 422 报：**`/feedback/mine` 的查询参数叫 `target_ids`**（写成 `ids`
+  是 422，那是校验对了），**`/conversations` 每一项的对外键叫 `thread_id`、没有 `session_id`**
+  （前端的删除与重命名都拿它）。脚本自己造的那次会话会在结束时删掉，不给库留 residue。
 - **`tests/probe_prompt_echo.py`**：提示词回显探针（要 API 在跑；同样不以 `test_` 开头 → 不收进门禁）。
   换生成模型前先跑它，再决定要不要加输出侧清洗——理由见「审过但决定不改的三条」。
 - **`tests/eval_answers.py`**：答案级效果回归（要服务在跑）。9 条固定问句走真链路 → `check_answer` 确定性检查 + intent 断言；`--judge` 才加忠实度判定（每问 2 次 8b），**用 `--judge` 之前必须先 `--selftest` 通过**（否则判分层可能只会打满分，详见「答案级质量闸门」）。
