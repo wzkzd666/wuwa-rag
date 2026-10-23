@@ -25,10 +25,16 @@ _CONFIGURED = False
 # 「文件不存在/空文件」，误判成「这条链路没跑」（`music` 与 `auth` 曾长期如此，
 # 2026-10-23 由 tests/test_config_and_prompt.py 的名单一致性断言收口）。
 _MODULE_LOGS = (
-    "upload", "rag", "neo4j", "vec", "bm25", "celery",
+    "upload", "rag", "neo4j", "vec", "bm25", "worker",
     "auth", "conv", "usage", "feedback", "profile",
     "llm", "llmstore", "tts", "emotion", "music", "settings",
 )
+# ⚠️ 这一档以前叫 `celery`，2026-10-24 改名成 `worker`：**这个名字是 Celery 框架自己占用的**
+#    （`celery.app.log` 的 default 档配置的就是它），worker 启动时会把同一个 logger 重配，
+#    我们挂在上面的文件 handler 就不起作用了。后果不是报错而是**文件永远为空**：实测 `logs/celery.log` 与它 7 份轮转文件（10-09/10/12/15/21/22/23）
+#    **全是 0 字节**，两周里 worker 任务级的日志一条都没落过盘；而同期由 worker 写的
+#    `vec.log` / `bm25.log` / `neo4j.log` 都有 `| worker |` 行 —— 唯一坏掉的就是这个撞名。
+#    改名与 log role 列的取值（api/worker/main）也对齐了。
 
 # 第三方库降噪：这些库在 root=INFO 下仍会刷大量 INFO/DEBUG（模型加载进度条、
 # bolt 握手、HF 缓存探测），对排查业务问题无价值。

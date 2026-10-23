@@ -44,7 +44,10 @@ def _run(func):
     return asyncio.run(func, loop_factory=asyncio.SelectorEventLoop)
 
 
-log = get_logger("celery")
+# ⚠️ 名字不能叫 "celery"：那是 Celery 框架自己占用的 logger 名，worker 启动时会被它重新配置，
+#    实测结果是 logs/celery.log 与其全部轮转文件常年 0 字节（任务级日志一条都没落盘）。
+#    改名原因与证据见 ww_logger._MODULE_LOGS 的注释。
+log = get_logger("worker")
 s = get_settings()
 ensure_dirs()
 
