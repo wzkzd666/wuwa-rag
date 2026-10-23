@@ -122,7 +122,8 @@ def dense_writer_lock():
     compactor 交接没有，所以「同一个持久化目录」必须由调用方自己串行化。
 
     用 OS 的**强制文件锁**而不是 pid 文件：进程崩了锁自动释放，不留死锁需要人工清。
-    拿不到锁直接拒绝启动（宁可让第二次调用失败，也不要它把第一份索引写坏）。
+    拿不到锁就拒绝**这一次写入**（宁可让第二次调用失败，也不要它把第一份索引写坏）：
+    命令行由 `main()` 转成退出码 1，worker 那边则是一次任务正常落账成 fail。
     """
     path = get_settings().VECTOR_DIR / "chroma.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
