@@ -54,19 +54,28 @@ def _terms_of(rows: list[dict]) -> list[str]:
 def plan_reconcile(stored: dict[str, str | None], rows: list[dict], *, force: bool) -> tuple[list[dict], list[str]]:
     """比「索引里存的文本」与「当前口径算出来的文本」，返回 (要重嵌的块, 要删的孤儿 id)。
 
-    为什么按文本比而不是按时间：documents 里存的就是 embed_input(breadcrumb, text)，
+    为什么按文本比：documents 里存的就是 embed_input(breadcrumb, text)，
     而 text.py 的清洗规则（长连字符、按键图标残渣、占位表头）一改，旧点存的还是旧口径
     文本，查询侧却已经是新口径 —— 两边不一致是实打实的召回损耗（2026-10-24 实测：
-    36 块配队文本在索引里仍是 `-----` 串，PG 里早已是顿号）。
+    36 块配队文本在索引里仍是 `-----` 串，PG 里早已换成顿号）。
     文本没变就不必再跑一遍 embedding（6741 块 CPU 全量重嵌要几十分钟，跳过才是常态）。
 
     孤儿 id 也要删：chunk_id 含正文 hash，wiki 改版后旧 id 不会自然消失，
     upsert 只增不删，于是「全量重建」其实并不会把旧块清掉 —— 召回到已废的旧知识就是这么来的。
     按角色刷新（delete_dense_by_character）是另一条路，两者都要在：这条管离线重建，那条管在线刷新。
+
+    ⚠️⚠️ **删的范围只能限定在「这次调用负责的角色」之内**。`build_dense` 有两个调用方：
+    命令行 `wuwa-index` 拿的是**全库**行，而 worker 的 `index_character` 只拿**一个角色**的行
+    （119 块）。当时把「stored 里不在 rows 里的」一律当孤儿，等于让一次角色刷新
+    把其余 58 个角色的向量全删了 —— 2026-10-24 自己踩中并实测复现：一次刷新触发后
+    Chroma 从 6741 掉到 119，检索评测 recall 从 0.88 塌到 0.05，而五步链一路报绿。
+    所以现在按 `chunk_id` 首段（就是角色名）限定：别人的块一律不动。
     """
     ids = {r["chunk_id"] for r in rows}
+    owned = {cid.split("::", 1)[0] for cid in ids}
     todo = rows if force else [r for r in rows if stored.get(r["chunk_id"]) != _embed_input(r)]
-    orphans = [cid for cid in stored if cid not in ids]
+    orphans = [cid for cid in stored
+               if cid not in ids and cid.split("::", 1)[0] in owned]
     return todo, orphans
 
 

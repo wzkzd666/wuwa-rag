@@ -224,11 +224,28 @@ def test_稠密索引只重嵌口径不一致或缺失的块() -> None:
     stored = {
         "甲::a": ok_cid,                        # 与当前口径一致 → 不必重嵌
         "乙::b": "乙 › b\n队伍组成 | 乙-----乙+丙+丁",   # 旧口径（未换顿号）→ 必须重嵌
-        "丙::c": "索引里有、PG 里已经没有了",            # 孤儿
+        "甲::旧": "甲 › 旧",                     # 本角色的改版前旧块（PG 已没有）→ 孤儿
+        "戊::z": "戊 › z",                      # **别的角色**的块：本次没传它，一律不许动
     }
     todo, orphans = plan_reconcile(stored, [same, stale], force=False)
     assert [r["chunk_id"] for r in todo] == ["乙::b"], todo
-    assert orphans == ["丙::c"], orphans
+    assert orphans == ["甲::旧"], orphans
+
+
+def test_按角色重建绝不允许删别人的向量() -> None:
+    """`build_dense` 有两个调用方：命令行 `wuwa-index` 拿**全库**行，
+    worker 的 `index_character` 只拿**一个角色**的行（实测 119 块）。
+    曾经按「stored 里不在 rows 里的一律是孤儿」判，一次角色刷新就把其余 58 个角色的
+    向量全删了（实测：Chroma 6741 → 119，检索评测 recall 0.88 → 0.05，五步链还一路报绿）。
+    这条用例就是那次事故的固化。
+    """
+    from wuwa_rag.knowledge.index.build_index import plan_reconcile
+
+    rows = [_row("今汐::a", "今汐 › a", "正文"), _row("今汐::b", "今汐 › b", "正文")]
+    stored = {f"{c}::{i}": "x" for c in ("今汐", "守岸人", "卡卡罗") for i in range(3)}
+    _todo, orphans = plan_reconcile(stored, rows, force=False)
+    assert sorted(orphans) == ["今汐::0", "今汐::1", "今汐::2"], orphans
+    assert not [o for o in orphans if o.startswith(("守岸人", "卡卡罗"))]
 
 
 def test_索引里没有的块也算要补() -> None:
