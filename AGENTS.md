@@ -1007,7 +1007,14 @@ DEK     ──KEK_pp──> dek_by_pp       KEK_pp  = 加密口令 + key_salt �
     所以「全量重建」其实并不会清掉 wiki 改版后换了 chunk_id 的旧块（按角色刷新是另一条路，两者都要）。
     怀疑索引本身坏了仍可用 `wuwa-index --full` 强制全量；未知参数**直接退出**（`--force` 这种笔误
     被静默当成增量跑，差的就是「改版后旧块还在」这类最难查的故障）。
-    重跑后复测：**文本不一致 0 / 6741**，缺 id 0，BM25 同步重建（695 术语）。
+    复测口径（2026-10-24 两次，结论相同但**第二次才算数**）：
+    ①第一次是「36 块旧口径文本被某次增量跑顺手补掉了」，而那次跑其实是一次变异测试
+    （我把 `--full` 的参数守卫临时拆掉，`main()` 一路跑进了真库真 Chroma）——
+    结论碰巧对，但**测的是事故不是判据**，当时不该写进 AGENTS 当证据；
+    ②第二次是目录推倒重建后的干净全量：`uv run wuwa-corpcheck` exit 0，
+    `[对账] PG=6741 chunks.jsonl=6741 Chroma=6741 BM25=6741 图谱角色=58 raw 文件=58`，
+    六方一致、稠密文本口径不一致 **0 / 6741**（`compare_doc_texts` 与 `plan_reconcile`
+    用的是同一个 `text.embed_input`，所以这条对账不会漂成两套判据）。
   - ⚠️⚠️ **同一轮里我自己捅的娄子（记下来是因为它暴露了一个通用的坑）**：给 `plan_reconcile`
     加「删掉 PG 已不存在的孤儿 id」时，判据写成「stored 里不在 rows 里的都算孤儿」。
     但 `build_dense` 有**两个调用范围不同的调用方**：命令行 `wuwa-index` 传全库行，
@@ -1348,7 +1355,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **521 条用例、全量离线、空载约 5s**（2026-10-24 有两次测到 9.8~10.0s，
+`uv run pytest` → **521 条用例、全量离线、空载 4.4~4.6s**（同一天有一次测到 9.8~10.0s，
 原因是同时有个 CPU 全量重嵌在跑 —— 读这个数字前先确认没有别的重活在跑）。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
 十七个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
@@ -1372,7 +1379,8 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_answer_quality.py` | **答案级闸门 8 条**：干净答案一条不报（负样本）、空答案、`[n]` 残留、百分比裸数值、重复列表行、昵称引号（**没给昵称不许猜**）、情绪标签泄漏（曾写成查键 → 恒不报）、配队追问的三态 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → 465 条 / 5.7s；第十一轮（一格两支队伍：`split_teams` 收进 entities 供抽取/读取两侧共用 + `wuwa-graph` 改为先清出边再写）再补 1 条 → 466 条 / 5.21s；第十二轮（精排异常判空 + 召回调试出口共用同一份实现）再补 3 条 → **469 条 / 5.0s**；第十三轮（答案级质量闸门 + 判分层的三层假绿自检）再补 8 条 → 477 条；第十四轮（画像否定撤销，判据取在用户原话上）再补 23 条 → **500 条 / 5.28s**；第十八轮（评测集片段锚点 + 锚点失效门禁）再补 3 条 → 实测 **504 条**；第十九轮（画像前缀歧义）再补 11 条、第二十轮（写 Chroma 互斥锁）再补 3 条、第二十一轮（转录按前缀回收 + 回收条数只报真删成的 + 锁抛普通异常而不是 SystemExit）再补 3 条 → **521 条 / 9.99s**。⚠️ 两点如实记下：① 500 与 504 之间链条对不上（差 1 条，追不到是哪一轮加的），**以空载实测总数为准，不再靠逐轮加减**；② 最后这个 9.84s 是**把 CPU 让给补嵌进程时测的**，不能与前面那些空载数字比，空载后要回来改这一句）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → 465 条 / 5.7s；第十一轮（一格两支队伍：`split_teams` 收进 entities 供抽取/读取两侧共用 + `wuwa-graph` 改为先清出边再写）再补 1 条 → 466 条 / 5.21s；第十二轮（精排异常判空 + 召回调试出口共用同一份实现）再补 3 条 → **469 条 / 5.0s**；第十三轮（答案级质量闸门 + 判分层的三层假绿自检）再补 8 条 → 477 条；第十四轮（画像否定撤销，判据取在用户原话上）再补 23 条 → **500 条 / 5.28s**；第十八轮（评测集片段锚点 + 锚点失效门禁）再补 3 条 → 实测 **504 条**；第十九轮（画像前缀歧义）再补 11 条、第二十轮（写 Chroma 互斥锁）再补 3 条、第二十一轮（转录按前缀回收 + 回收条数只报真删成的 + 锁抛普通异常而不是 SystemExit）再补 3 条 → **521 条**。
+补完后空载复测两次：**4.58s / 4.41s**（那个 9.99s 确实是补嵌抢 CPU 造成的，同一份用例、同一台机器）。⚠️ 一条如实记下：500 与 504 之间链条对不上（差 1 条，追不到是哪一轮加的），**以空载实测总数为准，不再靠逐轮加减）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 ✅ **2026-10-24 这条约定真的变成机器门禁了**（`.github/workflows/ci.yml`，学自 uv/vite 项目的通行写法）：
 `backend`（`uv sync --frozen --extra dev` → ruff → `scripts/check_layers.py` → pytest）+
@@ -1664,7 +1672,20 @@ messages」这条**正确**逻辑，测出来的是替身不像真而不是代�
 
 ### 日志
 
-`ww_logger.get_logger(name)` → `logs/<name>.log`，**一个大类一个文件**（名单在 `ww_logger._MODULE_LOGS`：app 是 root 兜底，独立文件 17 个 —— upload/rag/neo4j/vec/bm25/celery/auth/conv/usage/feedback/profile/llm/llmstore/tts/emotion/music/settings），每日轮转留 7 天，另有 `app.log` 兜底。⚠️ **`_MODULE_LOGS` 漏一个名字不报错，只会让那个 logger 静默落进 `app.log`** —— 排查时按大类去翻 `<name>.log` 就会读成「这条链路没跑」（`music` 与 `auth` 长期如此，2026-10-23 补全并由 `test_config_and_prompt.py::test_日志大类名单与调用点一致` 双向钉住：调用点用了却没进名单 = 红；名单里留着没人引用的名字 = 也红）。扫描调用点时两个坑：名字带数字（neo4j/bm25），以及引号两种风格混用（`get_logger('upload')` 与 `get_logger("rag")`）。每行格式 `时间 | 级别 | role | logger | 消息`，**role 列**逐行标注是谁写的：`api`（FastAPI）/ `worker`（Celery）/ `main`（兜底）。⚠️ **文件不再按 role 拆分**（曾产出 `rag.api.log` / `rag.worker.log` / `rag.main.log` 一堆文件，2026-09-22 已废止）：api 与 worker **共写同一个 `rag.log`**，靠 role 列区分，跨进程轮转安全由 `concurrent-log-handler` 的文件锁保证。**`start.ps1` 启动的两个窗口会显式注入 `WUWA_LOG_ROLE`**（Celery=worker、FastAPI=api），argv 推断只是兜底——注意 `python -m wuwa_rag.api.server` 时 `sys.argv[0]` 是模块**文件路径**（反斜杠），必须先归一化斜杠才能匹配 `wuwa_rag/api`（2026-09-22 首轮线上就因漏了这步，API 进程的 role 被记成 `main`）。
+`ww_logger.get_logger(name)` → `logs/<name>.log`，**一个大类一个文件**（名单在 `ww_logger._MODULE_LOGS`：app 是 root 兜底，独立文件 17 个 —— upload/rag/neo4j/vec/bm25/worker/auth/conv/usage/feedback/profile/llm/llmstore/tts/emotion/music/settings），每日轮转留 7 天，另有 `app.log` 兜底。⚠️ **`_MODULE_LOGS` 漏一个名字不报错，只会让那个 logger 静默落进 `app.log`** —— 排查时按大类去翻 `<name>.log` 就会读成「这条链路没跑」（`music` 与 `auth` 长期如此，2026-10-23 补全并由 `test_config_and_prompt.py::test_日志大类名单与调用点一致` 双向钉住：调用点用了却没进名单 = 红；名单里留着没人引用的名字 = 也红）。扫描调用点时两个坑：名字带数字（neo4j/bm25），以及引号两种风格混用（`get_logger('upload')` 与 `get_logger("rag")`）。每行格式 `时间 | 级别 | role | logger | 消息`，**role 列**逐行标注是谁写的：`api`（FastAPI）/ `worker`（Celery）/ `main`（兜底）。⚠️ **文件不再按 role 拆分**（曾产出 `rag.api.log` / `rag.worker.log` / `rag.main.log` 一堆文件，2026-09-22 已废止）：api 与 worker **共写同一个 `rag.log`**，靠 role 列区分，跨进程轮转安全由 `concurrent-log-handler` 的文件锁保证。**`start.ps1` 启动的两个窗口会显式注入 `WUWA_LOG_ROLE`**（Celery=worker、FastAPI=api），argv 推断只是兜底——注意 `python -m wuwa_rag.api.server` 时 `sys.argv[0]` 是模块**文件路径**（反斜杠），必须先归一化斜杠才能匹配 `wuwa_rag/api`（2026-09-22 首轮线上就因漏了这步，API 进程的 role 被记成 `main`）。
+
+🔴 **2026-10-24 抓到一件更严重的事：`celery` 那一档常年一个字都没写过**，不是「落进 app.log」，
+是**彻底消失**。指纹：`logs/celery.log` 与它的 7 份轮转文件（10-09/10/12/15/21/22/23）**全是 0 字节**，
+而同一进程同时段写的 `vec.log` / `bm25.log` / `neo4j.log` 都有 `| worker |` 行 —— 唯一坏掉的就是这一档。
+根因是**名字撞了框架**：`get_logger("celery")` 拿到的是 `logging.getLogger("celery")` 这个对象，
+而 Celery 自己的日志配置（`celery.app.log` 的 default 档）用的就是这个名字，worker 启动时把它重配了；
+上面那条「漏名字只会静默落进 app.log」的判据对**这种撞名**完全无效 —— 名字在名单里、调用点也对得上、
+文件也存在，唯独内容是空的。
+修法：改名 `celery` → `worker`（与 role 列的取值对齐）。端到端验过：重启 worker 后
+`celery call wuwa_rag.tasks.corpcheck` 在 `logs/worker.log` 落出
+`… | INFO | worker | worker | 定时语料对账：PG / jsonl / Chroma / BM25 / Neo4j / raw 六方一致`。
+⚠️ 由此加一条排查纪律：**别用「文件存在」证明日志系统在写**，要看 mtime 与字节数；
+一个从来没落过盘的文件与一个今天没触发的文件，长得一模一样。
 
 ✅ **跨进程日志轮转（已修，2026-09-22）**：曾因 FastAPI 与 Celery worker 共用同一个 `rag.log`，`doRollover` 的「先 close 自己的 stream、再 os.rename」被另一进程占用句柄 → `PermissionError [WinError 32]`；且 `shouldRollover()` 此后会逐条重试这个失败的 rename，**该 logger 当天所有日志一条都写不进去**（实测指纹：`app.log` / `neo4j.log` 都产出了 `.2026-09-21` 轮转文件，唯独 `rag.log` 没有且停更）。
 修法（两层）：① **基类换成 `concurrent-log-handler` 的 `ConcurrentTimedRotatingFileHandler`**（即 `_SafeTimedRotatingFileHandler`）—— 靠**跨进程文件锁**协调轮转 + 基于文件 mtime 智能判断是否真需轮转，这才是根治，也让「api 与 worker 共写同一个 `rag.log`」重新成立（这正是按 role 拆文件的做法被废止的前提）。实测两进程对齐同一时刻并发 `doRollover()`：双双成功、无异常、只产出**一份**轮转产物、12 行日志一条不丢，且没有兜底 warning（说明是锁机制本身起效，不是靠兜底救场）。② 兜底：`doRollover` 抛 `OSError` 时重开 stream + 把 `rolloverAt` 推到次日，只留一条 warning，避免该 logger 整天哑掉。`_process_tag()` 现在只用于给每行日志打 role 标签（见上条），**不再参与文件名**。
