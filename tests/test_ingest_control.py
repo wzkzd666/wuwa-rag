@@ -291,6 +291,56 @@ def test_未知命令行参数直接退出(monkeypatch) -> None:
         build_index.main()
 
 
+# ---------- 写 Chroma 的互斥锁 ----------
+# 2026-10-24 实测：一个 `wuwa-index` 被我误判成已退出（退出码被管道里的 `tail` 吃掉），
+# 于是又起一个，两个进程并发写同一个持久化目录 33 分钟。两边收尾都打印「Chroma: 共 6741 条」，
+# 进程一退之后连 `count()` 都抛 `InternalError: ... Error loading hnsw index`，
+# 6741 点全废、整目录推倒重建。Chroma 的 sqlite 侧有写锁，向量段文件与 compactor 交接没有，
+# 所以「同一个目录只能有一个写者」必须由调用方自己保证。
+def _locked_module(tmp_path, monkeypatch):
+    """把 `get_settings` 换成指向 tmp_path 的假设置：用例不碰真语料目录。"""
+    from types import SimpleNamespace
+
+    from wuwa_rag.knowledge.index import build_index
+
+    monkeypatch.setattr(build_index, "get_settings",
+                        lambda: SimpleNamespace(VECTOR_DIR=tmp_path))
+    return build_index
+
+
+def test_第二个写索引的进程必须被当场拒住(tmp_path, monkeypatch) -> None:
+    bi = _locked_module(tmp_path, monkeypatch)
+    with bi.dense_writer_lock():
+        with pytest.raises(SystemExit, match="另一个进程正在写稠密索引"):
+            with bi.dense_writer_lock():
+                pass   # 走到这里就已经是缺陷了
+    assert (tmp_path / "chroma.lock").exists(), "锁文件要落在 VECTOR_DIR 里，排查时看得见"
+
+
+def test_锁释放后可以再拿(tmp_path, monkeypatch) -> None:
+    """不是一次性门闩：按角色刷新会在同一进程里连着调多次（先删旧向量再 upsert），
+    第二次拿不到锁就等于流水线自己把自己拒了。"""
+    bi = _locked_module(tmp_path, monkeypatch)
+    with bi.dense_writer_lock():
+        pass
+    with bi.dense_writer_lock():
+        pass
+
+
+def test_两个写入口都在锁里() -> None:
+    """`build_dense` 与 `delete_dense_by_character` 都写 Chroma，漏一个就还是并发写。
+
+    后者尤其容易忘：它由 **API 进程**发起（verify 的按角色清库重爬），
+    而前者此刻可能正在 worker 里跑 —— 两个进程、同一个目录。
+    """
+    import inspect
+
+    from wuwa_rag.knowledge.index import build_index
+
+    for fn in (build_index.build_dense, build_index.delete_dense_by_character):
+        assert "dense_writer_lock()" in inspect.getsource(fn), fn.__name__
+
+
 # ---------- 精排失败的处理 ----------
 # `RERANK_MIN_SCORE` 是「库里到底有没有答案」的那道门（top1 低于阈值就判无答案）。
 # 精排自己挂掉时如果退回「按 RRF 顺序硬给 top6」，等于**把门拆了还装作一切正常**：

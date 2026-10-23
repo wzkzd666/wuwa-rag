@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+from contextlib import contextmanager
 
 import chromadb
 from chromadb.config import Settings
@@ -79,6 +81,57 @@ def plan_reconcile(stored: dict[str, str | None], rows: list[dict], *, force: bo
     return todo, orphans
 
 
+# ───────────── 写 Chroma 的互斥锁 ─────────────
+if os.name == "nt":
+    import msvcrt
+
+    def _lock_exclusive(fh) -> None:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(fh) -> None:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _lock_exclusive(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def dense_writer_lock():
+    """同一时刻只准一个进程写稠密索引 —— 并发写会把 HNSW 段写坏，且**当场看不出来**。
+
+    2026-10-24 实测：一个 `wuwa-index` 跑到一半我以为它死了（退出码被管道里的 `tail`
+    吃掉），于是又起一个，两个进程并发写了 33 分钟。两边收尾都打印「Chroma: 共 6741 条」，
+    进程一退之后连 `count()` 都抛
+    `InternalError: ... Error constructing hnsw segment reader: Error loading hnsw index`
+    —— 6741 点全废，只能整目录推倒重建。Chroma 的 sqlite 侧有写锁，向量段文件与
+    compactor 交接没有，所以「同一个持久化目录」必须由调用方自己串行化。
+
+    用 OS 的**强制文件锁**而不是 pid 文件：进程崩了锁自动释放，不留死锁需要人工清。
+    拿不到锁直接拒绝启动（宁可让第二次调用失败，也不要它把第一份索引写坏）。
+    """
+    path = get_settings().VECTOR_DIR / "chroma.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+b")
+    try:
+        _lock_exclusive(fh)
+    except OSError:
+        fh.close()
+        raise SystemExit(
+            f"另一个进程正在写稠密索引（{path} 被占用）。"
+            "并发写会把 Chroma 写坏 —— 等它跑完再跑，或用 logs/vec.log 看进度。"
+        )
+    try:
+        yield fh
+    finally:
+        _unlock(fh)
+        fh.close()
+
+
 def build_sparse(rows: list[dict]) -> None:
     terms = _terms_of(rows)
     add_terms(terms)
@@ -91,7 +144,13 @@ def build_sparse(rows: list[dict]) -> None:
 
 
 def build_dense(rows: list[dict], *, force: bool = False) -> None:
-    """稠密路：只重嵌「索引里存的文本 ≠ 当前口径文本」的块，并删掉 PG 已不存在的孤儿块。
+    """稠密路入口：拿住写锁再干活（锁的由来见 `dense_writer_lock`）。"""
+    with dense_writer_lock():
+        _build_dense(rows, force=force)
+
+
+def _build_dense(rows: list[dict], *, force: bool) -> None:
+    """只重嵌「索引里存的文本 ≠ 当前口径文本」的块，并删掉 PG 已不存在的孤儿块。
 
     force=True（命令行 `--full`）回到无脑全量重嵌。
     """
@@ -143,7 +202,13 @@ def delete_dense_by_character(character: str) -> int:
 
     chunk_id 含内容 hash，wiki 改版后新旧块并存 → 召回到旧知识。
     返回删前的该角色点数（仅日志用途，不保证与 delete 完全原子）。
+    写锁同样要拿：这条路径是 API 进程发起的，而 worker 可能正在建索引。
     """
+    with dense_writer_lock():
+        return _delete_dense_by_character(character)
+
+
+def _delete_dense_by_character(character: str) -> int:
     s = get_settings()
     client = chromadb.PersistentClient(
         path=str(s.VECTOR_DIR / "chroma"),
