@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
+import { Loader2, RefreshCw } from 'lucide-react'
 
 import UsageCharts from './UsageCharts'
+import LoadFail from './LoadFail'
 import { useStore } from '../store/useStore'
 import { usageSummary } from '../lib/api'
 import type { UsageSummary } from '../types'
@@ -92,9 +93,8 @@ export default function UsagePanel() {
       </div>
 
       {err && (
-        <div className="kb-warn">
-          <AlertTriangle size={15} /> 读取失败：{err}
-        </div>
+        <LoadFail what="用量" error={err} onRetry={() => void load()}
+                  note="这不代表近段时间没有用量" />
       )}
 
       <div className="view-tabs">

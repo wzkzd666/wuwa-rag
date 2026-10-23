@@ -1,9 +1,10 @@
 import { fmtTime } from '../lib/format'
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Loader2, RefreshCw, ShieldCheck, Trash2, Users } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Loader2, RefreshCw, ShieldCheck, Trash2, Users } from 'lucide-react'
 
 import { useStore } from '../store/useStore'
 import ConfirmButton from './ConfirmButton'
+import LoadFail from './LoadFail'
 import { adminDeleteUser, adminUsers } from '../lib/api'
 import type { AdminUserRow } from '../types'
 
@@ -87,9 +88,8 @@ export default function AdminUsersCard() {
       </div>
 
       {err && (
-        <div className="kb-warn">
-          <AlertTriangle size={15} /> 读取用户清单失败：{err}
-        </div>
+        <LoadFail what="用户清单" error={err} onRetry={() => void load()}
+                  note="这不代表一个用户都没有" />
       )}
 
       {!err && rows.length === 0 && !loading ? (

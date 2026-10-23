@@ -1556,6 +1556,14 @@ messages」这条**正确**逻辑，测出来的是替身不像真而不是代�
   - 画像卡重试窗口：`loadFacts` 只清错误不清数据，重试那几百毫秒 `facts=[]` 且 `factsErr=''`
     → 界面闪回「还没有画像，多聊几轮…」。开头补 `setFacts(null)` 回到「读取中」。
   ⚠️ 判据口径：**失败后保留上一次可用数据 ≠ 可以不记失败原因**；两者都要，缺一个就退化成谎话。
+  - 同日再收一处**同型实现**：`AdminUsersCard` / `UsagePanel` / `KnowledgePage`（知识库与提交记录）
+    四处各自手写过 `<div className="kb-warn">读取…失败：{err}</div>`，图标一会儿 `AlertTriangle`
+    一会儿 `Info`、而且**都没有重试入口** —— 与 `LoadFail` 是同一件事的四份副本。现在四处都走
+    `LoadFail`（底色仍是共用的那一条 `.set-warn` 规则，视觉不变，多出来的「重试」是真的能重试）。
+    核对方式照本文件既有口径：源码 grep 只剩 `LlmSection`/`TtsSection` 那种**行内状态词**
+    （「状态未知（读取失败）」对「尚未配置」，那是正确的三态，不是横幅），
+    再看 `dist/assets/*.css` 里 `.set-warn` 规则确实下发（本机的 in-app 浏览器没有视口，量不了）。
+    `npm run build`（= `tsc --noEmit && vite build`）与 `npm test`（vitest 37 条）都过。
   `LoadFail` 因此多了一个可选 `note`：默认句「这不代表没配过」是给**配置类**卡片写的，
   会话列表/反馈列表要的是「这不是没有会话 / 这不是没有反馈」——硬套默认值就成了新的谎话。
   实测口径（in-app 浏览器，把 `apiBase` 指到不可达端口 `http://127.0.0.1:1` 触发真失败，不动任何在跑的服务）：

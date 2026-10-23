@@ -11,6 +11,7 @@ import {
 } from '../lib/api'
 import type { IngestRecord, IngestRecordRow, IngestStatus, KnowledgeOut } from '../types'
 import ConfirmButton from '../components/ConfirmButton'
+import LoadFail from '../components/LoadFail'
 import './KnowledgePage.css'
 
 /**
@@ -447,9 +448,8 @@ export default function KnowledgePage() {
         </div>
 
         {kbErr && (
-          <div className="kb-warn">
-            <Info size={15} /> 读取知识库失败：{kbErr}
-          </div>
+          <LoadFail what="知识库" error={kbErr} onRetry={() => void loadKb()}
+                    note="这不代表知识库是空的" />
         )}
 
         {/* 置顶的「正在收录 / 刚失败」：提交表单在本页最上方，进度原本只在页面最下面的
@@ -630,9 +630,8 @@ export default function KnowledgePage() {
           </div>
         </div>
         {recErr && (
-          <div className="kb-warn">
-            <Info size={15} /> 读取提交记录失败：{recErr}
-          </div>
+          <LoadFail what="提交记录" error={recErr} onRetry={() => void loadRecords()}
+                    note="这不是没有提交记录" />
         )}
         {!recErr && records.length === 0 ? (
           <div className="empty-state">
