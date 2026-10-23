@@ -39,6 +39,20 @@ def _model() -> CrossEncoder:
     )
 
 
+def status() -> tuple[bool, str]:
+    """精排模型**现在**能不能用；不能用时给原因，不只给布尔。
+
+    `rerank()` 自己失败会判空 + 写 error 日志，但调试出口必须把两件不同的事分开：
+    **「精排不可用」**（修环境：权重/HF_HOME/显存）与**「精排可用、只是 top1 没过门槛」**
+    （那是真的库里没答案）。判据仍然只有 `_model()` 这一处，这里只把异常翻成人话。
+    """
+    try:
+        _model()
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 —— 可用性探测绝不能反过来把调用方打挂
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def rerank(query: str, docs: list[dict], topk: int | None = None) -> list[dict]:
     """原地给 docs 打 rerank_score，按分降序返回前 topk 条。"""
     if not docs:
@@ -54,6 +68,16 @@ def rerank(query: str, docs: list[dict], topk: int | None = None) -> list[dict]:
             batch_size=s.RERANK_BATCH_SIZE,
             show_progress_bar=False,
         )
+    except Exception as exc:  # noqa: BLE001 —— 精排挂了必须是**可见的失败**
+        # 精排就是「库里有没有答案」的那道门（RERANK_MIN_SCORE）。它失效时如果
+        # 退回「按 RRF 顺序硬给 top6」，等于把门拆了还装作一切正常：答案照出、
+        # 检索照绿，只有用户在追问「为什么答非所问」时才发现 —— 而日志里什么都没有。
+        # 所以这里判定为「本轮无可用资料」（走既有的不知道/联网兜底），并把真实原因
+        # 连同该查的两件事写进 error 日志。
+        log.error("重排失败，本轮判定为库内无答案：%s: %s | 先查 HF_HOME=%s 与 %s 的权重是否就位"
+                  "（local_files_only=True，缺文件不会自动下载）",
+                  type(exc).__name__, exc, s.HF_HOME, s.RERANK_MODEL)
+        return []
     finally:
         torch.set_num_threads(old_threads)
 

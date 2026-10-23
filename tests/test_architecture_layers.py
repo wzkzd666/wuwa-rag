@@ -49,7 +49,10 @@ EXPECTED_MODULES = 57
 # knowledge.index.bm25 与 knowledge.graph.neo4j_client（L2→L2 同层），方向全部合规、无环。
 # 173 → 175（同日）：`DELETE /admin/users/{id}` 只做**组合**（各表怎么清只有它自己的模块知道），
 # 于是 `api.app` 新增两条出边 → `core.settings`、`core.feedback`（L6→L1，方向合规）。
-EXPECTED_EDGES = 175
+# 175 → 177（同日）：召回调试出口 `/debug/retrieval`。刻意**不另写一条检索链**，而是让检索
+# 模块自己把中间量暴露出来 —— 新增 `knowledge.retrieve → knowledge.index.rerank`（L2→L2 同层）
+# 与 `api.app → knowledge.retrieve`（L6→L2）各一条；方向合规、无环。
+EXPECTED_EDGES = 177
 # 41 → 42（同日）：`knowledge.corpcheck` 是有出边的模块，「有出边的模块数」随之 +1。
 EXPECTED_GRAPH_KEYS = 42
 EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 18, 3: 2, 4: 8, 5: 9, 6: 7}

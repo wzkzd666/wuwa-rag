@@ -174,6 +174,18 @@ def limit_creds():
     return limiter.shared_limit(get_settings().RATE_LIMIT_AUTH, "creds")
 
 
+def limit_debug():
+    """召回调试出口（`/debug/retrieval`）：按登录用户，一小时档。
+
+    为什么单列：一次调用要跑**一遍 embedding + 20 条精排**（CPU 约 3~5 秒），
+    抢的是与 `/ask` 同一份资源。但**不并进 ask 档**：那是另一个能力
+    （管理员的诊断动作，不是用户的问答），共用计数会让调试把自己问答的配额吃光；
+    只靠 `require_admin` 也不够——管理员同样能写出一个循环。
+    全局 `key_func=key_by_user_or_ip` 已按用户计数，故这里用 `limit()` 即可。
+    """
+    return limiter.limit(get_settings().RATE_LIMIT_DEBUG)
+
+
 async def _on_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     """429 响应：与 `app.on_unhandled` 同一风格（中文 error + detail）。
 

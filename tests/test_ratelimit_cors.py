@@ -255,6 +255,8 @@ def test_真实_app_的限额接线完整() -> None:
         # 口令类操作：每次都要跑 PBKDF2 20 万次（/auth/password 再加一次 scrypt）
         "api_change_password", "api_llm_unlock", "api_llm_passphrase",
         "api_llm_config_put", "api_tts_config_put",
+        # 召回调试：一次跑 embedding + 20 条精排，抢的是与 /ask 同一份资源，单列一档
+        "api_debug_retrieval",
     }
     # /ingest 与 /knowledge/refresh 必须是**同一个** shared 计数（scope="ingest"）：
     # 两个入口是同一个能力，各算一份就等于把速率翻倍、换个端点即可绕过。

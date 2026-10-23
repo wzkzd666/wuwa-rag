@@ -329,6 +329,11 @@ class Settings(BaseSettings):
     # 5/hour 对正常用法（补几个漏收角色）足够；`/ingest/control`（暂停/取消）不占额度，
     # 否则用户在排队时连止损都做不了。
     RATE_LIMIT_INGEST: str = "5/hour"
+    # 召回调试出口（`/debug/retrieval`）：管理员专属，一小时档。
+    # 为什么不能只靠 require_admin 而不设档：一次调用要跑**一遍 embedding + 20 条精排**
+    # （CPU 约 3~5 秒），和 `/ask` 抢的是同一份资源；把它挂在 ask 档里又会污染正常问答的
+    # 配额（同一能力才共用计数，这不是同一个能力）。所以单列一档、按用户计。
+    RATE_LIMIT_DEBUG: str = "20/hour"
     # 兜底：未显式加限额的端点统一适用（/health 已单独豁免）。
     RATE_LIMIT_DEFAULT: str = "200/minute"
 

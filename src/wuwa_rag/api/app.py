@@ -39,7 +39,7 @@ from wuwa_rag.core.llmstore import PROVIDER_PRESETS
 from wuwa_rag.dialog.graph import all_sources, ask, ask_stream
 from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
 from wuwa_rag.dialog.nlu import detect_slots, extract_characters, music_action
-from wuwa_rag.knowledge import domain_terms
+from wuwa_rag.knowledge import domain_terms, retrieve
 from wuwa_rag.knowledge import entities as kb
 from wuwa_rag.services import music as music_svc
 from wuwa_rag.services.emotion import EMOTION_TAGS
@@ -1352,3 +1352,26 @@ async def api_knowledge_delete(
     kb.invalidate_roster()      # 名册立刻不再包含它，不必等 60s TTL
     domain_terms.invalidate()   # 领域词表同理：角色少了一个，锚点集变了、重建即可
     return {"character": character, "task_id": r.id}
+
+
+@app.get("/debug/retrieval")
+@rl.limit_debug()   # 单列一档：一次要跑 embedding + 20 条精排，抢的是与 /ask 同一份资源
+async def api_debug_retrieval(request: Request,
+                              question: str = Query(..., min_length=1, max_length=512),
+                              user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
+    """召回调试出口（管理员）：dense / sparse / RRF / 精排四步的中间量一次摊开。
+
+    为什么值得开这个口：AGENTS 里三次「资料明明在 raw 里、答案却答不出」，每次都要
+    临时手写脚本对账，才能分清是**没召回到**、**被 `TOPK_RERANK_IN` 截掉**、还是
+    **卡在 `RERANK_MIN_SCORE` 门外** —— 三种病因的修法互不相干，而生产返回体里只有
+    一句「不知道」。
+
+    **只读**：不写库、不入库、不动索引。跑的是与问答**同一份** `recall_stages` 与
+    `rerank`（所以这里的分数就是现场会用到的分数；另写一条链迟早会漂）。
+    问句长度帽与 `/ask` 同口径 512：它同样进 embedding 与精排，不设上限等于给管理员
+    留一张「把 CPU 钉住几十秒」的口子。
+    ⚠️ 同步的向量检索丢进线程池：精排在 CPU 上是秒级的事，压在事件循环上会让
+    同一时刻的所有 SSE 流卡住。这里用默认线程池而不是 `graph._run_io` 那个 8 槽池
+    ——本端点被 20/hour 挡着，构造不出并发压力，不值得为它去借问答主链的池子。
+    """
+    return await asyncio.to_thread(retrieve.debug_recall, question)

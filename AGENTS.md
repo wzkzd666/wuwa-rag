@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：466 条，**全量离线**，约 5s
+uv sync --extra dev && uv run pytest    # 单元测试：469 条，**全量离线**，约 5s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -247,6 +247,24 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 - **⚠️ 流式收尾补吐的判据（2026-09-30 修正，勿改回）**：`ask_stream` 收尾处要把后处理（`fix_percent_units` 等）相对**已下发文本**的差量补吐出去，判据必须用「已下发正文 `sent` 做前缀比较 + 只 feed 后缀」。**不能**用 `AnswerFilter.would_append`——它只看列表行的去重集合 `_seen`，而 `_route` 对非列表行是无条件直通的：答案里没有列表行时 `_seen` 恒为空、`would_append` 恒 True，`feed(answer)` 会把**整篇正文原样重吐一遍**。实测（单元级复现 + 端到端）：闲聊/时间这类无列表行的短答案整段重复一遍（48 字答案流出 96 字）；含列表行的事实答案则是开头的非列表行被重吐一遍。前端 `useStore` 最终会用 `done.answer` 覆盖（注释写明是为了盖掉复读文本），所以终稿没错、但流式过程中肉眼可见重复。修正后实测：整段重复 0/10（原 10/10），**流式下发文本 == done.answer 10/10**，且单位修正的后缀补吐、`[n]` 剥离、列表去重三条原设计意图都仍成立（`would_append` 已成死代码，已从 `text.py` 删除）。
 - **agent.py 实测坑（接入前必读）**：弱 prompt 下 qwen3:8b 会把参数名写成单数 `character`，pydantic 忽略未知字段 → `characters` 取默认空列表 → 工具返回空字符串 → 模型接着**编造共鸣链名称**（实测编出「追光者」「星海行舟」，均非真实数据）。强化 prompt（显式列参数名+取值域+空结果铁律）后实测：参数名正确、工具返回 409 字真实数据、空结果场景改回「知识库里没有这项资料」不再编造。
 - **双路召回**：Chroma dense(30) + BM25 sparse(30) → RRF(k=60) → 前 20 进 bge-reranker-v2-m3 精排 → top6 进 prompt。`RERANK_MIN_SCORE=0.1`：top1 低于阈值视为库内无答案、候选全丢（这是「不知道」的门）。多角色提问每角色各补一轮召回。
+  - **调试出口（2026-10-24）**：`retrieve.recall_stages(question)` 返回 dense/sparse/fused/docs
+    四步中间量，`vector_search` 只是它的正式出口（**同一份实现**，有源码判据用例钉住
+    「不许在调试链里再算一遍 `_rrf`」）。往上就是 `GET /debug/retrieval`（admin 专属、
+    独立一档 `RATE_LIMIT_DEBUG=20/hour`），把 `rerank` 的逐条分数与门槛判定一起给出。
+    为什么要开这个口：AGENTS 里那三次「资料明明在 raw 里、答案却答不出」，每次都要
+    临时手写脚本对账，才能分清是**没召回到** / **被 `TOPK_RERANK_IN` 截掉** /
+    **卡在 `RERANK_MIN_SCORE` 门外** —— 三种病因修法互不相干，而生产返回体里只有一句「不知道」。
+    ⚠️ `gate.rerank_ready` 与 `gate.passed` 是**两件事**（`rerank.status()` 单独探可用性）：
+    精排不可用（权重没就位/HF_HOME 不对）和「精排可用但分数没过门槛」看起来一样（都 `passed=false`），
+    但前者修环境、后者是真没答案。
+    实测一次调用即看清老问题：问「守岸人声骸怎么配」→ dense=30 sparse=30 fused=20 reranked=6，
+    而 top1 是 **`忌炎 › 角色养成推荐 › 配队推荐` 0.9619** —— 精排给跑题材料的分数照样接近满分，
+    这正是当初「数值表在 reranker 眼里输给大段机制描述」的同一个低区分度。
+  - **精排异常 = 可见的失败**：`rerank()` 现在把模型加载/打分异常**收成「本轮无可用资料」**
+    （走既有的不知道/联网兜底）并写 error 日志，附带该查的 `HF_HOME` 与模型名。
+    刻意**不是**退回「按 RRF 顺序硬给 top6」——那等于把「不知道」的门拆了还装作正常：
+    答案照出、检索照绿、日志无痕，只有用户追问答非所问时才暴露（本仓口径：可见的失败 >
+    看起来正常的失败）。两条用例分别钉「异常必须判空且留下原因」与「正常时门槛与放行照旧」。
 - **库外角色自动爬取**：`ask()/ask_stream()` 先 `ensure_characters`——问题命中名册但 Neo4j 里没有 → 入队 5 步链并阻塞等待(180s) → 成功继续答、失败直接回「不知道」。这就是 API 必须带 Celery worker 的原因。
 - **双模型分工（多 agent）**：`llm.py` 两个客户端——`get_chat_llm(strict=False)` = **aemeath**（chat 专用，只做最终作答；`strict=True` 走 `LLM_REPEAT_PENALTY_STRICT` 低惩罚档，照抄长表格用）；`get_tool_llm()` = **qwen3:8b**（字典抽取 / 工具调用等结构化任务）。两者都 `bind(think=False)` 关思考。⚠️ **不要用 `/no_think` 软开关**：实测对 aemeath 无效（仍 38.3s、输出 3735 字、带 `v` 泄漏前缀，并触发 Ollama 500 `peg-native format` 错误）；改 `bind(think=False)` 后 1.3s 且干净。qwen3:8b 同理：抽取准确率不因开 thinking 提升（多样本均 4/8），耗时却从 0.20s 涨到 6.36s。`TOOL_TEMPERATURE=0`（要稳定 JSON，不要文采）。
 - **人格与作答**：整条 prompt 以单条 HumanMessage 发出；人设完全由 Ollama 端 aemeath 微调模型自带（Modelfile SYSTEM），`prompt.SYSTEM_PROMPT` 只做术语对照 + 答题约束 + 防重复，**不再引导口吻**。⚠️ 这些约束必须拼进 HumanMessage——Ollama 的 `system` 参数会**覆盖** Modelfile 内置 SYSTEM，改成 `SystemMessage` 传就会把人设弄丢（但 `knowledge/entities.py`/`agent.py`/`verify.py`/`dialog/nlu.py` 用 qwen3:8b 无人设可覆盖，用 `SystemMessage` 是安全的）。
@@ -746,14 +764,14 @@ wiki 以后出现同形新词也不会被误切。这也是它敢替代旧 `_RE_
 | `/auth/register` `/auth/login` | 公开 |
 | `/ask` `/ask/stream` `/profile` `/auth/me` `/auth/logout` `/auth/password` | 登录即可（`get_current_user`） |
 | `/llm/providers` `/llm/config` `/llm/config/test` `/llm/models` `/llm/unlock` `/llm/lock` `/llm/passphrase` | 登录即可（个人云端模型配置，见下节） |
-| `/knowledge/refresh` `/knowledge/characters` DELETE、`/admin/users` GET、`/admin/users/{id}` DELETE | admin 专属（`require_admin`） |
+| `/knowledge/refresh` `/knowledge/characters` DELETE、`/admin/users` GET、`/admin/users/{id}` DELETE、`/debug/retrieval` GET | admin 专属（`require_admin`） |
 | `/ingest` `/ingest/status` `/ingest/records` `/ingest/control` | 登录即可（2026-10-23 校正：矩阵曾写 admin 专属，与代码和知识库页的**刻意设计**不符——「提交 / 暂停 / 取消 / 删除**自己**提交的记录」对全体登录用户开放，只有重爬与删知识库才 require_admin；`_may_control` 负责校验只能控自己的） |
 
 ⚠️ **FastAPI 依赖链两个坑（实测）**：① 依赖函数的参数必须 `= Depends(...)`，否则类型被当**请求体字段** → 422 `missing body.user`；② 依赖的返回类型必须是 Pydantic `BaseModel`（`AuthUser`），dict 子类报 Invalid args。
 
 ### 限流（`api/ratelimit.py`，slowapi，2026-10-06 新增）
 
-限额档位在 `config.py` 的 `RATE_LIMIT_*`：`auth` 10/min 按 IP（挡登录暴力枚举）、`ask` 20/min 按用户（一轮 20s 量级且抢 GPU）、`tts` 10/min 按用户（真实费用）、`outbound` 20/hour 按用户（`/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，SSRF 面）、**`ingest` 5/hour 按用户**（2026-10-23 补：`/ingest` + `/knowledge/refresh` 跑整条五步链并写**共享语料**，此前只吃兜底档等于没限；`/ingest/control` 不占额度，否则排队时连止损都做不了）、**`creds` 复用 `RATE_LIMIT_AUTH` 的数值但单独计数**（改密/解锁/换口令/保存云端与语音凭据五个端点，每次都要跑 PBKDF2 20 万次 ~50ms，`/auth/password` 再加一次 scrypt ~733ms）。兜底 `default_limits` 200/min。来源 IP 统一走 `ratelimit.client_ip`：默认按连接 IP，**不信任** `X-Forwarded-For`（客户端可自报，信了按 IP 限速即作废）；挂反代才设 `TRUST_PROXY_HEADERS=true` 取最左项。
+限额档位在 `config.py` 的 `RATE_LIMIT_*`：`auth` 10/min 按 IP（挡登录暴力枚举）、`ask` 20/min 按用户（一轮 20s 量级且抢 GPU）、`tts` 10/min 按用户（真实费用）、`outbound` 20/hour 按用户（`/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，SSRF 面）、**`ingest` 5/hour 按用户**（2026-10-23 补：`/ingest` + `/knowledge/refresh` 跑整条五步链并写**共享语料**，此前只吃兜底档等于没限；`/ingest/control` 不占额度，否则排队时连止损都做不了）、**`debug` 20/hour 按用户**（2026-10-24 补：`/debug/retrieval` 一次要跑 embedding + 20 条精排，抢的是与 `ask` 同一份资源，但它是**另一个能力**——并进 ask 档会让管理员调试把自己问答配额吃光）；**`creds` 复用 `RATE_LIMIT_AUTH` 的数值但单独计数**（改密/解锁/换口令/保存云端与语音凭据五个端点，每次都要跑 PBKDF2 20 万次 ~50ms，`/auth/password` 再加一次 scrypt ~733ms）。兜底 `default_limits` 200/min。来源 IP 统一走 `ratelimit.client_ip`：默认按连接 IP，**不信任** `X-Forwarded-For`（客户端可自报，信了按 IP 限速即作废）；挂反代才设 `TRUST_PROXY_HEADERS=true` 取最左项。
 
 改动这块前必读的四条：
 
@@ -1175,7 +1193,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **466 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **469 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
 十五个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
@@ -1197,7 +1215,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_corpcheck.py` | **语料对账的八条判据**：总数相同但逐角色不同要报、缺/多两个方向分开报、稠密索引**文本口径**不一致要报（只比 id 抓不到那 36 块）、raw 哈希漂移 fail 而缺席只 warn（聚合一条，不刷屏）、图谱名册缺角色 fail / 多垃圾名 warn、退出码只看 fail（warn 不拦路）、fail 必须自带可抄的补救命令 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → 465 条 / 5.7s；第十一轮（一格两支队伍：`split_teams` 收进 entities 供抽取/读取两侧共用 + `wuwa-graph` 改为先清出边再写）再补 1 条 → **466 条 / 5.21s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → 454 条 / 5.09s；同轮再落地 `knowledge/corpcheck.py`（把三次事故的「三方对账」固化成一条命令） + 8 条判据用例 → 462 条 / 5.6s；第十轮（账号回收：清单反推对账 + 两道护栏 + 记忆两路并集）再补 3 条 → 465 条 / 5.7s；第十一轮（一格两支队伍：`split_teams` 收进 entities 供抽取/读取两侧共用 + `wuwa-graph` 改为先清出边再写）再补 1 条 → 466 条 / 5.21s；第十二轮（精排异常判空 + 召回调试出口共用同一份实现）再补 3 条 → **469 条 / 5.0s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 ✅ **2026-10-24 这条约定真的变成机器门禁了**（`.github/workflows/ci.yml`，学自 uv/vite 项目的通行写法）：
 `backend`（`uv sync --frozen --extra dev` → ruff → `scripts/check_layers.py` → pytest）+
@@ -1230,7 +1248,7 @@ pytest 收不到（缺索引时不会假失败）。
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 466 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 469 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：

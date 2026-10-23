@@ -272,3 +272,59 @@ def test_未知命令行参数直接退出(monkeypatch) -> None:
     monkeypatch.setattr(build_index.sys, "argv", ["wuwa-index", "--force"])
     with pytest.raises(SystemExit, match="--full"):
         build_index.main()
+
+
+# ---------- 精排失败的处理 ----------
+# `RERANK_MIN_SCORE` 是「库里到底有没有答案」的那道门（top1 低于阈值就判无答案）。
+# 精排自己挂掉时如果退回「按 RRF 顺序硬给 top6」，等于**把门拆了还装作一切正常**：
+# 答案照出、检索照绿、日志里什么都没有，只有用户追问「为什么答非所问」时才发现。
+def test_精排异常必须判空并写出可查的原因(monkeypatch) -> None:
+    from wuwa_rag.knowledge.index import rerank as rr
+
+    def boom():
+        raise OSError("No such file or directory: bge-reranker-v2-m3")
+
+    errs: list[str] = []
+    monkeypatch.setattr(rr, "_model", boom)
+    monkeypatch.setattr(rr.log, "error", lambda fmt, *a, **k: errs.append(fmt % a))
+
+    docs = [{"breadcrumb": "守岸人 › a", "text": "正文一"},
+            {"breadcrumb": "守岸人 › b", "text": "正文二"}]
+    assert rr.rerank("守岸人声骸", docs) == []
+    assert len(errs) == 1, f"精排失败必须留下一条 error（现场要能查到原因）：{errs}"
+    assert "bge-reranker" in errs[0] and "HF_HOME" in errs[0]
+
+
+def test_精排正常时门槛与放行都照旧(monkeypatch) -> None:
+    """反向保护：上面那条宽捕获不能顺手把「正常打分」也吞成空。"""
+    from types import SimpleNamespace
+
+    from wuwa_rag.knowledge.index import rerank as rr
+
+    docs = [{"breadcrumb": "守岸人 › a", "text": "正文一"},
+            {"breadcrumb": "守岸人 › b", "text": "正文二"}]
+    monkeypatch.setattr(rr, "_model",
+                        lambda: SimpleNamespace(predict=lambda pairs, **kw: [0.91, 0.42]))
+    out = rr.rerank("守岸人声骸", docs, topk=2)
+    assert len(out) == 2 and out[0]["rerank_score"] > out[1]["rerank_score"]
+
+    monkeypatch.setattr(rr, "_model",
+                        lambda: SimpleNamespace(predict=lambda pairs, **kw: [0.02, 0.01]))
+    assert rr.rerank("守岸人声骸", docs, topk=2) == []   # top1 低于门槛：照旧判「库内无答案」
+
+
+def test_调试出口与正式召回共用同一份实现() -> None:
+    """`GET /debug/retrieval` 的全部价值建立在一件事上：**它看到的分数就是现场用的分数**。
+    一旦有人为了方便另写一条「dense + sparse + RRF + 精排」，这个出口就开始说谎，
+    而没人会怀疑一个专门用来排查问题的端点 —— 于是排查方向整个错掉。
+    """
+    import inspect
+
+    from wuwa_rag.knowledge import retrieve as rt
+
+    vsrc = inspect.getsource(rt.vector_search)
+    assert "recall_stages(" in vsrc, "vector_search 不再从 recall_stages 取数 = 融合口径有两份"
+    dsrc = inspect.getsource(rt.debug_recall)
+    assert "recall_stages(" in dsrc, "调试出口没走同一份召回"
+    assert "_rrf(" not in dsrc, "调试出口自己又算了一遍融合"
+    assert "rerank(" in dsrc and "rerank_status" in dsrc,         "必须把「精排不可用」与「精排可用但没过门槛」分开（两种病因修法互不相干）"

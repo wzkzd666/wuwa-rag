@@ -17,6 +17,8 @@ from wuwa_rag.knowledge.entities import (
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.index.bm25 import BM25Index
 from wuwa_rag.knowledge.index.embeddings import BgeM3Embeddings
+from wuwa_rag.knowledge.index.rerank import rerank
+from wuwa_rag.knowledge.index.rerank import status as rerank_status
 from wuwa_rag.text import lock_focus
 from wuwa_rag.ww_logger import get_logger
 
@@ -446,19 +448,35 @@ def _rrf(rank_lists: list[list[str]], k: int = 60) -> list[str]:
     return [cid for cid, _ in sorted(score.items(), key=lambda x: x[1], reverse=True)]
 
 
-def vector_search(question: str, topk: int | None = None) -> list[dict]:
+def recall_stages(question: str, topk: int | None = None) -> dict:
+    """双路召回 + RRF 融合的**中间量**（`vector_search` 与调试出口共用同一条链）。
+
+    为什么要单独把每一步露出来：「资料明明在 raw 里、答案却答不出」这一类故障，
+    只有看到 dense/sparse 各召回了什么、目标块在 RRF 里排第几、精排给了多少分，
+    才能分清三种完全不同的病因 —— **没召回到** / **被 `TOPK_RERANK_IN` 截掉** /
+    **卡在 `RERANK_MIN_SCORE` 门外**（这三种的修法互不相干，此前只能临时手写脚本对账）。
+
+    ⚠️ 这里只准暴露中间量，**不准长成第二条实现**：`vector_search` 必须从本函数取数
+    （`tests/` 里有源码判据钉住这一点）。融合口径改动只改一处。
+    """
     s = get_settings()
     col = _collection()
 
-    dense = col.query(
+    res = col.query(
         query_embeddings=[_embedder().embed_query(question)],
         n_results=topk or s.TOPK_DENSE,
-    )["ids"][0]
-    sparse = [h.chunk_id for h in _bm25().search(question, s.TOPK_SPARSE)]
+        include=["distances"],
+    )
+    ids = res["ids"][0]
+    dists = res.get("distances") or [[]]
+    dense = [{"chunk_id": c, "distance": round(float(d), 4)}
+             for c, d in zip(ids, dists[0])]
+    sparse = [{"chunk_id": h.chunk_id, "bm25_score": round(float(h.score), 4)}
+              for h in _bm25().search(question, s.TOPK_SPARSE)]
 
-    fused = _rrf([dense, sparse])[: s.TOPK_RERANK_IN]
+    fused = _rrf([[d["chunk_id"] for d in dense], [x["chunk_id"] for x in sparse]])[: s.TOPK_RERANK_IN]
     if not fused:
-        return []
+        return {"dense": dense, "sparse": sparse, "fused": [], "docs": []}
 
     got = col.get(ids=fused)
     by_id = {
@@ -466,5 +484,48 @@ def vector_search(question: str, topk: int | None = None) -> list[dict]:
         for i, d, m in zip(got["ids"], got["documents"], got["metadatas"])
     }
     out = [{"chunk_id": c, "text": by_id[c][0], **by_id[c][1]} for c in fused if c in by_id]
-    log.info("向量召回 dense=%d sparse=%d -> 融合 %d", len(dense), len(sparse), len(out))
+    return {"dense": dense, "sparse": sparse, "fused": fused, "docs": out}
+
+
+def vector_search(question: str, topk: int | None = None) -> list[dict]:
+    # 正式出口只做一件事：拿 `recall_stages` 的融合结果。口径只有一份（见那里的注释）。
+    stages = recall_stages(question, topk)
+    out = stages["docs"]
+    log.info("向量召回 dense=%d sparse=%d -> 融合 %d",
+             len(stages["dense"]), len(stages["sparse"]), len(out))
     return out
+
+
+def debug_recall(question: str) -> dict:
+    """管理员的召回调试出口：双路 + RRF + 精排的中间量一次摊开（**只读**）。
+
+    为什么值得有：AGENTS 里记了三次「资料明明在 raw 里、答案却答不出」，三次都要临时
+    手写脚本对账，才能分清是**没召回到**、**被 `TOPK_RERANK_IN` 截掉**、还是
+    **卡在 `RERANK_MIN_SCORE` 门外** —— 三种病因的修法互不相干，而生产返回体里只有
+    一句「不知道」。
+    ⚠️ 它跑的是**同一份** `recall_stages` 与**同一份** `rerank`，所以这里看到的分数
+    就是问答现场会用到的分数；另写一条链迟早会漂（本仓最忌讳两处判据）。
+    """
+    s = get_settings()
+    stages = recall_stages(question)
+    docs = stages["docs"]
+    ranked = rerank(question, docs) if docs else []
+    ready, why = rerank_status()
+    return {
+        "question": question,
+        "dense": stages["dense"],
+        "sparse": stages["sparse"],
+        "fused": stages["fused"],
+        "reranked": [{"chunk_id": d["chunk_id"], "score": d.get("rerank_score"),
+                      "breadcrumb": d.get("breadcrumb", "")} for d in ranked],
+        "gate": {
+            "rerank_in": s.TOPK_RERANK_IN, "topk": s.TOPK_RERANK,
+            "min_score": s.RERANK_MIN_SCORE,
+            "candidates": len(docs),
+            "top1": ranked[0].get("rerank_score") if ranked else None,
+            # 「没过门槛」与「精排不可用」是两件事，界面上必须分开说（见 rerank.status）
+            "passed": bool(ranked),
+            "rerank_ready": ready,
+            "rerank_error": why,
+        },
+    }
