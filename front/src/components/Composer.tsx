@@ -10,6 +10,15 @@ interface Props {
   placeholder?: string
 }
 
+/**
+ * 问句长度上限，与后端 `AskIn.question` 的 `max_length=512` 同一口径
+ * （`api/app.py` 的 AskIn 注释写了为什么是 512）。
+ * 前端先挡住是**手感**问题：超限时浏览器直接不让再输入，
+ * 比让用户发出去、再收一个后端 422 的错误提示友好。
+ * 跨语言没法共享常量，改后端那个数时必须记得改这里。
+ */
+const QUESTION_MAX = 512
+
 /** 自动伸缩的多行输入框：Enter 发送，Shift+Enter 换行 */
 export default function Composer({ onSend, onStop, busy, disabled, placeholder }: Props) {
   const [text, setText] = useState('')
@@ -50,6 +59,7 @@ export default function Composer({ onSend, onStop, busy, disabled, placeholder }
           className="composer-input"
           rows={1}
           value={text}
+          maxLength={QUESTION_MAX}
           placeholder={placeholder || '问问鸣潮角色的配装、突破材料、共鸣链…（Enter 发送，Shift+Enter 换行）'}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}

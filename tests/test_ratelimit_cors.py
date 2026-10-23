@@ -36,7 +36,9 @@ from fastapi.testclient import TestClient
 
 from wuwa_rag.api import ratelimit as rl
 
-ORIGIN = "http://localhost:5173"
+# 任意的 Origin 头即可：合成 app 的 CORS 写的是 `*`，本文件验的是「429/200 都带不带 CORS 头」
+# 与中间件顺序，不校验源白名单。取真实前端端口只是为了不让人误以为这里还有一处端口耦合。
+ORIGIN = "http://localhost:25173"
 AUTH_LIMIT = int(rl.get_settings().RATE_LIMIT_AUTH.split("/")[0])   # 10
 ASK_LIMIT = int(rl.get_settings().RATE_LIMIT_ASK.split("/")[0])     # 20
 
@@ -245,9 +247,30 @@ def test_真实_app_的限额接线完整() -> None:
     assert real == {
         "api_login", "api_register",              # 按 IP：挡暴力枚举 / 批量注册
         "api_ask", "api_ask_stream",              # 按用户：重计算 + 抢 GPU
+        "api_conversation_regenerate",            # 重新生成跑的是**整条问答链**，与 /ask 同档同计数
         "api_tts",                                # 按用户：有真实费用
         "api_llm_models", "api_llm_config_test",  # 出站请求：SSRF 面收窄
+        # 入库：一次提交跑整条五步链并写**共享语料**，此前只吃 200/min 兜底档（等于没限）
+        "api_ingest", "api_knowledge_refresh",
+        # 口令类操作：每次都要跑 PBKDF2 20 万次（/auth/password 再加一次 scrypt）
+        "api_change_password", "api_llm_unlock", "api_llm_passphrase",
+        "api_llm_config_put", "api_tts_config_put",
     }
+    # /ingest 与 /knowledge/refresh 必须是**同一个** shared 计数（scope="ingest"）：
+    # 两个入口是同一个能力，各算一份就等于把速率翻倍、换个端点即可绕过。
+    # （`_route_limits` 的值是 slowapi 的 `Limit` 对象，共用判据在它自己的 `.scope` 上。）
+    shared = {name.rsplit(".", 1)[-1]: {lim.scope for lim in limits}
+              for name, limits in rl.limiter._route_limits.items()
+              if name.startswith("wuwa_rag.api.app.")}
+    assert shared["api_ingest"] == {"ingest"} == shared["api_knowledge_refresh"], \
+        "入库两个入口没共用 ingest 计数"
+    # 问答三个入口同理（曾经 regenerate 漏挂 = 换端点绕过 /ask 配额）
+    assert shared["api_ask"] == shared["api_ask_stream"] == shared["api_conversation_regenerate"] == {"ask"}
+    # 口令类五个入口共用一份计数：分开数就等于 5 × 10 次/分钟
+    creds = {"api_change_password", "api_llm_unlock", "api_llm_passphrase",
+             "api_llm_config_put", "api_tts_config_put"}
+    assert {k for k, v in shared.items() if v == {"creds"}} == creds, \
+        "口令类端点没共用 creds 计数（或名单漂了）"
     exempt = {n for n in rl.limiter._exempt_routes if n.startswith("wuwa_rag.api.app.")}
     assert "wuwa_rag.api.app.health" in exempt, "/health 未豁免，启动脚本轮询会被限流"
 

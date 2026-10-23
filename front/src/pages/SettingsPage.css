@@ -18,13 +18,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14.5px;
+  font-size: var(--fs-base-plus);
   font-weight: 650;
   margin-bottom: 6px;
   color: var(--text-primary);
 }
 .set-h svg {
-  color: var(--accent-2);
+  color: var(--accent-2-text);
 }
 
 /* ---------- 可折叠区块（Fold / InlineFold） ----------
@@ -51,7 +51,7 @@
   text-align: left;
 }
 .set-h-btn:hover {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 /* 无 aside 时按钮独占一行，此时右对齐的箭头才靠得住 */
 .set-h-btn .set-caret {
@@ -73,7 +73,7 @@
   margin-bottom: 0;
 }
 .set-fold-hint {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
   line-height: 1.55;
   margin-top: 6px;
@@ -99,7 +99,7 @@
   border: 0;
   background: none;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   font-weight: 600;
   color: var(--text-secondary);
   cursor: pointer;
@@ -114,46 +114,13 @@
   padding-bottom: 8px;
 }
 
-.set-row {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 14px 0;
-  border-bottom: 1px solid var(--line);
-}
-.set-row:last-child {
-  border-bottom: none;
-  padding-bottom: 4px;
-}
-
-.set-row-main {
-  flex: 1;
-  min-width: 0;
-}
-.set-row-main label {
-  display: block;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.set-row-main p {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-top: 3px;
-  line-height: 1.55;
-}
-
-.set-row-ctl {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
+/* `.set-row` / `.set-row:last-child` / `.set-row-main(+label/p)` / `.set-row-ctl`
+   及其窄屏堆叠分支已搬到 global.css 的「跨页共享原语」段（用量面板与反馈页也在用同一行骨架）。 */
 
 .api-input {
   width: 260px;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
 }
 
 .status-ctl .tag {
@@ -189,35 +156,11 @@
 }
 .switch-on .switch-knob {
   left: 22px;
-  background: #0b1020;
+  background: var(--grad-ink);
 }
 
-/* 分段按钮 */
-.seg {
-  display: flex;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--bg-deep);
-}
-.seg-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 12.5px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.seg-on {
-  background: var(--grad-soft);
-  color: var(--text-primary);
-  font-weight: 600;
-}
+/* 分段按钮 `.seg` / `.seg-btn` / `.seg-on` 已搬到 global.css（登录页的
+   登录/注册切换用的是同一组类名，不该由设置页的样式表代管）。 */
 
 /* 字号滑块 */
 .font-ctl {
@@ -232,7 +175,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   min-width: 52px;
@@ -248,7 +191,7 @@
   place-items: center;
   flex-shrink: 0;
   background: var(--grad);
-  color: #0b1020;
+  color: var(--grad-ink);
   box-shadow: var(--glow);
 }
 .avatar-prev img {
@@ -263,8 +206,12 @@
   border: 1px dashed var(--line-strong);
 }
 
-/* 背景预设色板 */
-.bg-row {
+/* 背景预设色板。
+   ⚠️ 选择器写成 `.set-row.bg-row` 而不是原来的 `.bg-row`：这一行是
+   `class="set-row bg-row"`，而 `.set-row{align-items:center}` 已搬进 global.css、
+   在产物里排在本文件**之后** —— 单类名同特异性会被它赢掉，色板行就会从
+   「拉满整宽、左对齐」变回「垂直居中」。补上 `.set-row` 让覆盖靠特异性，不靠顺序。 */
+.set-row.bg-row {
   flex-direction: column;
   align-items: stretch;
 }
@@ -291,7 +238,7 @@
   background: var(--bg-hover);
 }
 .bg-swatch-on {
-  border-color: rgba(129, 140, 248, 0.65);
+  border-color: var(--accent-2-tint-65);
   background: var(--grad-soft);
 }
 .bg-swatch-fill {
@@ -306,7 +253,7 @@
   color: var(--text-secondary);
 }
 .bg-swatch-label {
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   color: var(--text-secondary);
   white-space: nowrap;
 }
@@ -317,14 +264,14 @@
 
 /* 我的画像（user_facts） */
 .profile-desc {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
   line-height: 1.6;
   padding: 6px 0 10px;
   border-bottom: 1px solid var(--line);
 }
 .profile-loading {
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   color: var(--text-muted);
   padding: 16px 0 8px;
   text-align: center;
@@ -339,7 +286,7 @@
   gap: 10px;
   padding: 9px 4px;
   border-bottom: 1px dashed var(--line);
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .profile-item:last-child {
   border-bottom: none;
@@ -351,7 +298,7 @@
 }
 .profile-meta {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   font-family: var(--font-mono);
 }
@@ -368,8 +315,8 @@
   transition: all 0.15s;
 }
 .profile-del:hover {
-  color: var(--err);
-  background: rgba(248, 113, 113, 0.1);
+  color: var(--err-text);
+  background: var(--err-tint-10);
 }
 
 /* 统计 */
@@ -389,7 +336,7 @@
 }
 .stat b {
   display: block;
-  font-size: 20px;
+  font-size: var(--fs-2xl);
   font-weight: 700;
   background: var(--grad);
   -webkit-background-clip: text;
@@ -397,44 +344,27 @@
   color: transparent;
 }
 .stat span {
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   color: var(--text-muted);
 }
 
 /* 危险操作 */
 .danger-row .set-row-main label {
-  color: var(--err);
+  color: var(--err-text);
 }
-.btn-danger.armed {
-  border-color: rgba(248, 113, 113, 0.7) !important;
-  background: rgba(248, 113, 113, 0.16) !important;
-  color: var(--err) !important;
-  animation: pulse-danger 1s infinite;
-}
-@keyframes pulse-danger {
-  50% {
-    box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.12);
-  }
-}
-
 .set-about {
   text-align: center;
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   padding: 8px 0 20px;
 }
 
+/* `.set-row` 的窄屏堆叠与 `.set-row-ctl` 的 justify-content 跟着基础规则一起
+   搬进了 global.css：它们与原 `.set-row` **同特异性**、靠的就是写在后面，
+   留在本页会让搬走后的基础规则（打包在最后）反过来赢掉移动端那条分支。 */
 @media (max-width: 720px) {
-  .set-row {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-  }
   .api-input {
     width: 100%;
-  }
-  .set-row-ctl {
-    justify-content: space-between;
   }
 }
 
@@ -456,7 +386,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 13px;
+  font-size: var(--fs-md);
 }
 .music-set-row > span:first-of-type {
   display: flex;
@@ -468,7 +398,7 @@
   color: var(--text-secondary);
 }
 .music-set-hint {
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   font-style: normal;
   color: var(--text-muted);
   line-height: 1.5;
@@ -477,12 +407,12 @@
   flex: 1;
   min-width: 0;
   padding: 6px 10px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 .music-set-warn code {
   padding: 1px 5px;
   border-radius: 4px;
   background: var(--bg-deep);
-  font-size: 11px;
+  font-size: var(--fs-xs);
 }

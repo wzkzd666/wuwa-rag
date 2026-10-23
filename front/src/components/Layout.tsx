@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
   MessageSquare,
@@ -17,6 +17,7 @@ import {
   BarChart3,
 } from 'lucide-react'
 import { useStore } from '../store/useStore'
+import * as api from '../lib/api'
 import MusicBar from './MusicBar'
 import { pickImageFile, fileToDataUrl, formatBytes, dataUrlBytes } from '../lib/image'
 import './Layout.css'
@@ -59,7 +60,7 @@ export default function Layout() {
 
   const logout = async () => {
     try {
-      await import('../lib/api').then((api) => api.logout())
+      await api.logout()
     } catch {
       /* 后端不可达也照样本地登出 */
     }
@@ -70,6 +71,10 @@ export default function Layout() {
   // 移动端抽屉开合（桌面端不用它，改用持久化的 sidebarCollapsed）
   const [open, setOpen] = useState(false)
   const narrow = useNarrow()
+  /** 抽屉里的「导航」开关：窄屏下它就是抽屉的关闭键 */
+  const foldBtnRef = useRef<HTMLButtonElement>(null)
+  /** 顶栏的抽屉开关：抽屉每次关掉，焦点都要还回它身上 */
+  const menuBtnRef = useRef<HTMLButtonElement>(null)
 
   const loc = useLocation()
   const current = NAV.find((n) => (n.end ? loc.pathname === n.to : loc.pathname.startsWith(n.to)))
@@ -79,10 +84,38 @@ export default function Layout() {
     if (!narrow) setOpen(false)
   }, [narrow])
 
-  const toggleNav = () => {
-    if (narrow) setOpen((v) => !v)
-    else setSettings({ sidebarCollapsed: !collapsed })
+  /**
+   * 关抽屉。焦点必须手动还回顶栏的开关：抽屉靠 `transform` 移出屏幕（见 Layout.css），
+   * 不是 display:none —— 焦点若留在里面的链接上，键盘用户就等于被关在看不见的地方，
+   * 而且 Esc 也接不住（此前唯一的关闭方式就是点遮罩）。
+   */
+  const closeDrawer = () => {
+    setOpen(false)
+    menuBtnRef.current?.focus()
   }
+
+  const toggleNav = () => {
+    if (narrow) {
+      if (open) closeDrawer()
+      else setOpen(true)
+    } else setSettings({ sidebarCollapsed: !collapsed })
+  }
+
+  // Esc 关闭抽屉
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeDrawer()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
+
+  // 打开抽屉就把焦点送进抽屉：顶栏那个开关在 DOM 里排在侧栏**之后**，
+  // 不移焦点的话，Tab 得先绕过整条顶栏和正文才摸得着抽屉里的链接。
+  useEffect(() => {
+    if (open && narrow) foldBtnRef.current?.focus()
+  }, [open, narrow])
 
   const toggleIcon = narrow
     ? open
@@ -115,7 +148,7 @@ export default function Layout() {
 
   return (
     <div className="layout">
-      <aside className={`sidebar ${open ? 'sidebar-open' : ''} ${collapsed ? 'rail' : ''}`}>
+      <aside id="app-sidebar" className={`sidebar ${open ? 'sidebar-open' : ''} ${collapsed ? 'rail' : ''}`}>
         <div className="brand">
           <button
             type="button"
@@ -142,6 +175,7 @@ export default function Layout() {
             ⚠️ 不能塞进 .brand 与 logo 同行：折叠成图标窄栏（rail）后侧栏只有 64px，
             38px 的 logo 已把那一行占满；独立成行，窄栏下图标才有地方居中。 */}
         <button
+          ref={foldBtnRef}
           className="sidebar-fold-btn"
           onClick={toggleNav}
           title={toggleLabel}
@@ -152,7 +186,7 @@ export default function Layout() {
           <span>导航</span>
         </button>
 
-        <nav className="nav">
+        <nav className="nav" aria-label="主导航">
           {NAV.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
@@ -160,7 +194,7 @@ export default function Layout() {
               end={end}
               title={label}
               className={({ isActive }) => `nav-item ${isActive ? 'nav-active' : ''}`}
-              onClick={() => setOpen(false)}
+              onClick={closeDrawer}
             >
               <Icon size={17} />
               <span>{label}</span>
@@ -176,7 +210,23 @@ export default function Layout() {
         </div>
       </aside>
 
-      {open && <div className="sidebar-mask" onClick={() => setOpen(false)} />}
+      {/* 遮罩原本是个裸 div：只有 onClick，键盘/读屏都够不着「关掉抽屉」这个动作。
+          升级成可聚焦的按钮语义后，配合上面的 Esc 处理，抽屉就有了两条退出路径。 */}
+      {open && (
+        <div
+          className="sidebar-mask"
+          role="button"
+          tabIndex={0}
+          aria-label="关闭菜单"
+          onClick={closeDrawer}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              closeDrawer()
+            }
+          }}
+        />
+      )}
 
       <div className="main">
         <header className="topbar">
@@ -186,11 +236,13 @@ export default function Layout() {
               会话列表的收纳开关则归会话栏自己（见 ChatPage 的 .session-toggle）。 */}
           {narrow && (
             <button
+              ref={menuBtnRef}
               className="btn btn-icon menu-btn"
               onClick={toggleNav}
               title={toggleLabel}
               aria-label={toggleLabel}
               aria-expanded={open}
+              aria-controls="app-sidebar"
             >
               {toggleIcon}
             </button>

@@ -19,12 +19,23 @@
 """
 from __future__ import annotations
 
+import re
+
 from psycopg.types.json import Jsonb
 
 from wuwa_rag.core.authdb import get_pool
 from wuwa_rag.ww_logger import get_logger
 
 log = get_logger("conv")
+
+# thread_id 的**唯一**格式判据。它会在两处被需要：入口校验（`api/app._client_thread_id`）
+# 和反馈落库（`core.feedback.save_feedback` 的 thread_id）。原先只有前者有、后者绕开，
+# 于是 `/feedback` 可以写入任意超长/带特殊字符的 thread 串（本项目的老规矩：
+# 同一语义两处判据必然漂移，这里把它收成一处）。
+# 会进 PG 主键、进日志、进 checkpointer 的键，所以必须在入口收口。
+# 前端生成的是 8 位 base36（`Math.random().toString(36).slice(2,10)`），天然满足；
+# 限长是为了防「超长随机串把索引撑爆」。
+THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # 标题长度上限（侧栏一行放不下，超出截断加省略号）
 MAX_TITLE_CHARS = 22
@@ -116,6 +127,19 @@ async def ensure_conversation(user_id: int, thread_id: str, question: str = "") 
     return sid
 
 
+def _like_pattern(query: str) -> str:
+    """把用户输入包成 ILIKE 的「包含」模式，并转义 LIKE 的元字符。
+
+    不转义会怎样（不是注入——参数化已经挡住了注入）：用户搜 `100%` 或 `a_b` 时，
+    `%`/`_` 会被当成通配符，`%` 直接匹配全部会话（表现为「随便打个百分号，列表全出来」），
+    `_` 匹配任意一个字符（搜「A_B」会命中「AXBY」）。搜索是**按 user_id 隔离**的，
+    所以这只是结果不对，不会读到别人的会话。
+    顺序必须是先转义反斜杠本身，否则把 `%` 转成 `\\%` 后又被下一次替换改掉。
+    """
+    esc = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{esc}%"
+
+
 async def list_conversations(user_id: int, limit: int = 200, query: str = "") -> list[dict]:
     """该用户的会话列表（不含消息正文，只带最后一条预览）。新的在前。
 
@@ -144,13 +168,13 @@ async def list_conversations(user_id: int, limit: int = 200, query: str = "") ->
                    WHERE m.session_id = s.session_id ORDER BY m.id DESC LIMIT 1
               ) last ON true
              WHERE s.user_id = %s
-               AND (%s = '' OR s.title ILIKE %s
+               AND (%s = '' OR s.title ILIKE %s ESCAPE '\\'
                     OR EXISTS (SELECT 1 FROM messages m2
-                                WHERE m2.session_id = s.session_id AND m2.content ILIKE %s))
+                                WHERE m2.session_id = s.session_id AND m2.content ILIKE %s ESCAPE '\\'))
              ORDER BY coalesce(agg.last_at, s.created_at) DESC
              LIMIT %s
             """,
-            (user_id, query, f"%{query}%", f"%{query}%", limit),
+            (user_id, query, _like_pattern(query), _like_pattern(query), limit),
         )
         return list(await cur.fetchall())
 

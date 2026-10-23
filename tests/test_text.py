@@ -290,3 +290,26 @@ def test_清洗管线无画像时不改动昵称() -> None:
     src = "「颗粒」刚刚让我放歌"
     assert _clean_answer(src, "") == src
     assert _clean_answer(src, "用户主玩守岸人") == src
+
+
+def test_两条输出口都只过唯一清洗实现() -> None:
+    """`_clean_answer` 的 docstring 自称「唯一实现」，但 2026-10-23 抓到它被**绕开**过：
+    `_chat_turn`（chitchat / time / clarify 三条不检索分支共用的出口）只手工做了第 ④ 步
+    `unquote_mentions`，于是 `[n]` 来源角标、丢失的百分号、重复列表行全都原样写进
+    `state["answer"]` → history 与非流式 `/ask`。表现是「闲聊轮里带 [1]，检索轮干净」，
+    和 2026-10-10 那次「流式没处理、history 已处理」是同一个病的另一半。
+
+    判据取源码而不是造一次 LLM 调用（本仓约定：全量离线）：
+    两个出口都必须调 `_clean_answer(`，且**不许**再单独调其中任何一步——
+    单独调一步就意味着其余三步被绕过。
+    """
+    import inspect
+
+    from wuwa_rag.dialog import graph as g
+
+    steps = ("strip_ref_marks(", "fix_percent_units(", "dedup_list_items(", "unquote_mentions(")
+    for fn in (g._chat_turn, g.generate_node):
+        src = inspect.getsource(fn)
+        assert "_clean_answer(" in src, f"{fn.__name__} 又绕过了唯一清洗实现 _clean_answer"
+        inline = [s for s in steps if s in src]
+        assert not inline, f"{fn.__name__} 里单独调了 {inline}，清洗被拆成两处了"

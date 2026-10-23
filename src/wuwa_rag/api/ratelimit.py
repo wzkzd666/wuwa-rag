@@ -31,9 +31,14 @@
 豁免
 ----
 `/health` 必须豁免：`scripts/start.ps1` 靠轮询它判就绪，被限流会让启动脚本误判失败。
-`/docs`、`/redoc`、`/openapi.json` 同样豁免（文档面，不是攻击面）。
-用 `@limiter.exempt` 装饰器实现——它按 `module.qualname` 注册，`wraps` 保留了名字，
-所以放在 `@app.get(...)` 内层（紧贴函数）即可。
+`/docs`、`/redoc`、`/openapi.json` **没有豁免**，走的是 200/minute 的兜底档
+（2026-10-23 校正：这里曾写「同样豁免」，但代码里从没有那段——全文件只有 `/health`
+一处 `@limiter.exempt`。留一句假承诺比不写更糟：读的人会以为已经处理过了）。
+自部署形态下文档面是功能而不是攻击面，所以维持可访问；真要收紧就用
+`FastAPI(docs_url=None, redoc_url=None, openapi_url=None)` 关掉，
+而不是给它加豁免。
+`@limiter.exempt` 按 `module.qualname` 注册，`wraps` 保留了名字，
+所以必须放在 `@app.get(...)` 内层（紧贴函数）。
 
 存储与容错
 ----------
@@ -144,6 +149,29 @@ def limit_tts():
 def limit_outbound():
     """会向外部地址发请求的端点（模型列表探测 / 连通性测试）：SSRF 面，频率收紧。"""
     return limiter.limit(get_settings().RATE_LIMIT_OUTBOUND)
+
+
+def limit_ingest():
+    """入库（提交 / 重爬）：按登录用户，跑的是整条五步链 + 写共享语料。
+
+    ⚠️ 与 `limit_ask` 同理必须用 `shared_limit`，scope 固定 `"ingest"`：
+    `/ingest`（新角色）与 `/knowledge/refresh`（重爬已有角色）是**同一个能力**的
+    两个入口，用 `limit()` 会各算一份配额——换个端点就能把速率翻倍。
+    """
+    return limiter.shared_limit(get_settings().RATE_LIMIT_INGEST, "ingest")
+
+
+def limit_creds():
+    """口令类操作（改密 / 解锁 / 换加密口令 / 保存云端与语音凭据）：按登录用户。
+
+    为什么单列一档：这些端点每个都要跑一次 PBKDF2-HMAC-SHA256 **20 万次**
+    （本机实测单次 ~50ms；`/auth/password` 还要再加一次 scrypt ~733ms）。
+    原先它们只吃 200/minute 的兜底档，等于允许一个人用几千次请求把 CPU 钉在密钥派生上。
+    ⚠️ 必须 `shared_limit`、scope 固定 `"creds"`：五个入口花的是**同一份**代价，
+    分开计数就变成 5 × 10 次/分钟，换个端点即可绕过。
+    与 `limit_auth`（按 IP、含登录）分档是因为这里身份已经建立，按用户计数更准。
+    """
+    return limiter.shared_limit(get_settings().RATE_LIMIT_AUTH, "creds")
 
 
 async def _on_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> JSONResponse:

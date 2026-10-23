@@ -252,18 +252,29 @@ function MessageBubble({ msg, onRegenerate, canRegenerate }: Props) {
                 已截断重复内容
               </span>
             )}
+            {/* 联网兜底**失败**时要说出来：不说，用户看到的收口是「翻了本地也上网找了，
+                确实没有」，而真相可能是「Key 过期，根本没查成」——这是两回事，
+                前者该去补资料，后者该去设置页改密钥。只报类别，细节在 title 里。 */}
+            {msg.meta.web_reason && (
+              <span className="tag tag-warn" title={`联网搜索未完成：${msg.meta.web_reason}`}>
+                <AlertTriangle size={11} />
+                联网没查成
+              </span>
+            )}
           </div>
         )}
 
-        {/* 操作栏：同样在气泡外（原版布局），仅悬停时显形 */}
-        {!isUser && !msg.streaming && msg.content && msg.status !== 'error' && (
+        {/* 操作栏：同样在气泡外（原版布局），仅悬停时显形。
+            ⚠️ 错误态**也要出现**——「重新生成」是失败气泡唯一的出口，把它连着整条栏一起
+            掐掉，用户只能刷新页面。复制/朗读/评分则仍然要求有正文（空答案无可复制）。 */}
+        {!isUser && !msg.streaming && (msg.content || msg.status === 'error') && (
           <div className="msg-actions">
-            <CopyBtn text={msg.content} />
+            {msg.content && <CopyBtn text={msg.content} />}
             {/* 满意度反馈：只有**已生成完整答案**的助手消息才评（流式中途/错误没有可评的内容） */}
-            {!msg.streaming && !msg.error && (
+            {msg.content && !msg.error && (
               <AnswerFeedback msg={msg} question={prevQuestion} />
             )}
-            {ttsEnabled && <TtsBtn text={msg.content} emotion={msg.meta?.emotion} />}
+            {ttsEnabled && msg.content && <TtsBtn text={msg.content} emotion={msg.meta?.emotion} />}
             {canRegenerate && onRegenerate && (
               <button className="msg-action" title="重新生成" onClick={() => onRegenerate(msg.id)}>
                 <RefreshCw size={13} />

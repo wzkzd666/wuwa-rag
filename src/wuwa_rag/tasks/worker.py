@@ -293,17 +293,63 @@ def crawl_character(self, character: str, run_id: int | None = None):
 
 
 # ───────────── 2. 分块（增量：只重写该角色） ─────────────
+async def _warn_missing_characters(character: str, in_file: set) -> None:
+    """chunks.jsonl 覆盖不到 PG 里已有的角色时，记一条响亮的 warning。
+
+    为什么不直接失败：空文件对**全新安装**是合法起点（第一个角色入库时本来就只有它），
+    一刀切拦死会让 clone 即用变成「必须先手工造文件」。但放着不管又是静默丢数据——
+    真源(PG)与中间产物(jsonl)脱节的后果要到「有人拿 jsonl 去重建图谱/索引」那天才爆。
+    所以：照常继续，但把差异写进日志，并在消息里给出补救命令。
+    ⚠️ 这纯粹是诊断，**任何异常都不许影响主链**（PG 没起/查询失败就静默跳过）。
+    """
+    try:
+        async with get_cursor(commit=False) as cur:
+            await cur.execute("SELECT DISTINCT character FROM chunks")
+            # ⚠️ `core/db.py` 的池**没有**设 dict_row factory（那是 authdb 池才有的），
+            # psycopg3 默认返回**元组行** —— 写成 `r["character"]` 会抛 TypeError，
+            # 而下面那个宽 except 会把它吞掉，结果是这条诊断永远不输出、还看起来「已实现」。
+            # 本仓口径：`core.db` 一律按位置取列（见 entities.py / build_index.py）。
+            db_chars = {r[0] for r in await cur.fetchall() if r[0]}
+    except Exception as exc:  # noqa: BLE001 —— 诊断失败绝不能带崩流水线，但必须留痕
+        # 留痕不是可选的：没有这一行，「判据写错被自己吞掉」就又变成静默的了
+        log.debug("入库覆盖度诊断跳过（不影响流水线）：%s: %s", type(exc).__name__, exc)
+        return
+    covered = {c for c in in_file if c} | {character}
+    missing = sorted(db_chars - covered)
+    if missing:
+        log.warning(
+            "chunks.jsonl 只覆盖 %d 个角色，而 PG chunks 表有 %d 个 —— 缺 %s。"
+            "单角色入库照常继续，但别拿这份文件做全量重建；"
+            "补救：uv run wuwa-chunk（从 data/raw 全量重生成）",
+            len(covered), len(db_chars),
+            "、".join(missing[:8]) + ("…" if len(missing) > 8 else ""),
+        )
+
+
 async def _chunk_character_async(character: str) -> None:
     raw = s.RAW_DIR / f"{character}.md"
     if not raw.exists():
         raise RuntimeError(f"raw/{character}.md 不存在，crawl 必须先于 chunk")
     new_chunks = chunk_markdown(raw.read_text(encoding="utf-8"), character)
+    # ⚠️ 0 块必须**响亮失败**，不能当成功往下走。
+    # 实测现场（2026-10-23 审计抓到）：`data/chunks/chunks.jsonl` 是 0 字节
+    # （全量 CLI 用 `open("w")` 就地截断，中途被打断就留下空文件），而 PG 里 58 个角色
+    # 6741 块完好 —— 这份「中间产物」与真源已经悄悄脱节。若不拦：
+    #   · 下面「保留别人」的集合是空的，一次单角色 chunk 会把文件写成只剩这一个角色；
+    #   · 五步链照旧全绿，之后 `wuwa-graph` / 全量重建拿这份缺角色的文件当输入 → 真丢数据。
+    if not new_chunks:
+        raise RuntimeError(
+            f"{character} 分块结果为 0 块（raw 长度 {raw.stat().st_size} 字节）——"
+            f"要么 raw/{character}.md 是空文件，要么 chunker 认不出它的结构，"
+            f"绝不能把空结果写进 chunks.jsonl 还报成功"
+        )
     path = s.CHUNKS_JSONL
     existing = (
         [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
         if path.exists() else []
     )
     existing = [c for c in existing if c.get("character") != character]  # 丢掉旧版
+    await _warn_missing_characters(character, {c.get("character") for c in existing})
     existing.extend(asdict(c) for c in new_chunks)
     # 原子写：先落临时文件再 replace，避免别处读到半截；多进程并行仍可能覆盖，
     # 所以 worker 务必 --pool=solo --concurrency=1（串行），或后续改按角色分文件

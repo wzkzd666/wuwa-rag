@@ -24,6 +24,7 @@ from wuwa_rag.dialog.nlu import (
     detect_stage,
     extract_characters,
     is_identity,
+    is_material_question,
     is_self_intro,
     is_time_question,
     mentions_time,
@@ -34,14 +35,14 @@ from wuwa_rag.dialog.nlu import (
     veto_ambiguous_names,
 )
 from wuwa_rag.dialog.prompt import (
+    all_sources,
     build_context,
     build_prompt,
-    doc_sources,
 )
 from wuwa_rag.dialog.state import RagState
 from wuwa_rag.dialog.tools import current_time_tool, graph_search_tool, vector_search_tool
 from wuwa_rag.knowledge import domain_terms
-from wuwa_rag.knowledge.entities import find_mentions, resolve_candidates
+from wuwa_rag.knowledge.entities import TEAM_SLOTS, find_mentions, resolve_candidates
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.retrieve import fetch_chunks
 from wuwa_rag.services import music, persona, profile, tts
@@ -96,8 +97,18 @@ _STAGE_LABELS = {
     "verify": "核对资料对题",
     "web": "上网补一补",
     "generate": "整理答案中",
+    "clarify": "再问清一点",
     "music": "帮家人放首歌",
 }
+
+# 会产出「给用户看的正文」的节点。`ask_stream` 的 token 是从 `on_chat_model_stream`
+# **旁路抽取**再按这份白名单过滤的（不过滤会把 intent 里主题分类器吐的
+# `{"topic":"chitchat"}` 当答案下发，实测发生过）。
+# ⚠️ 新增任何产正文的分支必须同时加进这里，否则**不会报错**：节点照常生成、
+# 状态里 answer 也有值，唯独 token 与 `full` 收不到东西，于是 `done.answer` 是空串、
+# 前端一片空白。2026-10-23 就是这么抓到 `clarify`（「没听懂→反问」那条活路径）哑掉的：
+# 节点注册了、路由表也指了、`_chat_turn` 也正常生成了，只有白名单漏了它。
+_TEXT_NODES = ("generate", "chitchat", "time", "clarify")
 
 # 内部 LLM 调用的标签：这些调用的输出是**结构化中间结果**（摘要/审查/情绪），
 # 绝不能出现在用户答案里。它们都发生在 generate/chitchat 节点**内部**，其流式回调
@@ -152,7 +163,7 @@ async def _chat_client(state: RagState, strict: bool = False) -> tuple[Runnable,
     state 持久化进 PG，写进去等于把用户密钥落盘到另一张表。
 
     第三个返回值 `emotion_via_cloud`：**该用户是否勾选了让自己的模型兼任情绪判定**
-    （`llmstore.emotion_enabled`，默认否）。为真时把本 client 交给 rag/emotion.py，
+    （`llmstore.emotion_enabled`，默认否）。为真时把本 client 交给 services/emotion.py，
     否则情绪判定走本地 tool 模型（分工说明见该模块 docstring）。
     """
     uid = state.get("user_id")
@@ -297,11 +308,6 @@ async def intent_node(state: RagState) -> dict:
     #   **不需要、也不该在 _after_graph 里再写一条例外**（双判据必然迟早不同步）。
     # 为什么必须在这里而不是 _after_graph：_after_graph 是**路由函数**，只能返回分支名，
     # 改不了 state；而 intent 要如实落到 state 里对外。
-    # 没理解 → 反问。判据见 nlu.needs_clarification（保守：只覆盖「确实没有可答内容」）。
-    # 放在 chitchat 判定**之后**：那时 slots/chars 已知，信息最全。
-    if intent == "chitchat" and needs_clarification(q, slots, chars):
-        intent = "clarify"
-        log.info("意图不明，转澄清: %r", q[:20])
     if _is_team_overview(slots, chars):
         intent = "fact"
 
@@ -312,7 +318,7 @@ async def intent_node(state: RagState) -> dict:
     #    就丢了检索（时间问法在无槽位时才成立）。
     #    另外算一个 need_time（弱信号）：句子里**顺带**问了时间（「现在几点，顺便说说
     #    今汐的共鸣链」）时不动路由，只让检索/闲聊分支把服务端真值一并带上。
-    #    两条判据都来自 intent.py，规则硬编码、零额外延迟（判据本身只是几个正则）。
+    #    两条判据都来自 nlu.py，规则硬编码、零额外延迟（判据本身只是几个正则）。
     # ① 人格/身份类硬信号（问「你」的台词/名字/身份）——即使改写出了角色名，本质也
     #    是问人格不是查资料，直接判 chitchat。用**原句 q** 判：改写 sq 已把「你」补成
     #    角色名（「你的台词」→「爱弥斯的台词」），第二人称信号会丢。aemeath 人设由模型
@@ -355,7 +361,15 @@ async def intent_node(state: RagState) -> dict:
     elif not chars and not slots and not stage and not element:
         topic = await classify_topic(sq)
         if topic == "chitchat":
-            intent = "chitchat"
+            # 没理解 → 反问，而不是让模型瞎接话。判据见 nlu.needs_clarification
+            # （保守：只收「那个 / 继续 / 嗯」这类纯指代与语气词）。
+            # ⚠️ 必须落在**这一条**分支里：它原先写在上面 `classify()` 之后判
+            # `intent == "chitchat"`，而 classify() 只会返回 hybrid/fact/semantic，
+            # 条件恒假 —— 反问分支从上线起一次都没执行过（2026-10-23 实测：说「那个」
+            # 直接落闲聊，模型自己圆了一句「怎么突然这么小声呀」，等于在猜用户想干嘛）。
+            # 也只收这一条：音乐回指（继续/再试）、身份问句、自我介绍都有**自己的出口**，
+            # 一并转成反问会把它们的动作吞掉。
+            intent = "clarify" if needs_clarification(q, slots, chars) else "chitchat"
     log.info("意图=%s 槽位=%s 角色=%s 属性=%s 阶段=%s%s%s", intent, slots, chars or "未识别",
              element or "-", stage or "-", " | 顺带问时间" if need_time and intent != "time" else "",
              f" | 改写={sq!r}" if sq != q else "")
@@ -380,20 +394,19 @@ async def graph_node(state: RagState) -> dict:
     return {"graph_facts": facts}
 
 
-# 鸣潮一队只有 3 个人 —— 满 3 个角色名才算「点名一支具体队伍」。
-_TEAM_SLOTS = 3
-
-
 def _is_named_team(slots, characters) -> bool:
-    """点名一支具体队伍：≥3 个角色名 + 问的是配队（队友槽位）。
+    """点名一支具体队伍：角色名占满一队名额（`entities.TEAM_SLOTS`）+ 问的是配队（队友槽位）。
 
     阈值取 3 而非 2：只有 2 个名字时用户尚未确定队伍（图谱会列出所有
     「含这两人」的队），补的向量是「这帮人相关的正文」，答非所问、还白等十几秒。
+    这个数与 `knowledge/retrieve.py` 的 `is_exact` 是同一个判据，所以共用
+    `entities.TEAM_SLOTS`，不再各存一份字面量（2026-09-22 它从 2 改成 3 时，
+    两份拷贝就是「改一半」的高危形态）。
 
     为什么指名时要补向量：**队名在图谱、打法循环在正文描述里**（wiki 配队页正文
     有出招顺序，如「守岸人：AAAA-Z-E-Q-AAAA-Z-R」）。
     """
-    return len(characters or []) >= _TEAM_SLOTS and "队友" in (slots or [])
+    return len(characters or []) >= TEAM_SLOTS and "队友" in (slots or [])
 
 
 def _is_team_overview(slots, characters) -> bool:
@@ -607,9 +620,14 @@ async def _rescan(sq: str, fallback_chars: list[str] | None = None) -> dict:
 async def web_node(state: RagState) -> dict:
     """联网兜底：千帆实时搜索。失败不报错，降级走生成侧「一句话不知道」。"""
     q = state.get("refined_query") or state.get("search_query") or state["question"]
-    ok, text = await web_search(q)
-    log.info("联网兜底: %s (%d 字)", "命中" if ok else "无结果", len(text))
-    return {"used_web": True, "web_facts": (text if ok else "")[:1500]}
+    ok, text, sources = await web_search(q)
+    log.info("联网兜底: %s (%d 字 / 溯源 %d 条)", "命中" if ok else f"失败：{text}",
+             len(text) if ok else 0, len(sources))
+    return {"used_web": True,
+            "web_facts": (text if ok else "")[:1500],
+            # 成功才给溯源；失败时把原因留给收口文案用（两者互斥，不会同时非空）
+            "web_sources": sources if ok else [],
+            "web_reason": "" if ok else text}
 
 
 def _after_verify(state: RagState) -> str:
@@ -635,7 +653,8 @@ def _after_verify(state: RagState) -> str:
 #   取到之后**在 Python 里替模型读表**：把「满级列」和材料格解析成成对条目再喂进去。
 #   8B 模型读 11 列宽表会串列（实测把 Lv7 读数读成中文数字），替它读比让它读可靠。
 _SKILL_TABS = ("常态攻击", "共鸣技能", "共鸣回路", "共鸣解放", "变奏技能", "延奏技能", "谐度破坏")
-_MATERIAL_SLOT_RE = re.compile(r"突破|材料|素材|培养|养成|练度")
+# 材料表的触发判据收在 `nlu.is_material_question`（那里写明了为什么它比
+# `SLOT_PATTERNS["突破材料"]` 窄）。以前这里另有一份正则，实测与槽位口径 8 条里错 5 条。
 # 声骸/武器走确定性补料时，认领这两个槽位（组件名本身不写死，由 `chunks.component` 决定）
 _ECHO_SLOTS = ("声骸", "武器")
 _MATERIAL_ITEM_RE = re.compile(r"([\u4e00-\u9fa5A-Za-z·]+?)\s*[x×](\d+)")
@@ -867,7 +886,7 @@ async def _value_blocks(state: RagState) -> list[str]:
             b = await _skill_value_block(chars[0], sq, state.get("docs") or [])
             if b:
                 blocks.append(b)
-        if _MATERIAL_SLOT_RE.search(sq):
+        if is_material_question(sq):
             b = await _material_block(chars[0])
             if b:
                 blocks.append(b)
@@ -923,7 +942,7 @@ async def generate_node(state: RagState):
                  " + ".join(b.splitlines()[0].lstrip("# ") for b in blocks))
     # provider：本地 aemeath（默认）或用户自配云端。is_cloud 决定人设注入方式（见 _chat_client）
     client, is_cloud, emotion_via_cloud = await _chat_client(state, strict=bool(blocks))
-    # 混合时间问句（既查资料又问时间，见 intent.mentions_time）：把服务端真值补进 prompt
+    # 混合时间问句（既查资料又问时间，见 nlu.mentions_time）：把服务端真值补进 prompt
     now = await _now_if_needed(state)
     prompt = build_prompt(context, state["question"], blocks=blocks,
                            characters=state.get("characters"),
@@ -1150,10 +1169,12 @@ async def _chat_turn(state: RagState, hint: str, *, use_history: bool = True):
     answer = "".join(full)
     if answer_ok and truncated and hit:
         answer = _trim_loop(answer, hit)
-    # 模型叙述用户时爱给称呼套「」/“”（实测「「颗粒」刚刚让我放…」）——
-    # 与画像注入配合的输出侧确定性剥离，见 text.unquote_mentions。
-    answer = unquote_mentions(answer, profile.nicknames_from_context(
-        state.get("user_context", "")))
+    # 四步清洗必须走**唯一实现** `_clean_answer`。这里曾经只手工做了第 ④ 步
+    # （unquote_mentions），于是 `[n]` 来源角标、丢失的百分号、重复列表行会原样写进
+    # state["answer"] → history 与非流式 /ask —— 与 2026-10-10 抓到「④ 漏在 ask_stream」
+    # 是同一个坑的另一半：三条不检索的分支（chitchat/time/clarify）共用这条出口，
+    # 漏一次就三个场景同时脏。加清洗步骤一律只改 `_clean_answer`。
+    answer = _clean_answer(answer, state.get("user_context", ""))
 
     # 情绪标签：与 generate_node 使用同一开关（仅在 TTS 可用时判定，按当前用户判）。
     # 闲聊是 playful/cheerful 的高发场景，情绪对语音表现力价值最大。
@@ -1385,6 +1406,10 @@ def _fresh_state(question: str, characters: list[str], user_context: str = "",
         "docs": [],
         "graph_facts": "",
         "web_facts": "",
+        # 与 web_facts 同批清零：checkpointer 会把上一轮的联网溯源/失败原因带进本轮，
+        # 于是「上一轮联网失败」会挂在这一轮的回答上（引用面板也会多出无关链接）。
+        "web_sources": [],
+        "web_reason": "",
         "verify_stage": "",
         "refined_query": "",
         "retry_count": 0,
@@ -1423,6 +1448,48 @@ def _unknown_text(names: list[str]) -> str:
     )
 
 
+def _done_event(
+    *,
+    answer: str,
+    thread_id: str,
+    intent: str = "",
+    slots: list[str] | None = None,
+    characters: list[str] | None = None,
+    docs: int = 0,
+    sources: list[str] | None = None,
+    truncated: bool = False,
+    emotion: str = "",
+    web_reason: str = "",
+    message_id: int | None = None,
+) -> dict:
+    """SSE `done` 事件的**唯一**构造器：键集合固定，没发生的分支一律取默认空值。
+
+    为什么要收口成一个函数：`done` 是前端 meta、引用面板、TTS 与「重连后复原」的共同契约，
+    而它原本有**两处**各写一遍字面量（正常收尾 + 角色不在库的早退）。早退那条一度少
+    `emotion` / `web_reason` 两键——同一个「不知道」在两条路径上形状不一样，前端只能靠
+    optional 兜着，缺的那个键要到界面上才看得出来。
+    `thread_id` 必须回传：会话是服务端建的（前端不传时由后端生成），前端要靠这个事件
+    认领新建的会话 id，否则「新建对话」后第一句问答前端永远不知道自己的会话叫什么。
+    `message_id` 是这条回答落库后的**行号**，由 API 层在写库之后填进来（graph 层看不到数据库）：
+    前端这条气泡此刻还挂着本地随机 uid，而满意度反馈是按消息 id 提交的——不回填真 id，
+    刷新后那条评价就再也关联不上（详见 `api/app.py` 里 append_message 那段的注释）。
+    """
+    return {
+        "done": True,
+        "answer": answer,
+        "intent": intent,
+        "slots": slots or [],
+        "characters": characters or [],
+        "docs": docs,
+        "sources": sources or [],
+        "truncated": truncated,
+        "emotion": emotion,
+        "web_reason": web_reason,
+        "message_id": message_id,
+        "thread_id": thread_id,
+    }
+
+
 async def ask(question: str, thread_id: str = "default", user_context: str = "",
               user_id: int | None = None, history: list[dict] | None = None) -> dict:
     candidates, ok, crawled = await ensure_characters(question)
@@ -1430,7 +1497,7 @@ async def ask(question: str, thread_id: str = "default", user_context: str = "",
         log.info("自动爬取: 最终回「不知道」(角色=%s)", candidates)
         return {
             "answer": _unknown_text(candidates),
-            "characters": candidates, "intent": "", "slots": [], "docs": 0,
+            "characters": candidates, "intent": "", "slots": [], "docs": [],
         }
     chain = await get_chain()
     injected = crawled if crawled else []
@@ -1463,16 +1530,9 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         yield {"stage": "crawl", "label": "帮家人把这个角色收进来"}
         text = _unknown_text(candidates)
         yield {"token": text}
-        # done 事件补齐字段：原来只 `{"done": True}`，前端 meta 全是 undefined、
-        # 引用面板也拿不到 sources（与正常路径的 done 结构对齐）。
-        yield {
-            "done": True, "answer": text, "intent": "", "slots": [],
-            "characters": candidates, "docs": 0, "sources": [], "truncated": False,
-            # thread_id 必须回传：会话现在是服务端建的（前端不传 thread_id 时由后端生成），
-            # 前端要靠这个事件认领新建的会话 id，否则「新建对话」后第一句问答
-            # 前端永远不知道自己的会话叫什么。
-            "thread_id": thread_id,
-        }
+        # 与正常收尾那条 done **同构**：两条路径都过 `_done_event`，形状由构造函数保证，
+        # 不再靠「记得把十一个键都写一遍」。
+        yield _done_event(answer=text, characters=candidates, thread_id=thread_id)
         return
 
     yield {"status": "retrieving"}  # 前端可显示「检索中…」
@@ -1504,13 +1564,12 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         #    未挡 wwa:summary 时摘要整句被拼进答案尾巴；接情绪标签时预判到 wwa:emotion 同样。
         # ② 节点过滤：intent_node 里的主题分类器也调 LLM，事件同样挂 on_chat_model_stream
         #    （node='intent'），不过滤会把 {"topic":"chitchat"} 当答案吐给前端（实测发生过）。
-        #    白名单 = 三个会产出「给用户看的正文」的节点（generate/chitchat/time），
-        #    新增这类节点必须同步加进来，否则答案会被静默丢弃、前端一个字都收不到。
+        #    白名单见模块级 _TEXT_NODES —— 新增产正文的节点必须同步加进去。
         elif kind == "on_chat_model_stream":
             if _INTERNAL_TAGS & set(event.get("tags") or []):
                 continue
             node = event.get("metadata", {}).get("langgraph_node", "")
-            if node not in ("generate", "chitchat", "time"):
+            if node not in _TEXT_NODES:
                 continue
             chunk = event.get("data", {}).get("chunk")
             if chunk and hasattr(chunk, "content") and chunk.content:
@@ -1577,18 +1636,22 @@ async def ask_stream(question: str, thread_id: str = "default", user_context: st
         len(answer), " [截断]" if final_state.get("truncated") else "",
     )
 
-    yield {
-        "done": True,
-        "answer": answer,
-        "intent": final_state.get("intent", ""),
-        "slots": final_state.get("slots") or [],
-        "characters": final_state.get("characters") or [],
-        "docs": len(final_state.get("docs") or []),
-        "sources": doc_sources(final_state.get("docs") or []),
-        "truncated": bool(final_state.get("truncated")),
-        "emotion": final_state.get("emotion", ""),   # TTS 情绪（未开启时为空串）
-        "thread_id": thread_id,   # 见上：供前端认领服务端新建的会话
-    }
+    yield _done_event(
+        answer=answer,
+        intent=final_state.get("intent", ""),
+        slots=final_state.get("slots") or [],
+        characters=final_state.get("characters") or [],
+        docs=len(final_state.get("docs") or []),
+        sources=all_sources(final_state.get("docs") or [],
+                            final_state.get("web_sources") or []),
+        truncated=bool(final_state.get("truncated")),
+        emotion=final_state.get("emotion", ""),   # TTS 情绪（未开启时为空串）
+        # 联网兜底**失败**时的一句话原因（成功为空串）。走 meta 而不是塞进答案文本：
+        # 人设收口该说的还是要说，但「其实是 Key 过期了」这种事实得让前端能标出来，
+        # 否则用户永远以为「库里真没有」。
+        web_reason=final_state.get("web_reason", ""),
+        thread_id=thread_id,
+    )
 
 
 async def _main() -> None:

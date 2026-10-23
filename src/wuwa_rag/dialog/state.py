@@ -14,7 +14,7 @@ class RagState(TypedDict, total=False):
     need_time: bool        # 本轮是否要用到服务端真值时间。纯时间问题（intent=time）走
                            # time_node；「顺带问了时间」的混合问句（intent 仍是
                            # fact/semantic/hybrid/chitchat）由 chain 在本节点里额外注入
-                           # 真值（见 intent.mentions_time）。
+                           # 真值（见 nlu.mentions_time）。
     slots: list[str]       # 命中的事实槽位
     characters: list[str]         # 识别出的角色名列表
     graph_facts: str       # 图谱事实（已格式化）
@@ -38,7 +38,11 @@ class RagState(TypedDict, total=False):
     refreshed: bool        # 本轮是否已触发过按角色刷新（只刷一次）
     used_web: bool         # 是否走了千帆联网兜底
     web_facts: str         # 千帆联网搜索结果（生成上下文第三级资料）
+    web_sources: list      # 联网溯源 [{title,url}]；与文档 sources 一起进 done.sources
+    web_reason: str        # 联网**失败时**给用户的一句话原因（成功时空串）。
+                           # 不收口就会退化成「翻了本地也上了网，确实没有」，
+                           # 而真相可能是「Key 过期，根本没查成」——对用户是两回事。
     # ---- 用户画像（user_facts 表）----
     user_context: str      # 该用户的画像事实串（「主玩角色是守岸人；萌新」），注入生成 prompt
     # ---- 情绪标签（供 TTS 使用）----
-    emotion: str           # 本轮答案的情绪标签（受限枚举，见 rag/emotion.py）
+    emotion: str           # 本轮答案的情绪标签（受限枚举，见 services/emotion.py）

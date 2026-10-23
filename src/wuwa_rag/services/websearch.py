@@ -28,11 +28,22 @@ def _enabled() -> bool:
     return bool(get_settings().QIANFAN_API_KEY.strip())
 
 
-async def web_search(query: str) -> tuple[bool, str]:
-    """联网搜索：返回 (是否成功, 资料文本)。答案由调用方交 aemeath 组织（保人设）。"""
+async def web_search(query: str) -> tuple[bool, str, list[dict[str, str]]]:
+    """联网搜索：返回 **(是否成功, 资料文本或失败原因, 溯源列表)**。
+
+    第二个槽位在失败时放**给用户看的一句话原因**（不是日志用的堆栈）：
+    以前所有失败都返回空串，调用方只能笼统降级，用户看到的是「我翻了本地也上网找了，
+    确实没有」——而真相可能是「Key 过期了，根本没找成」。这两种情况对用户的意义完全不同，
+    所以失败也要如实说，且只说类别（HTTP 状态/没连通/解析失败），不外泄响应体。
+
+    第三个槽位是 `[{title, url}]`：以前溯源只拼进 prompt 文本（`- title: url`），
+    `done.sources` 里没有它，于是**联网答出来的内容在引用面板里是空的**。
+    答案由调用方交 aemeath 组织（保人设）。
+    """
     s = get_settings()
     if not _enabled():
-        return False, ""
+        # 整条联网兜底关闭：不发任何外部请求，也如实说明「这次没法上网查」
+        return False, "本部署未启用联网搜索", []
     body = {
         "model": s.QIANFAN_WEB_MODEL,
         "messages": [{"role": "user", "content": query}],
@@ -61,29 +72,37 @@ async def web_search(query: str) -> tuple[bool, str]:
             )
             if r.status_code != 200:
                 log.warning("千帆联网搜索 HTTP %s: %s", r.status_code, r.text[:200])
-                return False, ""
+                # 4xx 里 401/403 是凭据问题、429 是额度，其余归到「服务端拒绝」；
+                # 只报类别，响应体留在日志里（可能含请求上下文）。
+                why = {401: "API Key 无效或已过期", 403: "API Key 无权访问该模型",
+                       429: "联网搜索额度已用尽"}.get(r.status_code, f"服务端返回 HTTP {r.status_code}")
+                return False, f"联网搜索没成功（{why}）", []
             data = r.json()
             choice = (data.get("choices") or [{}])[0]
             content = (choice.get("message") or {}).get("content", "").strip()
             # 溯源位置实测在 **choice.search_results**（开了 enable_trace 才有）；
             # data.search_results 兜底保留。每项含 index/url/title。
-            sources = choice.get("search_results") or data.get("search_results") or []
+            raw_sources = choice.get("search_results") or data.get("search_results") or []
+            sources = [
+                {"title": str(it.get("title") or "").strip(), "url": str(it.get("url") or "").strip()}
+                for it in raw_sources
+                if isinstance(it, dict) and str(it.get("url") or "").strip()
+            ]
             lines = [content] if content else []
             for it in sources[:8]:
-                if isinstance(it, dict):
-                    lines.append(f"- {it.get('title', '')}: {it.get('url', '')}")
+                lines.append(f"- {it['title']}: {it['url']}")
             text = "\n".join(lines).strip()
             if not text:
                 log.warning("千帆返回空内容: keys=%s", list(data.keys())[:6])
-                return False, ""
+                return False, "联网搜索没有返回内容", []
             log.info("千帆联网搜索成功: %d 字 / 溯源 %d 条", len(text), len(sources))
-            return True, text
+            return True, text, sources
     except httpx.HTTPError as exc:
         # 只吞网络/超时/协议类故障——联网兜底本就是「有就加分、没有就降级」，
         # 不该因为千帆挂了而中断问答。响应体解析失败（KeyError/ValueError）属
         # 可预期，也一并降级；其余编程错误应如实暴露。
         log.warning("千帆联网搜索失败(%s): %s", type(exc).__name__, str(exc)[:160])
-        return False, ""
+        return False, f"联网搜索没连通（{type(exc).__name__}）", []
     except (KeyError, IndexError, ValueError) as exc:
         log.warning("千帆联网搜索响应解析失败(%s): %s", type(exc).__name__, str(exc)[:160])
-        return False, ""
+        return False, "联网搜索结果解析失败", []

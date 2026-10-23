@@ -8,7 +8,7 @@
   服务重启不丢登录态（内存 dict 方案重启全员掉线，pass）；
 - 请求带 `Authorization: Bearer <token>`，FastAPI 依赖里解析。
 
-与 rag/llmstore.py 的协作（用户云端 API-KEY 的加密存储）：
+与 core/llmstore.py 的协作（用户云端 API-KEY 的加密存储）：
 - **登录即自动解锁**：登录请求带明文密码，这里顺手派生 KEK 解开该用户的 DEK
   放进内存，下次登录云端模型直接生效（用户无需额外输入任何口令）。
 - **改密码必须重绑**：DEK 的密码通道由密码派生，改密码后旧密文立即失效，
@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import secrets
 from datetime import UTC, timedelta
 from datetime import datetime as dt
@@ -58,7 +59,10 @@ async def register(username: str, password: str) -> dict:
             raise AuthError(status_code=400, detail=f"用户名「{username}」已被占用")
         cur = await conn.execute(
             "INSERT INTO users (username, pw_hash, role) VALUES (%s, %s, 'guest') RETURNING id, username, role",
-            (username, hash_password(password)),
+            # scrypt 是**故意**贵的：本机实测一次 733ms。留在事件循环里跑，
+            # 一次登录/注册就把整个 API 卡住 0.7 秒（并发登录 = 全站停摆），
+            # 所以必须丢进线程池（项目里 CPU 密集调用都是这个口径）。
+            (username, await asyncio.to_thread(hash_password, password)),
         )
         user = await cur.fetchone()
         assert user is not None
@@ -80,7 +84,7 @@ async def login(username: str, password: str) -> dict:
             (username.strip(),),
         )
         row = await cur.fetchone()
-        if row is None or not verify_password(password, row["pw_hash"]):
+        if row is None or not await asyncio.to_thread(verify_password, password, row["pw_hash"]):
             raise AuthError(status_code=401, detail="用户名或密码错误")
 
     # 登录即解锁该用户的云端模型密钥（DEK），实现"下次登录自动连接"。
@@ -107,7 +111,7 @@ async def change_password(user_id: int, old: str, new: str) -> None:
     async with pool.connection() as conn:
         cur = await conn.execute("SELECT pw_hash FROM users WHERE id = %s", (user_id,))
         row = await cur.fetchone()
-        if row is None or not verify_password(old, row["pw_hash"]):
+        if row is None or not await asyncio.to_thread(verify_password, old, row["pw_hash"]):
             raise AuthError(status_code=400, detail="原密码不正确")
         try:
             await rebind_password(user_id, old, new)
@@ -116,7 +120,7 @@ async def change_password(user_id: int, old: str, new: str) -> None:
                         user_id, exc)
         await conn.execute(
             "UPDATE users SET pw_hash = %s, must_change = FALSE WHERE id = %s",
-            (hash_password(new), user_id),
+            (await asyncio.to_thread(hash_password, new), user_id),
         )
     log.info("user=%s 已修改密码", user_id)
 

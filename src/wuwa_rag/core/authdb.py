@@ -125,9 +125,9 @@ async def ensure_schema() -> None:
             ("admin", hash_password(pwd), must_change),
         )
         if await cur.fetchone() is not None:
-            log.warning(
-                "已种子管理员 admin。初始口令（来源：%s）：%s"
-                "——口令只显示这一次，请立即妥善保存并登录后尽快修改。",
-                how, pwd,
-            )
+            # ⚠️ **只打印到控制台，绝不进 log**：ww_logger 会落盘 logs/app.log 并保留 7 天，
+            # 初始口令进了文件就等于「有仓库/目录读权限的人都能拿到 admin」，
+            # 而"只显示这一次"的初衷恰恰要求它不留存。
+            print(f"[wuwa] 已种子管理员 admin。初始口令（来源：{how}）：{pwd}"
+                  " ——口令只显示这一次（不写日志文件），请立即妥善保存并登录后尽快修改。")
     log.info("鉴权表结构就绪")

@@ -22,13 +22,13 @@
    - **默认走本地 tool 模型 qwen3:8b**：零远程依赖、零额外费用，
      即使请求落到了用户自配的云端 provider 也不受影响。
    - **可选由答题的那个模型兼任**：配了自定义云端 LLM 且该用户开启
-     `emotion_enabled` 时，`chain` 会把本轮的 chat 客户端传进来。
+     `emotion_enabled` 时，`dialog/graph.py` 会把本轮的 chat 客户端传进来。
      两条路径共用同一套白名单校验与回落逻辑，差异不会传导到问答链路。
 
 4. **失败一律回落 `cheerful`**：情绪只是语音佐料，判错顶多语气不够贴，
    绝不能因为它挡住问答主链路。
 
-4. 写法沿用 `intent.classify_topic` 已实测有效的范式：SystemMessage 定义 +
+4. 写法沿用 `nlu.classify_topic` 已实测有效的范式：SystemMessage 定义 +
    少样本单轮补全（Human/AI 交替，末轮 AI 前缀吃掉 `{"`）+ 正则取 JSON + 白名单校验。
    本仓铁律：qwen3:8b 对抽象规则钝感、**对示例敏感**，故必须给 few-shot。
 """
@@ -123,7 +123,7 @@ async def detect_emotion(answer: str, chat_client: Runnable | None = None) -> st
     """判定答案情绪，返回 EMOTION_TAGS 的键；任何异常回落 DEFAULT_EMOTION。
 
     `chat_client` 为空（默认）时用本地 tool 模型 qwen3:8b；非空则用传入的客户端
-    —— 传入即表示「本次用答题的那个模型兼任判定」，由 rag/chain.py 按用户配置决定。
+    —— 传入即表示「本次用答题的那个模型兼任判定」，由 dialog/graph.py 按用户配置决定。
     兼任路径不调整温度等采样参数：情绪是五选一的轻量分类，输出经白名单校验，
       不合格一律回落，不需要为此再维护一份客户端实例。
     """
@@ -144,7 +144,7 @@ async def detect_emotion(answer: str, chat_client: Runnable | None = None) -> st
         #    get_tool_llm() 返回的是 bind(think=False) 后的 RunnableBinding，
         #    再传 tags= 关键字会与之冲突 → TypeError: got multiple values for 'tags'，
         #    情绪判定会**静默全量回落** cheerful（实测踩过：7/7 全失败，准确率看着像 3/7）。
-        #    与 intent.summarize_turns / verify.verify_knowledge 保持同一写法。
+        #    与 nlu.summarize_turns / verify.verify_knowledge 保持同一写法。
         # 打标原因：detect_emotion 在 generate/chitchat 节点**内部**被调用，其 ainvoke
         #    的流式回调 node='generate'，节点过滤挡不住 → 必须靠标签在 ask_stream 里丢弃，
         #    否则 {"emotion":"..."} 会拼进答案尾巴（与 wwa:summary 同一类泄漏）。

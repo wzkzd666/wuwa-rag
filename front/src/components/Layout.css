@@ -1,6 +1,6 @@
 .layout {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-content);
   display: flex;
   /* zoom 不缩放 vh，必须除以 --ui-zoom（App.tsx 里写入），否则放大字号后底部会被裁掉 */
   height: calc(100vh / var(--ui-zoom, 1));
@@ -38,7 +38,7 @@
   display: grid;
   place-items: center;
   background: var(--grad);
-  color: #0b1020;
+  color: var(--grad-ink);
   box-shadow: var(--glow);
   flex-shrink: 0;
   overflow: hidden;
@@ -82,7 +82,7 @@
 .brand-logo-btn:hover .brand-badge {
   opacity: 1;
   transform: scale(1.12);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .brand-text {
@@ -92,11 +92,11 @@
   min-width: 0;
 }
 .brand-text b {
-  font-size: 15.5px;
+  font-size: var(--fs-lg);
   letter-spacing: 0.5px;
 }
 .brand-text span {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
 }
 
@@ -117,7 +117,7 @@
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   text-decoration: none;
-  font-size: 13.5px;
+  font-size: var(--fs-md-plus);
   font-weight: 500;
   transition: all 0.16s ease;
   border: 1px solid transparent;
@@ -128,11 +128,11 @@
 }
 .nav-active {
   background: var(--grad-soft);
-  border-color: rgba(129, 140, 248, 0.3);
+  border-color: var(--accent-2-tint-30);
   color: var(--text-primary);
 }
 .nav-active svg {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .sidebar-foot {
@@ -141,7 +141,7 @@
   gap: 8px;
   padding: 13px 18px;
   border-top: 1px solid var(--line);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
 }
 
@@ -160,7 +160,7 @@
 .health-down .health-dot,
 .health-dot.health-down {
   background: var(--err);
-  box-shadow: 0 0 8px rgba(248, 113, 113, 0.6);
+  box-shadow: 0 0 8px var(--err-tint-60);
 }
 .health-unknown .health-dot {
   background: var(--warn);
@@ -196,7 +196,7 @@
 }
 
 .topbar-title {
-  font-size: 14.5px;
+  font-size: var(--fs-base-plus);
   font-weight: 600;
   letter-spacing: 0.3px;
 }
@@ -214,7 +214,7 @@
   gap: 6px;
   padding: 4px 11px;
   border-radius: var(--radius-pill);
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   border: 1px solid var(--line);
   background: var(--bg-elevated);
   color: var(--text-secondary);
@@ -227,7 +227,7 @@
   gap: 6px;
   padding: 4px 6px 4px 11px;
   border-radius: var(--radius-pill);
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   border: 1px solid var(--line);
   background: var(--bg-elevated);
   color: var(--text-secondary);
@@ -247,8 +247,8 @@
   transition: all 0.15s;
 }
 .user-logout:hover {
-  color: var(--err);
-  background: rgba(248, 113, 113, 0.1);
+  color: var(--err-text);
+  background: var(--err-tint-10);
 }
 
 /* 窄屏档的抽屉开关：只有这一档才在顶栏渲染（桌面档侧栏常驻可见，
@@ -271,7 +271,7 @@
   border-bottom: 1px solid var(--line);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   text-align: left;
   cursor: pointer;
   flex-shrink: 0;
@@ -343,7 +343,7 @@
   .sidebar {
     position: fixed;
     inset: 0 auto 0 0;
-    z-index: 60;
+    z-index: var(--z-drawer);
     transform: translateX(-102%);
     transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
     background: var(--bg-surface);
@@ -356,7 +356,7 @@
     display: block;
     position: fixed;
     inset: 0;
-    z-index: 55;
+    z-index: var(--z-mask);
     background: rgba(4, 7, 15, 0.6);
     backdrop-filter: blur(2px);
   }
@@ -401,10 +401,10 @@
   border: 1px solid var(--line);
   border-radius: 999px;
   background: var(--bg-elevated);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
 }
 .music-bar-icon {
-  color: var(--accent-2);
+  color: var(--accent-2-text);
   flex-shrink: 0;
 }
 .music-bar-title {

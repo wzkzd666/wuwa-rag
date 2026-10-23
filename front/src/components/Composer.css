@@ -15,8 +15,8 @@
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .composer-box:focus-within {
-  border-color: rgba(129, 140, 248, 0.5);
-  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.12), var(--shadow-1);
+  border-color: var(--accent-2-tint-50);
+  box-shadow: 0 0 0 3px var(--accent-2-tint-12), var(--shadow-1);
 }
 
 .composer-input {
@@ -26,7 +26,7 @@
   background: transparent;
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1.6;
   resize: none;
   max-height: 200px;
@@ -48,7 +48,7 @@
   place-items: center;
   cursor: pointer;
   background: var(--grad);
-  color: #0b1020;
+  color: var(--grad-ink);
   flex-shrink: 0;
   transition: filter 0.15s, transform 0.15s, opacity 0.15s;
 }
@@ -62,17 +62,17 @@
 }
 .stop-btn {
   background: var(--bg-elevated);
-  border: 1px solid rgba(248, 113, 113, 0.5);
-  color: var(--err);
+  border: 1px solid var(--err-tint-50);
+  color: var(--err-text);
 }
 .stop-btn:hover {
-  background: rgba(248, 113, 113, 0.12);
+  background: var(--err-tint-12);
 }
 
 .composer-hint {
   max-width: var(--content-max);
   margin: 8px auto 0;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
 }

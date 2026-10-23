@@ -72,7 +72,7 @@ Neo4j 存 6 类节点（Character / Skill / ChainNode / Material / Weapon / Echo
 - ⚠️ **不允许出现第二份实现**。流式路径的 `done.answer` 是旁路重算的（token 从 `on_chat_model_stream` 抽），与生成节点里那份是同一语义的两次落地；漏一步的表现是「流式回答还带标记，下一轮历史里却已剥掉」。回归用例：`tests/test_text.py::test_清洗管线四步都在`
 - 逐 token 的流式剥离走 `text.AnswerFilter`（扣住疑似标记的尾巴再吐，避免 `[1]` 在打字机流里闪现）；非流式走 `text.strip_ref_marks`
 - ⚠️ 两者共用同一套规则且**顺序不可调换**：先还原 COST 串（连续 ≥3 个单位数字括号、数字全属 `{1,3,4}`），再删中文标记 `[图谱]`，最后删数字标记。顺序反了会把数值表当成整串标记删掉
-- 前端引用面板走 SSE `done.sources`（`doc_sources`），**不依赖模型在正文写编号**
+- 前端引用面板走 SSE `done.sources`（`prompt.all_sources` = 文档面包屑 + `联网 › 标题 · url`），**不依赖模型在正文写编号**
 
 ### 用户自定义云端 LLM（可选）
 
@@ -208,7 +208,7 @@ MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task �
 
 ### 限流与跨域（`api/ratelimit.py`）
 
-基于 `slowapi`（底层 `limits`），默认开启、计数存进程内存。四档限额见 `config.py` 的 `RATE_LIMIT_*`：
+基于 `slowapi`（底层 `limits`），默认开启、计数存进程内存。限额档位见 `config.py` 的 `RATE_LIMIT_*`：
 
 | 档 | 限额 | 计数主体 | 为什么要限 |
 | --- | --- | --- | --- |
@@ -216,15 +216,18 @@ MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task �
 | `ask` | 20/minute | **登录用户** | 一轮 20s 量级，且与 Ollama 抢同一块 GPU（`OLLAMA_NUM_PARALLEL=1`） |
 | `tts` | 10/minute | 登录用户 | 每次合成都是真实费用 |
 | `outbound` | 20/hour | 登录用户 | `/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，是 SSRF 面 |
+| `ingest` | 5/hour | 登录用户 | `/ingest` + `/knowledge/refresh` 跑整条五步链（爬 wiki + BM25 全量重建）并写**全体用户共享的语料**；`/ingest/control`（暂停/取消）不占额度 |
+| `creds` | 10/minute | 登录用户 | 改密/解锁/换加密口令/保存云端与语音凭据这五个端点，每次都要跑 PBKDF2 20 万次（实测单次 ~50ms），`/auth/password` 再加一次 scrypt（~733ms） |
 
 - **`/ask` 与 `/ask/stream` 共享同一个计数器**（`shared_limit(scope="ask")`）。用 `limit()` 的话计数键含路由名，两个端点各算一份，等于给同一能力开了双倍配额——换个端点就能绕过。
+- 同理 **`ingest` 两个入口**、**`creds` 五个入口**各共用一个计数器（`shared_limit`），分开数就是配额翻倍。
 - **`/health` 已豁免**：`scripts/start.ps1` 靠轮询它判就绪，被限流会让启动脚本误判失败。
 - **按用户限速的前提**：`get_current_user` 会把 `user_id` 写进 `request.state`。slowapi 的装饰器包在端点函数外层，而 FastAPI 依赖在端点之前解析，所以装饰器执行时身份已就绪；取不到时回落 IP。
 - ⚠️ **`rl.install(app)` 必须在 `add_middleware(CORSMiddleware, ...)` 之前调**：Starlette 里后添加的中间件在最外层，CORS 必须在限流外面，否则 429 响应拿不到跨域头，前端只会看到一个说不清的跨域错误。
 - 多实例部署把 `RATE_LIMIT_STORAGE` 设成 `redis://…`（项目已有 Redis）即可跨实例共享计数。已开 `in_memory_fallback_enabled` + `swallow_errors`：Redis 挂了自动回落内存、限额检查出错时放行——**限流是保护性设施，它自己不该把问答弄挂**。
 - 实测：`auth` 档 10/minute 下第 11 次起返回 429（且请求根本没碰到 PG，暴力枚举正是这样被挡住的），响应带 `Retry-After: 60` 与中文错误体。
 
-**CORS**：默认**只放行 Vite 开发端口**（`http://localhost:5173` 与 `127.0.0.1:5173`，2026-10-09 收紧——原来默认 `*`，不配环境变量就等于全网可跨域调用）。生产/其它前端来源用 `CORS_ORIGINS`（逗号分隔）显式配置；确实需要全放开时写 `CORS_ORIGINS=*`（明确决策，不再默认给）。通配符时自动关掉 `allow_credentials`——`*` + credentials 等于允许任意站点带凭据跨域调用；本项目鉴权走 `Authorization: Bearer` 请求头、不依赖 Cookie，通配符场景不需要 credentials。
+**CORS**：默认**只放行 Vite 开发端口**（`http://localhost:25173` 与 `127.0.0.1:25173`，2026-10-09 收紧——原来默认 `*`，不配环境变量就等于全网可跨域调用）。生产/其它前端来源用 `CORS_ORIGINS`（逗号分隔）显式配置；确实需要全放开时写 `CORS_ORIGINS=*`（明确决策，不再默认给）。通配符时自动关掉 `allow_credentials`——`*` + credentials 等于允许任意站点带凭据跨域调用；本项目鉴权走 `Authorization: Bearer` 请求头、不依赖 Cookie，通配符场景不需要 credentials。
 
 ---
 
@@ -232,7 +235,7 @@ MCP 会话由**单一常驻 task** 持有，`enter` 与 `exit` 均在该 task �
 
 > **分层设计、各包职责、依赖规则**（含分层图与可执行的依赖守卫）见 **[ARCHITECTURE.md](ARCHITECTURE.md)**。
 > 一句话概括：`src/wuwa_rag` 分 7 层，依赖**只向下**，同层可互调，内部导入一律用绝对路径；
-> 跑 `uv run python scripts/check_layers.py` 可校验（当前 **56 个模块、165 条依赖边、0 违规、0 环**）。
+> 跑 `uv run python scripts/check_layers.py` 可校验（当前 **56 个模块、168 条依赖边、0 违规、0 环**）。
 >
 > 下面只讲各组件的**数据角色**与链路。
 
@@ -399,6 +402,19 @@ uv sync                # 含 torch cu130 索引；开发依赖加 --extra dev
 复制并填写根目录 `.env`（该文件已 gitignore）：
 
 ```
+# ---------- 端口：本项目对外的服务端口只在这里定义一次 ----------
+# 一律用 2xxxx 不常用端口（理由见下方「端口」一节）。compose、启动脚本、Vite
+# 都读这一份，不在别处写第二遍数字。
+PG_PORT=25432            # PostgreSQL（唯一真源）
+NEO4J_BOLT_PORT=27687    # Neo4j Bolt —— 驱动连接
+NEO4J_HTTP_PORT=27474    # Neo4j Browser —— 浏览器打开用
+REDIS_PORT=26380         # Redis（Celery broker + backend）
+S3_API_PORT=29000        # RustFS S3 API
+S3_CONSOLE_PORT=29001    # RustFS 控制台 —— 浏览器打开用
+API_PORT=28000           # FastAPI
+WEB_PORT=25173           # Vite 前端 dev server
+LLM_PORT=11434           # Ollama：外部依赖，沿用其默认端口，不由本项目发布
+
 PG_PASSWORD=...
 NEO4J_PASSWORD=...
 S3_ACCESS_KEY=...
@@ -439,10 +455,56 @@ EMOTION_ENABLED=true          # 情绪标签；关闭则语音统一用默认语
 > 默认 `~/.cache/huggingface`，可用环境变量 `HF_HOME` 覆盖。若你本机设了系统级
 > `HF_HOME` 环境变量，仍以它为准（pydantic-settings 优先级：环境变量 > `.env` > 代码默认）。
 
+### 端口：为什么全是 2xxxx
+
+服务端口一律避开常用值，改到 `2xxxx` 段。**宿主机端口 = `2` + 该服务的标准端口**
+（`25432` 一眼反推出 PostgreSQL），只有 Redis 例外取 `26380`——`26379` 恰好是
+Redis Sentinel 的默认端口，不占它以免歧义。
+
+| 服务 | 常用端口 | 本项目 | 定义处 |
+|---|---|---|---|
+| PostgreSQL | 5432 | **25432** | `.env` 的 `PG_PORT` |
+| Neo4j Bolt / Browser | 7687 / 7474 | **27687 / 27474** | `NEO4J_BOLT_PORT` / `NEO4J_HTTP_PORT` |
+| Redis | 6379 | **26380** | `REDIS_PORT` |
+| RustFS S3 API / 控制台 | 9000 / 9001 | **29000 / 29001** | `S3_API_PORT` / `S3_CONSOLE_PORT` |
+| FastAPI | 8000 | **28000** | `API_PORT` |
+| Vite 前端 | 5173 | **25173** | `WEB_PORT`（`CORS_ORIGINS` 由它插值，不用再改一遍） |
+| Ollama | 11434 | 11434（**不改**） | 外部依赖，端口不由本项目发布；挪它得同时改 Ollama 服务侧 `OLLAMA_HOST` |
+
+为什么值得专门挪一次（都是本机实测，不是预防性焦虑）：
+
+- **9000 真的撞了**：本机另一个项目的 `main.py serve --port 9000` 常驻在跑，
+  RustFS 一起就 `Bind for 127.0.0.1:9000 failed: port is already allocated`。
+- **8000 / 5173 是开发机上的公共资源**，撞了不一定报错：Vite 默认会**静默**漂到
+  5174/5175，而浏览器 localStorage 按 origin 隔离，端口一变就等于换了一套存储，
+  表现为「已登录用户莫名其妙被要求重新登录」。前端已开 `strictPort` 让它响亮失败。
+- **不能图省事落到 49152-65535**：那是 Windows 的 TCP 动态端口区（本机
+  `netsh int ipv4 show dynamicport tcp` = 49152 起 16384 个），出站连接会被系统
+  随机分配到那一段，端口会「偶尔被别人占一下」——最难复现的一类故障。2xxxx 同时
+  避开了本机 Hyper-V/WSL2 的保留段（50000-50059、55053+ 等多处）。
+
+**只有一个地方定义端口**：根目录 `.env` 顶部的 `*_PORT`。四个消费方各自读它——
+`docker-compose.yml` 用 `${PG_PORT:?}` 插值（Compose 自动加载同目录 `.env`；`:?` 表示必填，
+缺变量时当场报错，而不是静默展开成空串让 Docker 随手分配一个随机端口）、
+Python 用 python-dotenv 的 `${VAR}` 插值、`scripts/ports.ps1` 供启动/停止脚本探测端口、
+`front/vite.config.ts` 用 `loadEnv` 读同一个文件。容器**内部**端口保持标准值不变
+（只换宿主机发布侧），因此不用改镜像启动参数，也不影响容器内 healthcheck。
+
+⚠️ 两个必须知道的约束：
+
+1. **dotenv 按行顺序求值**：`*_PORT` 必须排在引用它的 URL 之前，否则展开成空串
+   （`redis://localhost:/0` 就是这样写出来的）。`.env` 里已按此顺序排好。
+2. 改端口后要重启 API 与 Celery 两个进程（各自 import 时读一次配置），
+   容器侧 `docker compose up -d` 会重建端口映射。
+
+漂移由 `tests/test_config_and_prompt.py` 的「端口对账」五条用例钉住：compose 宿主机侧
+只准引用变量、`ports.ps1`/`vite.config.ts` 的兜底值必须等于 `config.py` 默认值、
+`.env` 与代码默认必须一致、且都不许退回常用端口或落进动态区。
+
 ### 3. 一键启动（Windows）
 
 ```bash
-.\dev.bat              # docker 四件套 + celery + FastAPI(:8000) + 前端(:5173)
+.\dev.bat              # docker 四件套 + celery + FastAPI(:28000) + 前端(:25173)
                        # 建表 SQL 幂等自动应用；就绪后轮询 /health 并检查 ollama aemeath
 .\dev.bat stop         # 按 PID 关服务窗口 + docker compose stop（保留卷）
 ```
@@ -458,7 +520,7 @@ docker compose up -d                                        # PG(pgvector16) / N
 # 建表：把 pgsql/001_init.sql 应用到 wuwa 库
 
 uv run celery -A wuwa_rag.tasks.worker:celery_app worker --pool=solo --loglevel=info
-uv run python -m wuwa_rag.api.server                        # FastAPI :8000
+uv run python -m wuwa_rag.api.server                        # FastAPI :28000（端口 = .env 的 API_PORT）
 ```
 
 > ⚠️ Windows 下 Celery **必须 `--pool=solo` 且并发 1**：chunk 任务按角色整写 `chunks.jsonl`，并行会互相覆盖。
@@ -478,7 +540,8 @@ uv run wuwa-ingest-character 忌炎         # 单角色 5 步链入队（等价�
 ### 6. 验证
 
 ```bash
-uv run pytest                            # 单元测试（413 条，**全量离线**，约 5s）
+uv run pytest                            # 单元测试（450 条，**全量离线**，约 5s）
+cd front && npm test                     # 前端测试（vitest 35 条：store 行为 / 配色令牌 AA / 评价回填合帧 / 时间字节格式化，纯 node、不碰后端）
 uv run python -m wuwa_rag.dialog.graph   # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
 ```
@@ -530,7 +593,7 @@ psycopg / neo4j 的异步实现在 uvicorn 自起的 Proactor loop 上会报 `In
 
 诚实列出，避免过度宣称：
 
-- **测试分两层**。`tests/` 有 413 条**离线单测**（见「6. 验证」），守规则层判据；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
+- **测试分三层**。`tests/` 有 450 条**离线单测**（见「6. 验证」），守规则层判据；`front/` 有 35 条 vitest 用例守 store 行为、配色令牌的可读性契约、评价回填的合帧调度与展示格式化（`npm test`，不起浏览器、不碰后端）；另有 `tests/eval_retrieval.py` **检索质量评测脚本**（依赖真实向量索引，手动跑 `uv run python tests/eval_retrieval.py`），配 `tests/retrieval_eval_dataset.json`（17 条带标注 query，覆盖 fact / semantic / multi / value_table / single_char / multi_single_char / negative）。改 RRF 权重、rerank 阈值、topk 前后各跑一次对比 recall@k / precision@k 即可判断改动效果。基线（2026-10-06，topk=6）：Avg Recall@6 = 0.3867。已知缺陷：数值表 recall=0.00（reranker 输给大段机制描述，靠确定性补料兜底）、单字角色 recall=0.10（仍有提升空间）
 - **`agent.py` 的 ToolNode 自主选工具路径默认未启用**，主链路走规则条件路由。本项目是 LangGraph DAG 编排，不是多 Agent 系统
 - **图谱抽取是正则规则，不是 LLM 抽取**（这是有意的设计选择，理由见上文）
 - **VLM 链路预留但未接入**：`config.py` 有 qwen3-vl 配置，主链路未使用
@@ -559,7 +622,7 @@ src/wuwa_rag/          # ✅ 已入库
 front/                 # ✅ 已入库   React + TS + Vite 前端
 pgsql/                 # ✅ 已入库   建表 SQL（幂等）
 scripts/               # ✅ 已入库   start.ps1 / stop.ps1 / check_layers.py（架构守卫）
-tests/                 # ✅ 已入库   413 条离线单测（回归基线，可当提交门禁；conftest 强制断网）
+tests/                 # ✅ 已入库   450 条离线单测（回归基线，可当提交门禁；conftest 强制断网）
 
 data/                  # ⚠️ gitignore，未入库（需自行采集生成）
 ├── raw/          角色 wiki markdown（由 wuwa-mcp 爬取）

@@ -40,7 +40,11 @@ _GUARD = _ROOT / "scripts" / "check_layers.py"
 # 实测基线（2026-10-06）。这些数字会随正常开发变化——
 # 变化时应当**读懂为什么变了**再更新，而不是为了让测试变绿而随手改数。
 EXPECTED_MODULES = 56
-EXPECTED_EDGES = 165
+# 165 → 166（2026-10-23）：`api/music.py` 的 /music/status 失败路径补了日志，
+# 新增一条 api → ww_logger 出边（方向合规，叶子模块 ww_logger 无环）。
+# 166 → 168（同日）：反馈的 thread_id 判据收进 `core/conversations.THREAD_ID_RE`，
+# 于是 `core.feedback` 与 `api.usage` 各多一条 → conversations 的出边（同层内引用，方向合规）。
+EXPECTED_EDGES = 168
 EXPECTED_GRAPH_KEYS = 41
 EXPECTED_LAYER_COUNTS = {0: 3, 1: 10, 2: 17, 3: 2, 4: 8, 5: 9, 6: 7}
 

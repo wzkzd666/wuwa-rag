@@ -48,6 +48,17 @@ function escapeTildesOutsideCode(src: string): string {
  * 把 Markdown 文本渲染成安全的 HTML 字符串。
  * 用 DOMPurify 净化，防止答案里混入的脚本造成 XSS。
  */
+// 带 target="_blank" 的链接必须钉上 rel="noopener noreferrer"，否则被打开的页面能拿到
+// window.opener 反向操控本站标签页（reverse tabnabbing）。
+// 为什么挂在 hook 而不是配置项：`ADD_ATTR: ['target']` 只是**放行**这个属性，
+// 而答案里的链接来自检索语料与模型输出，写不写 rel 不由我们控制 ——
+// 净化之后统一补一次才是闭合的（DOMPurify 官方推荐做法，也避免用正则去改 HTML 字符串）。
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName === 'A' && node.getAttribute('target') === '_blank') {
+    node.setAttribute('rel', 'noopener noreferrer')
+  }
+})
+
 export function renderMarkdown(src: string): string {
   const safe = escapeTildesOutsideCode(src ?? '')
   const raw = marked.parse(safe, { async: false }) as string

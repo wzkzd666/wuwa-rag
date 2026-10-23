@@ -28,6 +28,15 @@ log = get_logger('rag')
 
 # 冷启动种子名册：只在「库是空的」或「库读不出来」时兜底。
 # 它不是权威清单，别往这里追加新角色——入库即可生效，见 get_roster()。
+# 角色名的**唯一**格式判据。四个入口共用（`IngestIn` / `IngestControlIn` /
+# `GET /ingest/status?character=` / `DELETE /knowledge/characters/{character}`）：
+# 名字会被拼进 `data/raw/<角色>.md` 的路径、S3 key、Redis 进度键、Cypher 参数与
+# BM25/Chroma 的过滤条件 —— 不校验时 `"../../x"` 这类就能越出 data/raw 覆盖别人的语料，
+# 覆盖后还会被重新索引进 PG/Chroma/Neo4j，等于污染全体用户的知识库。
+# 原先只有两个 body 模型带 pattern，另两个（query / path 参数）**完全不校验** ——
+# 这正是「同一语义两处判据必然漂移」的第三个变体：一处有、一处没有。
+CHARACTER_NAME_PATTERN = r"^[一-龥A-Za-z0-9·\-]{1,24}$"
+
 SEED_CHARACTER_NAMES: set[str] = {
     "丹瑾", "丽贝卡", "仇远", "今汐", "凌阳", "千咲", "卜灵", "卡卡罗", "卡提希娅", "吟霖",
     "嘉贝莉娜", "坎特蕾拉", "夏空", "奥古斯塔", "守岸人", "安可", "尤诺", "布兰特", "弗洛洛",
@@ -46,6 +55,16 @@ CHARACTER_ALIASES: dict[str, str] = {
     "电主": "漂泊者-男-导电",
     "卡提": "卡提希娅",          # wiki 配队表里的简称，实测散落在多个角色页
 }
+
+# 鸣潮一支队伍只有 **3 个位置**。这是领域事实，不是检索参数，所以只在这里写一次：
+# 曾经它在 `knowledge/retrieve.py` 与 `dialog/graph.py` 各有一份 `_TEAM_SLOTS = 3`，
+# 而 AGENTS.md 记着这个阈值 2026-09-22 从 2 改成过 3 —— 两份拷贝正是最容易只改一半的形态。
+# 消费方（都用它，不要再各自写字面量）：
+#   · retrieve.graph_search：满 3 段即「完整队伍」，不再补页面主人
+#     （实测反例：`守岸人/维里奈/白芷+秧秧+漂泊者-衍射` 硬补主人会得到 4 人串）；
+#   · retrieve.graph_search：提问里凑满 3 个角色名才算「点名一支具体队伍」(is_exact)；
+#   · graph._is_named_team：同上判据，决定要不要补向量检索与答后追问。
+TEAM_SLOTS = 3
 
 # ---------- 动态名册：种子 ∪ 库内实际角色 ----------
 _ROSTER_TTL = 60.0

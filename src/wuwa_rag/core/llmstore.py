@@ -33,6 +33,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import ipaddress
@@ -86,7 +87,7 @@ _DDL = [
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
-    # 是否让**用户自己的云端模型**兼任情绪判定（分工见 rag/emotion.py）。
+    # 是否让**用户自己的云端模型**兼任情绪判定（分工见 services/emotion.py）。
     # 默认为否：情绪判定一律走本地 qwen3:8b，省一次远程调用，也不把个人的额度
     # 花在内部任务上。存量库补列，幂等可重跑。
     "ALTER TABLE user_llm_configs "
@@ -155,6 +156,16 @@ def validate_base_url(url: str) -> None:
 
     需先解析主机名到 IP 再判断：仅比对字符串会被 http://内网IP.nip.io 这类
     DNS 重绑定/通配域名绕过。
+
+    ⚠️ 两个如实记录的残留面（不是「已解决」，别再以为是闭合的）：
+    ① 这里是「先解析、后判断」，真正发请求时 httpx 会**再解析一次** DNS——两次之间换
+       记录（重绑定）仍能落到私网。彻底封堵要把这里解析出的 IP 钉进请求
+       （自建 transport + 改写 Host 头），只有公网多租户部署才值得付这个复杂度。
+       缓解：`CLOUD_ALLOW_PRIVATE_NET` 默认 False（配置期就挡掉私网目标），
+       且元数据端点无条件封；风险主要落在「开发者自用、显式开了私网」这一档。
+    ② 重定向会把校验绕到第二跳——所以 chat 侧的 httpx 客户端**必须**
+       `follow_redirects=False`（openai SDK 默认是 True，见 core/llm.py 的注释），
+       这里的 `/models` 探测同样显式关掉了重定向。改任何一条都要回头看另一条。
     """
     u = (url or "").strip().rstrip("/")
     if not u:
@@ -274,6 +285,16 @@ def _fernet(raw: bytes) -> Any:
     return Fernet(raw)
 
 
+async def _derive_async(secret: str, salt: str) -> Any:
+    """`_derive` 的事件循环安全版：PBKDF2 迭代 20 万次，本机实测单次 ~50ms。
+
+    为什么必须离循环：这些派生发生在**登录/解锁/改密/保存配置**的同步路径上，
+    一个 await 里跑 50ms 就意味着这段时间整个 API 停摆（其他用户的问答流一并卡住）。
+    项目里 CPU 密集的同步调用统一丢线程池，这里不另发明一套。
+    """
+    return await asyncio.to_thread(_derive, secret, salt)
+
+
 def _derive(secret: str, salt: str) -> Any:
     """密码/口令 + 用户专属盐 → KEK（PBKDF2-SHA256，二十万轮）。"""
     from cryptography.fernet import Fernet
@@ -315,7 +336,7 @@ async def unlock_with_password(user_id: int, password: str) -> bool:
     if not salt or not enc:
         return False                       # 未启用密码通道
     try:
-        raw = _derive(pw, salt).decrypt(enc.encode())
+        raw = (await _derive_async(pw, salt)).decrypt(enc.encode())
     except _DECRYPT_ERRORS:
         return False                       # 密码不一致（InvalidToken / 密文畸形）
     _DEK_RAW[user_id] = raw
@@ -336,7 +357,7 @@ async def unlock_with_passphrase(user_id: int, passphrase: str) -> bool:
     if not salt or not check or not enc:
         return False                       # 未启用口令通道
     try:
-        kek = _derive(pp, salt)
+        kek = await _derive_async(pp, salt)
         kek.decrypt(check.encode())        # 解不开 = 口令错
         raw = kek.decrypt(enc.encode())
     except _DECRYPT_ERRORS:
@@ -419,7 +440,8 @@ async def _ensure_dek(user_id: int, password: str, passphrase: str) -> Any:
         if not await unlock(user_id, password=password, passphrase=passphrase):
             raise ValueError("登录密码或加密口令不正确")
         return _dek(user_id)
-    return _bootstrap(user_id, password=password, passphrase=passphrase)
+    # `_bootstrap` 内部要派生两次 KEK（各 ~50ms）—— 整段丢线程池，别在循环里跑
+    return await asyncio.to_thread(_bootstrap, user_id, password=password, passphrase=passphrase)
 
 
 async def rebind_password(user_id: int, old_password: str, new_password: str) -> bool:
@@ -435,14 +457,14 @@ async def rebind_password(user_id: int, old_password: str, new_password: str) ->
     raw = _DEK_RAW.get(user_id)
     if raw is None:
         try:
-            raw = _derive(old_password, row["pwd_salt"]).decrypt(
+            raw = (await _derive_async(old_password, row["pwd_salt"])).decrypt(
                 row["dek_by_pwd"].encode())
         except _DECRYPT_ERRORS as exc:
             log.warning("user=%s 改密码时旧密码解不开 DEK（需重新登录或用加密口令解锁）：%s",
                         user_id, type(exc).__name__)
             return False
     salt = secrets.token_hex(_SALT_BYTES)
-    enc = _derive(new_password, salt).encrypt(raw).decode()
+    enc = (await _derive_async(new_password, salt)).encrypt(raw).decode()
     pool = await get_pool()
     async with pool.connection() as conn:
         await conn.execute(
@@ -460,7 +482,7 @@ async def bind_password(user_id: int, password: str) -> bool:
     if raw is None:
         return False
     salt = secrets.token_hex(_SALT_BYTES)
-    enc = _derive(password, salt).encrypt(raw).decode()
+    enc = (await _derive_async(password, salt)).encrypt(raw).decode()
     pool = await get_pool()
     async with pool.connection() as conn:
         await conn.execute(
@@ -599,7 +621,7 @@ async def get_runtime(user_id: int) -> dict | None:
         "base_url": row["base_url"],
         "model": row["model"],
         "api_key": key,
-        # 由调用链决定是否让该云端模型兼任情绪判定（rag/chain.py）
+        # 由调用链决定是否让该云端模型兼任情绪判定（dialog/graph.py）
         "emotion_enabled": bool(row.get("emotion_enabled", False)),
     }
 
@@ -695,7 +717,7 @@ async def change_passphrase(user_id: int, old: str, new: str) -> None:
     if len(np) < MIN_PASSPHRASE:
         raise ValueError(f"新口令至少 {MIN_PASSPHRASE} 位")
     salt = secrets.token_hex(_SALT_BYTES)
-    kek = _derive(np, salt)
+    kek = await _derive_async(np, salt)
     enc = kek.encrypt(raw).decode()
     check = kek.encrypt(_CHECK_PLAIN).decode()
 
@@ -800,7 +822,7 @@ async def save_tts_config(user_id: int, *, api_key: str, workspace_id: str,
     """写入/更新该用户的语音合成凭据。api_key 传空串表示**保留原 key 不改**。
 
     **整体替换语义**：`workspace_id` / `model` / `voice` / `instruction` 以本次提交为准
-    （留空即回落代码默认值，见 rag/tts.py 的 `_fill`）；只有 `api_key` 留空是「保留」，
+    （留空即回落代码默认值，见 services/tts.py 的 `_fill`）；只有 `api_key` 留空是「保留」，
     因为明文 key 永不回显，前端没法把它填回输入框。
 
     `workspace_id` 会被拼进请求 URL 的 host 段，故走 `validate_workspace_id`

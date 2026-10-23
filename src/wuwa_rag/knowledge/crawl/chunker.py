@@ -226,13 +226,27 @@ def main() -> None:
     ensure_dirs()
     
     total = 0
-    with out.open("w", encoding="utf-8") as f:
-        for md_file in sorted(src.glob("*.md")):
-            chunks = chunk_markdown(md_file.read_text(encoding="utf-8"), md_file.stem)
-            for c in chunks:
-                f.write(json.dumps(asdict(c), ensure_ascii=False) + "\n")
-            total += len(chunks)
-            upload_logger.info(f"{md_file.stem}: 共计{len(chunks)} 块")
+    rows: list[str] = []
+    for md_file in sorted(src.glob("*.md")):
+        chunks = chunk_markdown(md_file.read_text(encoding="utf-8"), md_file.stem)
+        rows.extend(json.dumps(asdict(c), ensure_ascii=False) for c in chunks)
+        total += len(chunks)
+        upload_logger.info(f"{md_file.stem}: 共计{len(chunks)} 块")
+    # ⚠️ 两段防护都是为了解决同一件真实发生过的事（2026-10-23 审计现场：
+    # data/chunks/chunks.jsonl 是 0 字节，而 PG 里 58 角色 6741 块完好）：
+    # 原来是 `out.open("w")` **就地截断后逐行写** —— 进程被打断/目录读空时，
+    # 旧文件已经在第一次 flush 前被清空，产物变成空壳，而下游
+    # （wuwa-ingest 全量 / wuwa-graph / BM25 全量重建）都拿它当输入。
+    # ① 空结果绝不覆盖已有非空文件；② 先写 .tmp 再 replace（原子换名）。
+    if not rows:
+        old = out.stat().st_size if out.exists() else 0
+        raise SystemExit(
+            f"{src} 下没分块出任何内容，拒绝把 {out} 写成空文件（它现在是 {old} 字节）。"
+            f"先确认 data/raw 是否还在。"
+        )
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    tmp.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    tmp.replace(out)
     upload_logger.info(f"总计 {total} 块 -> {out}")
 
 

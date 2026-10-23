@@ -1,3 +1,4 @@
+import { fmtSize, fmtTime } from '../lib/format'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChevronLeft, ChevronRight, CheckCircle2, Clock, Download, Info, Library, Loader2, Pause,
@@ -9,6 +10,7 @@ import {
   knowledgeCharacters, knowledgeDelete, knowledgeRefresh,
 } from '../lib/api'
 import type { IngestRecord, IngestRecordRow, IngestStatus, KnowledgeOut } from '../types'
+import ConfirmButton from '../components/ConfirmButton'
 import './KnowledgePage.css'
 
 /**
@@ -32,17 +34,6 @@ const SOURCE_LABELS: Record<string, string> = { kurobbs: '鸣潮 WIKI' }
 
 /** 已收录列表每页条数。角色会随库增长（目前 57+），不分页表格会一路拉长。 */
 const PAGE_SIZE = 20
-
-function fmtSize(n: number | null): string {
-  if (!n) return '—'
-  return n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`
-}
-
-function fmtTime(iso: string | null): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false })
-}
 
 /** 一条失败/取消的原因文案：优先取出错那一步的 error（后端已写好可读原因） */
 function failureOf(st?: IngestStatus): string {
@@ -178,10 +169,12 @@ export default function KnowledgePage() {
     }
   }, [apiBase])
 
+  /**
+   * 删除一条提交记录。**确认不在这里** —— 由行内的 ConfirmButton 承担（两步确认），
+   * 原来这里是 `window.confirm`：原生弹窗不吃主题色板、文案还是操作系统的 chrome。
+   * 「只删账本记录、不动进行中的流水线」这层含义写在按钮的 title 上。
+   */
   const doDeleteRecord = async (id: number) => {
-    if (!window.confirm('删掉这条提交记录？\n\n只删账本记录；正在跑的流水线请先用「取消」停掉。')) {
-      return
-    }
     setCtlBusy(String(id))
     try {
       await ingestRecordDelete(id, apiBase)
@@ -323,13 +316,12 @@ export default function KnowledgePage() {
     }
   }
 
+  /**
+   * 删除一个角色的知识库。**确认不在这里** —— 由行内的 ConfirmButton 承担（两步确认），
+   * 原来这里是 `window.confirm`（原生弹窗跳出设计系统）。
+   * 弹窗里那三行后果说明搬到了按钮的 title，一行没少。
+   */
   const doDelete = async (character: string) => {
-    const ok = window.confirm(
-      `确认删除「${character}」的知识库？\n\n` +
-      `将清除该角色的文档、检索索引与关系图谱。\n` +
-      `原始资料仍保留在对象存储中，此操作不影响其他角色。`,
-    )
-    if (!ok) return
     setBusy((b) => ({ ...b, [character]: 'delete' }))
     try {
       await knowledgeDelete(character, apiBase)
@@ -522,7 +514,14 @@ export default function KnowledgePage() {
           </div>
         )}
 
-        {!kbErr && filteredItems.length === 0 ? (
+        {/* 加载期不许拿空列表冒充「知识库还是空的」：那句话会让人以为
+            自己提交的入库全丢了，而真实状态只是还没返回。 */}
+        {kbLoading && items.length === 0 ? (
+          <div className="empty-state">
+            <Loader2 size={26} className="spin" />
+            <span>正在读取知识库…</span>
+          </div>
+        ) : !kbErr && filteredItems.length === 0 ? (
           <div className="empty-state">
             <Library size={26} />
             <span>{items.length === 0 ? '知识库还是空的，先在下面收录一个角色' : '没有匹配的角色'}</span>
@@ -573,19 +572,17 @@ export default function KnowledgePage() {
                           )}
                           重爬
                         </button>
-                        <button
+                        <ConfirmButton
                           className="btn btn-ghost btn-sm btn-danger"
+                          icon={Trash2}
+                          iconSize={12}
+                          label="删除"
+                          confirmLabel="再点一次确认删除"
+                          busy={busy[it.character] === 'delete'}
                           disabled={!!busy[it.character]}
-                          onClick={() => void doDelete(it.character)}
-                          title="从知识库彻底移除该角色"
-                        >
-                          {busy[it.character] === 'delete' ? (
-                            <Loader2 size={12} className="spin" />
-                          ) : (
-                            <Trash2 size={12} />
-                          )}
-                          删除
-                        </button>
+                          title="从知识库彻底移除该角色：清除该角色的文档、检索索引与关系图谱；原始资料仍保留在对象存储中，不影响其他角色"
+                          onConfirm={() => void doDelete(it.character)}
+                        />
                       </div>
                     ) : (
                       <span className="kb-time">—</span>
@@ -663,14 +660,16 @@ export default function KnowledgePage() {
                   <td className="kb-act-col">
                     {r.can_control && (
                       <div className="kb-actions">
-                        <button
+                        <ConfirmButton
                           className="btn btn-ghost btn-sm kb-btn-danger"
-                          onClick={() => void doDeleteRecord(r.id)}
-                          disabled={ctlBusy === String(r.id)}
+                          icon={Trash2}
+                          iconSize={12}
+                          label="删除"
+                          confirmLabel="再点一次确认删除"
+                          busy={ctlBusy === String(r.id)}
                           title="仅删除这条任务记录；如需停止进行中的任务，请先使用上方的「取消」"
-                        >
-                          <Trash2 size={12} /> 删除
-                        </button>
+                          onConfirm={() => void doDeleteRecord(r.id)}
+                        />
                       </div>
                     )}
                   </td>

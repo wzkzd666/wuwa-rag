@@ -24,7 +24,7 @@
   margin-bottom: 16px;
 }
 .hist-search:focus-within {
-  border-color: rgba(129, 140, 248, 0.5);
+  border-color: var(--accent-2-tint-50);
 }
 .hist-search input {
   flex: 1;
@@ -32,7 +32,7 @@
   outline: none;
   background: transparent;
   color: var(--text-primary);
-  font-size: 13.5px;
+  font-size: var(--fs-md-plus);
   font-family: inherit;
 }
 
@@ -61,6 +61,21 @@
   min-width: 0;
   cursor: pointer;
 }
+/* `.hist-main` 现在是真正的 <button>（原来是个带 onClick 的 div，键盘与读屏都够不到
+   「点开会话」这个本页的主动作）。这条重置只把浏览器给 button 的默认装饰交还给 div，
+   不改任何布局尺寸：div 没有边框/底色/居中，文本也是左对齐。
+   选择器带上 button 前缀是为了在同特异性下赢过上面那条 `.hist-main`，
+   也让本文件里其它 `.hist-main` 后代规则照旧生效。 */
+button.hist-main {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
 
 .hist-title {
   display: flex;
@@ -69,7 +84,7 @@
   color: var(--text-secondary);
 }
 .hist-title b {
-  font-size: 14px;
+  font-size: var(--fs-base);
   color: var(--text-primary);
   font-weight: 600;
   white-space: nowrap;
@@ -79,11 +94,11 @@
 }
 .hist-title svg {
   flex-shrink: 0;
-  color: var(--accent-2);
+  color: var(--accent-2-text);
 }
 
 .hist-preview {
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   color: var(--text-muted);
   margin-top: 5px;
   white-space: nowrap;
@@ -92,7 +107,7 @@
 }
 
 .hist-time {
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   color: var(--text-muted);
   margin-top: 6px;
   opacity: 0.8;
@@ -104,12 +119,6 @@
   gap: 5px;
   flex-shrink: 0;
 }
-.hist-ops .armed {
-  border-color: rgba(248, 113, 113, 0.6) !important;
-  color: var(--err) !important;
-  background: rgba(248, 113, 113, 0.12) !important;
-}
-
 @media (max-width: 720px) {
   .hist-item {
     flex-direction: column;

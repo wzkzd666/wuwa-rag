@@ -1,5 +1,6 @@
+import LoadFail from '../../components/LoadFail'
 import { useEffect, useState } from 'react'
-import { Zap, Server, Trash2, RefreshCw, Cpu, AlertTriangle, Check, Smile, KeyRound, Unlock, Lock } from 'lucide-react'
+import { Zap, Server, Trash2, RefreshCw, Cpu, AlertTriangle, Check, Smile, KeyRound, Unlock, Lock, Download } from 'lucide-react'
 import { useStore } from '../../store/useStore'
 import * as api from '../../lib/api'
 import type { LlmConfig, ProviderPreset } from '../../types'
@@ -31,12 +32,19 @@ export function LlmSection() {
   const apiBase = useStore((s) => s.settings.apiBase)
   const [providers, setProviders] = useState<ProviderPreset[]>([])
   const [cfg, setCfg] = useState<LlmConfig | null>(null)
+  // ⚠️ 读不到 ≠ 没配置（与 TtsSection 同一条判据）：原先 catch 里静默，
+  // 后端故障时这张卡直接报「（尚未配置）」，且保存按钮被 `cfg ? … : false` 判灰 ——
+  // 用户既不知道是故障、也不知道为什么点不动保存。
+  const [loadErr, setLoadErr] = useState('')
   const [provider, setProvider] = useState('openai')
   const [baseUrl, setBaseUrl] = useState('')
   const [model, setModel] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [models, setModels] = useState<string[]>([])   // 测试后拉回的可选模型
   const [testing, setTesting] = useState(false)
+  // 「拉取模型列表」单独一支：outbound 档限流 20/小时且与「测试连接**共享**计数，
+  // 请求中必须禁用两枚按钮防连点，否则点快了自己把额度烧光、换来一串 429
+  const [pulling, setPulling] = useState(false)
   const [saving, setSaving] = useState(false)
   const [useCloud, setUseCloud] = useState(false)
   const [switching, setSwitching] = useState(false)    // 切换本地/云端开关的请求中
@@ -54,6 +62,7 @@ export function LlmSection() {
   const [newPp, setNewPp] = useState('')
 
   const load = async () => {
+    setLoadErr('')
     try {
       const [p, c] = await Promise.all([api.llmProviders(apiBase), api.getLlmConfig(apiBase)])
       setProviders(p.providers)
@@ -65,8 +74,8 @@ export function LlmSection() {
         setUseCloud(c.enabled)
         setEmotionViaCloud(!!c.emotion_enabled)
       }
-    } catch {
-      /* 未登录/后端未起：静默，不打扰 */
+    } catch (err) {
+      setLoadErr(err instanceof Error ? err.message : String(err))
     }
   }
   useEffect(() => { void load() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
@@ -210,6 +219,24 @@ export function LlmSection() {
     }
   }
 
+  /** 专用「拉取模型列表」（GET /llm/models）：不必再逼用户跑一次完整连通性测试
+   *  才能填满下拉。key 由后端从已存配置里取（前端从不传明文 key）；未解锁/未存 key
+   *  时后端回 400 + 中文指引（「请先保存 API Key…」），限流超限回 429 + 「请求过于频繁，
+   *  请稍后再试」—— 都由 request() 原样透出，这里只管落进 toast。 */
+  const doPullModels = async () => {
+    if (!baseUrl.trim()) { toast('err', '请先填 API 地址'); return }
+    setPulling(true)
+    try {
+      const out = await api.llmModels(baseUrl.trim(), apiBase)
+      setModels(out.models)
+      toast('ok', `已拉取 ${out.models.length} 个可选模型`)
+    } catch (err) {
+      toast('err', err instanceof Error ? err.message : String(err))
+    } finally {
+      setPulling(false)
+    }
+  }
+
   const doSave = async () => {
     if (cfg && !cfg.crypto_ready) { toast('err', '服务端缺少加密依赖，无法安全保存密钥'); return }
     if (!baseUrl.trim() || !model.trim()) { toast('err', 'API 地址与模型都不能为空'); return }
@@ -287,11 +314,15 @@ export function LlmSection() {
       {/* 凭据表单收在次级折叠里：切到本地后自动收起，但**仍可手动展开编辑**——
           否则想改 Key 就得先切到云端（等于启用一个自己还没配好的模型）。 */}
       <InlineFold
-        title={`云端模型配置${cfg?.configured ? `（已保存 ${cfg.key_hint}）` : '（尚未配置）'}`}
+        title={`云端模型配置${
+          cfg?.configured ? `（已保存 ${cfg.key_hint}）`
+            : loadErr ? '（状态未知：读取失败）' : '（尚未配置）'}`}
         open={cloudShown}
         onToggle={() => setCloudOpen(!cloudShown)}
       >
-        {cfg && !cfg.crypto_ready && (
+        {loadErr && <LoadFail what="云端模型配置" error={loadErr} onRetry={() => void load()} />}
+
+      {cfg && !cfg.crypto_ready && (
           <div className="set-warn">
             <AlertTriangle size={14} /> 服务端缺少 <code>cryptography</code> 依赖，云模型功能已关闭（不会明文存密钥）。请在后端安装该包后再用。
           </div>
@@ -417,7 +448,7 @@ export function LlmSection() {
           <div className="set-row">
             <div className="set-row-main">
               <label>模型</label>
-              <p>先点「测试连接」拉取可选模型，再从下拉选；也可直接手填模型 id。</p>
+              <p>点「拉取模型列表」刷新下拉（需已保存 Key）；也可直接手填模型 id。</p>
             </div>
             <div className="set-row-ctl model-ctl">
               <input className="input api-input" list="llm-models" value={model}
@@ -425,7 +456,12 @@ export function LlmSection() {
               <datalist id="llm-models">
                 {models.map((m) => <option key={m} value={m} />)}
               </datalist>
-              <button className="btn btn-ghost" onClick={doTest} disabled={testing}>
+              <button className="btn btn-ghost" onClick={doPullModels}
+                      disabled={pulling || testing}
+                      title="仅拉取模型列表；两者共用每小时 20 次的外呼限额">
+                {pulling ? <RefreshCw size={14} className="spin" /> : <Download size={14} />} 拉取模型列表
+              </button>
+              <button className="btn btn-ghost" onClick={doTest} disabled={testing || pulling}>
                 {testing ? <RefreshCw size={14} className="spin" /> : <Zap size={14} />} 测试连接
               </button>
             </div>

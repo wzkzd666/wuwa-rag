@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import httpx
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
@@ -100,6 +101,16 @@ def _build_openai(cfg: dict, strict: bool) -> Runnable:
         model=cfg["model"],
         api_key=cfg["api_key"],
         base_url=cfg["base_url"],
+        # ⚠️ 必须自己造 httpx 客户端并把重定向关掉：openai SDK 建客户端时写的是
+        # `kwargs.setdefault("follow_redirects", True)`（实测 openai 3.13 `_base_client.py`），
+        # 于是 `llmstore.validate_base_url` 只核了**第一跳**——用户填的地址可以 302 把请求
+        # 甩进内网/云元数据端点（SSRF）。httpx 在跨源重定向时会剥掉 Authorization
+        # （实测 `_redirect_headers`），所以 key 不会跟着泄出去，但请求照样打进去、
+        # 响应照样回落到模型上下文里。关掉重定向后 3xx 直接当错误处理，符合预期。
+        # 客户端与 ChatOpenAI 实例同生命周期（实例本身按配置缓存在 _CLOUD_CACHE），
+        # 不引入新的跨事件循环共享对象。
+        http_async_client=httpx.AsyncClient(timeout=_CLOUD_TIMEOUT, follow_redirects=False),
+        http_client=httpx.Client(timeout=_CLOUD_TIMEOUT, follow_redirects=False),
         temperature=s.CHAT_CLOUD_TEMPERATURE,
         max_tokens=s.CHAT_CLOUD_MAX_TOKENS,
         frequency_penalty=(s.CHAT_CLOUD_FREQ_PENALTY_STRICT if strict

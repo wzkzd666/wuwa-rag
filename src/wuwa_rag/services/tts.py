@@ -5,7 +5,7 @@
 `dashscope` 不在依赖里（实测 `import dashscope` → ModuleNotFoundError）。
 为"一个可选的语音接口"而引入一个 SDK 不划算，且 SDK 的 SpeechSynthesizer
 是同步阻塞调用，放进 FastAPI 还要 to_thread 包一层。直接用 httpx POST 更透明。
-（与 `rag/websearch.py` 同一风格：能查证参数就直接调 REST，不依赖厂商 SDK。）
+（与 `services/websearch.py` 同一风格：能查证参数就直接调 REST，不依赖厂商 SDK。）
 
 端点与地域（官方「非实时语音合成」2026-09 版，已核实）
 ----------------------------------------------------
@@ -21,14 +21,14 @@ Qwen-TTS 系列混用（那条是 `/api/v1/services/aigc/multimodal-generation/g
   · **指令控制**（`instruction`，≤100 字符）——自然语言控制音调/语速/情感/音色特点，
     系统音色与复刻音色均可传任意指令；
   · **细粒度情感与富语言标签**——`[excited]`/`[serious]` 等控制类标签 +
-    `[giggles]`/`[laughing]` 等拟声类标签（见 rag/emotion.py）。
+    `[giggles]`/`[laughing]` 等拟声类标签（见 services/emotion.py）。
 ⚠️ 音色与模型**强绑定**：3.1 的音色一律带 `_v3.1` 后缀，填 3.0 的音色名（如
 `longanhuan_v3.6`）会返回 `InvalidParameter`。换模型务必同步换音色。
 
 凭据来源（开源分发：用户自持优先）
 ----------------------------------
 密钥**不由部署者统一垫付**——每个用户在设置页填自己的阿里云百炼凭据
-（API Key + 业务空间 ID），密文入库（见 `rag/llmstore.py` 的 DEK/KEK 两段式加密）。
+（API Key + 业务空间 ID），密文入库（见 `core/llmstore.py` 的 DEK/KEK 两段式加密）。
 解析顺序见 `resolve()`：**用户自持凭据 > 全局 `.env` 兜底**；`.env` 里那几项只留给
 自部署者统一配一份的场景，开源分发时留空即可。
 
@@ -66,7 +66,7 @@ import httpx
 
 from wuwa_rag.config import get_settings
 from wuwa_rag.core import llmstore
-from wuwa_rag.services.emotion import emotion_tag
+from wuwa_rag.services.emotion import with_emotion_tag
 from wuwa_rag.text import strip_ref_marks
 from wuwa_rag.ww_logger import get_logger
 
@@ -334,7 +334,7 @@ async def synthesize(text: str, emotion: str | None = None,
 
     - `user_id` 决定用谁的凭据：先试该用户自持的加密配置，无则回落全局 `.env`
       兜底（见 `resolve`）。传 None 等价于「只用全局兜底」。
-    - `emotion` 为情绪枚举名（见 rag/emotion.py），映射成官方控制类标签插到文本开头；
+    - `emotion` 为情绪枚举名（见 services/emotion.py），映射成官方控制类标签插到文本开头；
       控制类标签作用于其后全部文本，所以只插一个。
     - 入参先过 `_to_speech_text` 转朗读稿（剥引用标记 + 去版式符号），随后才做长度截断。
     - 文本超长按 `TTS_MAX_CHARS` 截断（官方 Qwen-TTS 系上限 512 token，中文约 1 字 1 token
@@ -367,7 +367,10 @@ async def synthesize(text: str, emotion: str | None = None,
         body_text = cut
         log.info("TTS 文本超长，截断到 %d 字", len(body_text))
 
-    synth_text = f"{emotion_tag(emotion)}{body_text}"
+    # 标签只能出现在**送给 TTS 的文本**里，绝不能进用户可见的答案字段
+    # （否则前端会把 `[excited]` 原样渲染出来）——拼接口径统一走
+    # `emotion.with_emotion_tag`，不在这里另写一遍 f-string。
+    synth_text = with_emotion_tag(body_text, emotion)
     payload = {
         "model": model,
         "input": {

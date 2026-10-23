@@ -1,5 +1,5 @@
 import type {
-  AskOut, ConversationDetail, ConversationMeta, FeedbackList, IngestOut, IngestRecordRow,
+  AskOut, AdminUsersOut, ConversationDetail, ConversationMeta, FeedbackList, IngestOut, IngestRecordRow,
   IngestStatus, KnowledgeOut, LlmConfig,
   LlmConfigIn, LlmTestOut, ProviderPreset, StreamEvent, TtsConfigIn, TtsConfigOut, TtsOut, TtsStatus,
   UsageSummary, UserFact,
@@ -7,7 +7,7 @@ import type {
 } from '../types'
 
 /**
- * API 层。默认走 Vite 代理前缀 /api（开发期转发到 127.0.0.1:8000）。
+ * API 层。默认走 Vite 代理前缀 /api（开发期转发到本机 FastAPI，端口 = 根 .env 的 API_PORT）。
  * 生产或用户自定义时，可在设置里填写完整后端地址，此时直接用绝对地址。
  *
  * 鉴权（2026-09-22）：登录后 setAuthToken 存 token，所有请求自动带
@@ -51,7 +51,11 @@ async function request<T>(path: string, init?: RequestInit, base?: string): Prom
     let msg = `HTTP ${res.status} ${res.statusText}`
     try {
       const j = await res.json()
-      if (j?.detail) msg = String(j.detail)
+      // ⚠️ 429 的响应体是 {error: 中文提示, detail: slowapi 的英文限额串}
+      //（detail 形如 "Rate limit exceeded: 20 per 1 hour"，给用户看等于没解释）。
+      // 限流类错误必须取 error 才能显示「请求过于频繁，请稍后再试」。
+      if (res.status === 429 && j?.error) msg = String(j.error)
+      else if (j?.detail) msg = String(j.detail)
     } catch { /* 保留默认消息 */ }
     throw new Error(msg)
   }
@@ -93,6 +97,13 @@ export function getProfile(base?: string): Promise<{ username: string; facts: Us
 
 export function deleteFact(factId: number, base?: string): Promise<{ ok: boolean }> {
   return request(`/profile/fact/${factId}`, { method: 'DELETE' }, base)
+}
+
+/** GET /admin/users —— 管理员：全部用户 + 各自画像条数。
+ *  权限由后端 require_admin 拦（非管理员拿到中文 403 文案「需要管理员权限」），
+ *  前端不靠藏按钮做防护；401 走统一的 UnauthorizedError 踢回登录页。 */
+export function adminUsers(base?: string): Promise<AdminUsersOut> {
+  return request('/admin/users', { method: 'GET' }, base)
 }
 
 /** GET /health */
@@ -231,6 +242,14 @@ export function saveLlmConfig(cfg: LlmConfigIn, base?: string): Promise<LlmSaveO
  *  key 只走 body，或留空让后端用已保存的 key 测。 */
 export function testLlmConfig(cfg: LlmConfigIn, base?: string): Promise<LlmTestOut> {
   return request('/llm/config/test', { method: 'POST', body: JSON.stringify(cfg) }, base)
+}
+
+/** GET /llm/models —— 专用「拉取模型列表」：key 一律由后端取已保存的配置，
+ *  query 只传 base_url（不接受明文 key，防进日志/代理/浏览器历史）。
+ *  ⚠️ 与「测试连接」同受 outbound 档限流（20/小时）：调用方必须禁按钮防连点，
+ *  超限时 request() 已按 429 口径透出中文 error。 */
+export function llmModels(baseUrl: string, base?: string): Promise<{ models: string[] }> {
+  return request(`/llm/models?base_url=${encodeURIComponent(baseUrl)}`, { method: 'GET' }, base)
 }
 
 /** POST /llm/enabled —— 只切换「本地默认 / 云端自定义」，凭据原样保留。

@@ -3,6 +3,13 @@
 /** 单条消息 */
 export interface Message {
   id: string
+  /**
+   * 列表 key：出生即定、永不改写。
+   * `id` 会在收到 `done.message_id` 时被换成服务端行号（满意度反馈要靠它关联），
+   * 如果 key 跟着 id 走，React 会把那条气泡**卸载重挂**——答案刚收尾的一瞬间
+   * 整条气泡重播 0.32s 的入场动画（观感就是「闪一下」）。所以另存一个稳定 key。
+   */
+  listKey?: string
   role: 'user' | 'assistant'
   content: string
   createdAt: number
@@ -24,12 +31,15 @@ export interface AskMeta {
   slots?: string[]
   characters?: string[]
   docs?: number
-  /** 引用来源面包屑（角色 › 模块 › 组件），已去重保序 */
+  /** 引用来源：文档面包屑（角色 › 模块 › 组件）+ 联网溯源（`联网 › 标题 · url`），已去重保序 */
   sources?: string[]
   /** 后端检测到模型复读并截断了答案 */
   truncated?: boolean
   /** 情绪标签（TTS 用）；语音服务不可用（未配置密钥/业务空间）时为空串 */
   emotion?: string
+  /** 联网兜底**失败**时的一句话原因（成功/未走联网时为空串）。
+   *  没有它，「Key 过期没查成」和用户看到的「翻了本地也上了网,确实没有」就分不开。 */
+  web_reason?: string
 }
 
 /**
@@ -82,6 +92,10 @@ export interface AskOut {
   truncated?: boolean
   /** 情绪标签（TTS 用）；语音服务不可用（未配置密钥/业务空间）时为空串 */
   emotion?: string
+  /** 联网兜底失败时的一句话原因（成功/未联网时空串）——与 SSE done 同键 */
+  web_reason?: string
+  /** 这条回答落库后的 messages.id；用它把本地临时 id 换成真 id（见 StreamEvent 的 done 分支） */
+  message_id?: number | null
 }
 
 /** /ingest 返回体 */
@@ -106,12 +120,20 @@ export type StreamEvent =
       slots: string[]
       characters: string[]
       docs: number
-      /** 引用来源面包屑（角色 › 模块 › 组件），已去重保序 */
+      /** 引用来源：文档面包屑 + 联网溯源（`联网 › 标题 · url`），已去重保序 */
       sources?: string[]
       /** 后端复读兜底触发：answer 是截断后的权威全文，前端须用它覆盖已流式渲染的内容 */
       truncated?: boolean
       /** 情绪标签（TTS 用）；语音服务不可用（未配置密钥/业务空间）时为空串 */
       emotion?: string
+      /** 联网兜底失败时的一句话原因（成功/未联网时空串），UI 据此区分「没查到」与「没查成」 */
+      web_reason?: string
+      /**
+       * 这条回答落库后的 `messages.id`；没落库（空答案）时为 null/缺席。
+       * 前端必须用它把气泡的本地随机 uid 换掉——满意度反馈是按消息 id 提交的，
+       * 不换就会把评价挂在一个「刷新后再也不会出现」的 id 上（关联丢失 + 同一条回答可被评两次）。
+       */
+      message_id?: number | null
       /**
        * 本轮所属的会话 id。
        *
@@ -179,6 +201,24 @@ export interface UserFact {
   confidence: number | null
   source: string | null
   created_at: string
+}
+
+/**
+ * GET /admin/users 的一行（后端 `all_users_stats`：users 左连画像事实，0 条也在列）。
+ * 权限判定在后端 `require_admin`，前端只做展示。
+ */
+export interface AdminUserRow {
+  username: string
+  /** 后端存 admin / guest；类型留宽，将来加新角色不至于显示成空白 */
+  role: string
+  created_at: string
+  /** 活跃画像事实条数 —— 计算值，界面只读展示，不提供手填入口 */
+  facts: number
+}
+
+/** GET /admin/users 返回体 */
+export interface AdminUsersOut {
+  users: AdminUserRow[]
 }
 
 /** GET /ingest/status 返回：五步流水线实时进度 */

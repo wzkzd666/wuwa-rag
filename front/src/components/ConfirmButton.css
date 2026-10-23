@@ -1,0 +1,62 @@
+/* 危险操作的两步确认按钮：待确认态的样式**只在这里写一份**。
+   外观的其余部分（尺寸、内边距、圆角、底色）仍由宿主页面传入的 `.btn` /
+   `.btn-danger` / `.btn-sm` 决定 —— 组件只负责「armed 长什么样」这一件事。
+
+   ⚠️ 为什么选择器是非同寻常的双层类 `.confirm-btn.confirm-armed`：
+   `main.tsx` 里 global.css 是**最后一个** import 的，打包后它排在所有组件 CSS 之后，
+   同特异性时它必赢。旧版三份 armed 各挂一串 `!important`，压的就是
+   `.btn:hover:not(:disabled)` 与 `.btn-danger:hover:not(:disabled)`（都是 (0,3,0)）。
+   这里不跟它抢 `!important`，改用特异性取胜：
+     - 待确认态 (0,2,0) > 裸 `.btn` / `.btn-ghost` / `.kb-btn-danger` (0,1,0)
+     - 待确认 + 悬停 (0,4,0) > 上面那两条 (0,3,0)，也 > 会话栏的 `.session-ops button:hover` (0,2,1)
+   于是颜色只可能由这一处决定，不会再出现「同一状态三个地方互相覆盖」。
+
+   配色一律取 global.css 的 `--err` / `--err-tint-*` 色阶（不写 rgba 字面量），
+   所以浅色主题换色板、danger 色调整时这里跟着变，不需要再改一次。 */
+
+/* 待确认文案是整句中文，窄容器（会话栏、表格操作列）里不许折成两行 */
+.confirm-btn {
+  white-space: nowrap;
+}
+
+.confirm-btn.confirm-armed,
+.confirm-btn.confirm-armed:hover:not(:disabled) {
+  color: var(--err-text);
+  border-color: var(--err-tint-60);
+  background: var(--err-tint-14);
+  animation: confirm-pulse 1s ease-in-out infinite;
+}
+
+/* 待确认态是「图标 + 整句文案」两个子节点，必须排成一行。
+   为什么这条不能省：会话栏那种宿主图标按钮写的是 `.session-ops button { display: grid }`
+   （只有一个图标子节点时靠它居中），冒出第二个子节点就被 grid 排到图标**下面**，
+   整行高度瞬间翻倍。特异性写到 (0,2,0) 才压得住它的 (0,1,1) —— 组件 CSS 在打包顺序上
+   排在页面 CSS **之前**，单层 `.confirm-btn` 同特异性会输。
+   gap 只在待确认态给：常态只有一个子节点用不上，而 `.btn` 站点已有的 7px 图标间距
+   属于宿主的外观，不该被组件在常态下改掉。 */
+.confirm-btn.confirm-armed {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+}
+
+/* 原来只有设置页那一版有呼吸感（`pulse-danger`），其余三处只是换个颜色。
+   统一后按最高那档走：待确认态必须"看得出来还没执行"。 */
+@keyframes confirm-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--err-tint-12);
+  }
+}
+
+/* 减少动态效果的偏好由 global.css 的**一条全局规则**统一处理
+   （压时长 + 只跑一轮），这里不再自己写一份 `animation: none`：
+   两份实现会互相矛盾，而且全局那份刻意不写 none —— 呼吸感没了还要保留「待确认」的样子。 */
+
+/* 键盘焦点：待确认态必须看得见焦点落在哪，否则 Tab 用户无法判断
+   「回车」是按下去就删、还是要按两次。宿主没有自己的焦点样式，这里统一给。
+   ⚠️ 描边走 `--accent-2-text` 而不是饱和的 `--accent-2`：焦点环属于「非文字对比度」，
+   门槛 3:1，而 #818cf8 在浅色底上实测只有 2.98:1（刚好不达标）。 */
+.confirm-btn:focus-visible {
+  outline: 2px solid var(--accent-2-text);
+  outline-offset: 2px;
+}

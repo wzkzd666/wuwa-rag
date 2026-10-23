@@ -31,7 +31,8 @@ function peakOf(series: number[][]): number {
 }
 
 /** 7 天 token 用量：上柱状（每日消耗，local/cloud 堆叠）、下折线（累计趋势）。 */
-export default function UsageCharts({ daily }: { daily: DailyPoint[] }) {
+/** `days` 必须由调用方给：空态文案要说「近 N 天没有用量」，而 N 是用户在面板上选的 1/7/30。 */
+export default function UsageCharts({ daily, days }: { daily: DailyPoint[]; days: number }) {
   const data = useMemo(() => daily ?? [], [daily])
 
   const totals = useMemo(() => {
@@ -63,14 +64,14 @@ export default function UsageCharts({ daily }: { daily: DailyPoint[] }) {
             <i style={{ background: COLOR_CLOUD }} />云端
           </span>
         </div>
-        <BarChart data={data} local={local} cloud={cloud} peak={barPeak} allZero={allZero} />
+        <BarChart days={days} data={data} local={local} cloud={cloud} peak={barPeak} allZero={allZero} />
       </div>
 
       <div className="chart-card">
         <div className="chart-head">
           <b>累计 token 趋势</b>
         </div>
-        <LineChart data={data} totals={totals} peak={linePeak} allZero={allZero} />
+        <LineChart days={days} data={data} totals={totals} peak={linePeak} allZero={allZero} />
       </div>
     </div>
   )
@@ -80,8 +81,8 @@ const W = 640
 const H = 168
 const PAD = { top: 12, right: 8, bottom: 22, left: 38 }
 
-function BarChart({ data, local, cloud, peak, allZero }: {
-  data: DailyPoint[]; local: number[]; cloud: number[]; peak: number; allZero: boolean
+function BarChart({ data, local, cloud, peak, allZero, days }: {
+  data: DailyPoint[]; local: number[]; cloud: number[]; peak: number; allZero: boolean; days: number
 }) {
   const iw = W - PAD.left - PAD.right
   const ih = H - PAD.top - PAD.bottom
@@ -123,13 +124,13 @@ function BarChart({ data, local, cloud, peak, allZero }: {
           </g>
         )
       })}
-      {allZero && <text x={W / 2} y={H / 2} className="chart-empty-txt" textAnchor="middle">近 7 天没有用量</text>}
+      {allZero && <text x={W / 2} y={H / 2} className="chart-empty-txt" textAnchor="middle">近 {days} 天没有用量</text>}
     </svg>
   )
 }
 
-function LineChart({ data, totals, peak, allZero }: {
-  data: DailyPoint[]; totals: number[]; peak: number; allZero: boolean
+function LineChart({ data, totals, peak, allZero, days }: {
+  data: DailyPoint[]; totals: number[]; peak: number; allZero: boolean; days: number
 }) {
   const iw = W - PAD.left - PAD.right
   const ih = H - PAD.top - PAD.bottom
@@ -175,7 +176,7 @@ function LineChart({ data, totals, peak, allZero }: {
           {p.d.slice(5)}
         </text>
       ))}
-      {allZero && <text x={W / 2} y={H / 2} className="chart-empty-txt" textAnchor="middle">近 7 天没有用量</text>}
+      {allZero && <text x={W / 2} y={H / 2} className="chart-empty-txt" textAnchor="middle">近 {days} 天没有用量</text>}
     </svg>
   )
 }

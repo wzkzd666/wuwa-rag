@@ -9,7 +9,7 @@ import chromadb
 from chromadb.config import Settings
 
 from wuwa_rag.config import get_settings
-from wuwa_rag.knowledge.entities import normalize_character_name, normalize_team
+from wuwa_rag.knowledge.entities import TEAM_SLOTS, normalize_character_name, normalize_team
 from wuwa_rag.knowledge.graph.neo4j_client import get_session
 from wuwa_rag.knowledge.index.bm25 import BM25Index
 from wuwa_rag.knowledge.index.embeddings import BgeM3Embeddings
@@ -89,11 +89,7 @@ def _is_placeholder_team(team: str) -> bool:
     return len(names) <= 1
 
 
-# 鸣潮一支队伍只有 3 个位置 —— 拿到 3 段就说明这串已经是「完整队伍」，不能再补主人。
-# 实测反例：`守岸人/维里奈/白芷+秧秧+漂泊者-衍射`（3 段）来自 `漂泊者-男-衍射` 的页面，
-# 主人名和串里的写法不同（`漂泊者-男-衍射` vs `漂泊者-衍射`），`owner not in team` 判不出
-# 「已含主人」，硬补会得到 4 个人的队伍（实测出现过 `漂泊者-男-衍射+守岸人+秧秧+漂泊者-衍射`）。
-_TEAM_SLOTS = 3
+# 「一队只有 3 个位置」= entities.TEAM_SLOTS（领域事实，只在那一处定义）。
 
 
 def _split_teams(raw: str) -> list[str]:
@@ -180,6 +176,138 @@ def _fmt_val(v):
     return v
 
 
+def _teams_block(rows: list[dict], *, char: str, named: list[str], has_multi: bool,
+                 is_exact: bool, named_set: set[str],
+                 named_shown: set[tuple[str, ...]]) -> list[str]:
+    """队友槽位的专用输出：返回要并入 `lines` 的行（不走通用 k=v 反查表）。
+
+    从 `graph_search` 里拆出来只是因为那段判断链（归一 → 补主人 → 滤占位 → 锁定 →
+    镜像去重 → 片段剪枝 → 逐位覆盖剪枝 → 跨角色去重 → 排序 → 截断）占了整个函数
+    六成篇幅，把它留在原地会让「图谱还能查什么」这条主干读不下去。
+    ⚠️ 内部判据**一行未改**（含注释里那些实测反例）；改坏了会以「队伍输出与基线不一致」
+    的形式暴露。改完必须跑一次逐角色对照（要连 Neo4j，不在离线套件覆盖范围内）：
+    `for 角色 in 名册: await graph_search([角色], ["队友"])`，与改动前的输出逐字节比对。
+
+    `named_shown` 由调用方持有并**就地更新**：跨角色段的去重必须跨多次调用共享，
+    放进函数局部就会退回「同一支队在三个角色的段落里各列一遍」。
+    """
+    out: list[str] = []
+    # 指名模式（判定见函数开头的 named / has_multi / is_exact）。
+    # 两者要看的答案不同：
+    #   · 泛问 → 按「或」讲通用模板（`守岸人+吟霖/长离/散华+卡卡罗`），
+    #     被模板覆盖的具体队隐藏，否则同一件事说两遍；
+    #   · 指名 → 用户要的就是那一支，模板收窄成它、且必须出现在答案里。
+    # 锁角色范围：泛问只锁本次循环到的 `char`；点名多人时把点到的名字**全锁**——
+    # 模板 `守岸人+吟霖/长离/散华+卡卡罗` 因此被锁成用户点的那支
+    # `守岸人+吟霖+卡卡罗`，与数据里真实存在的同串（若有）去重合并，
+    # 答案就干净地落到那一支上，而不是「模板 + 具体队」各列一遍。
+    locks = named if has_multi else [char]
+    teams: list[str] = []
+    seen_keys: set[tuple[str, ...]] = set()
+    for r in rows:
+        owner = (r.get("页面主人") or "").strip()
+        owner = normalize_character_name(owner) or owner
+        for raw in (r.get("原始队伍") or []):
+            for t in _split_teams(raw):
+                # 名字归一（见 characters.normalize_team）：清掉 wiki 表格里的
+                # 别名与粘连 —— `漂泊者·湮灭`→`漂泊者-男-湮灭`、
+                # `渊武其他输出`→`渊武`、`维里奈（高熟练度）`→`维里奈`、
+                # `暗主`→`漂泊者-男-湮灭`；纯占位槽位（`主输出`）整格剔除，
+                # 队因此变短（这是刻意的：留着它模型会念成一个角色）。
+                # 约束：必须排在补主人与剪枝之前——段数判断要基于归一后的结果，
+                # 否则 `守岸人/维里奈/白芷+秧秧+主输出` 会先被当成 3 段完整队，
+                # 既跳过补主人、又混进一个假队友。
+                # 归一也让 _team_key 的镜像去重真正生效：此前
+                # `漂泊者·气动` 与 `漂泊者-男-气动` 是两个名字，同一支队躲过去重
+                # （实测问「忌炎配队」同时吐出 `莫特斐+漂泊者·气动` 和
+                # `漂泊者-男-气动+莫特斐`）。
+                t = normalize_team(t)
+                if not t:
+                    continue
+                # 只有「不满 3 段（=不是完整队伍）」才补主人；见 TEAM_SLOTS
+                if t.count("+") < TEAM_SLOTS - 1 and owner and owner not in t:
+                    t = f"{owner}+{t}"
+                if _is_placeholder_team(t):
+                    continue
+                for c in locks:
+                    t = lock_focus(t, c)
+                key = _team_key(t)
+                if t and key not in seen_keys:
+                    seen_keys.add(key)
+                    teams.append(t)
+    parsed = [(_team_groups(t), t) for t in teams]
+    # ① 片段剪枝：只剩片段的两人串（`仇远+守岸人` ⊂ `仇远+嘉贝莉娜+守岸人`）
+    #    丢掉——它和完整队伍其实是同一支，重复出现只会让模型以为「还有一支」。
+    #    **只剪「不满 3 个位置段」的**。
+    full = [g for g, _ in parsed if len(g) >= TEAM_SLOTS]
+    parsed = [
+        (g, t) for g, t in parsed
+        if len(g) >= TEAM_SLOTS
+        or not any(all(any(x <= y for y in fy) for x in g) for fy in full)
+    ]
+    # ② 逐位覆盖剪枝（**只在泛问/多人时**）：一条队伍若被**另一条**逐位覆盖
+    #    （`守岸人+吟霖+卡卡罗` ⊂ `守岸人+吟霖/长离/散华+卡卡罗`），隐藏起来。
+    #    理由：覆盖者已经把「或」讲清楚了，被覆盖的那条再列一遍既是同一件事
+    #    说两遍，也会让人误以为「这是一支另外的队伍」。
+    #    扩围：此前只剪不含 / 的具体队、模板之间不互剪，
+    #    于是 `守岸人/维里奈/白芷+洛可可+漂泊者-男-湮灭` 明明被
+    #    `守岸人/维里奈/白芷+洛可可+椿/漂泊者-男-湮灭` 逐位完全覆盖，却仍被列出。
+    #    现在**模板之间也剪**：被前者逐位完全覆盖的，覆盖掉。
+    #    两条红线：
+    #      a) 不能拿**摊平的名字集合**判覆盖：`守岸人+吟霖+长离` 名字集合同样落在
+    #         模板里，但它压根不是合法队伍（吟霖与长离同位置），逐位比较才准。
+    #      b) 判据必须**严格**覆盖（对方覆盖我、我不覆盖对方）。等价的两条
+    #         （位置组一一对应）会**互相**覆盖，若按「被覆盖就剪」两边一起消失；
+    #         等价时只留排序键最优的一条——先按排序键排好，再把「位置组多重集合」
+    #         相同的丢掉后面那些。
+    #    指名时跳过本步——用户点的那支必须出现。
+    if not is_exact:
+        parsed.sort(key=lambda gt: (-gt[1].count("/"), -gt[1].count("+"), gt[1]))
+        kept: list[tuple[list[frozenset[str]], str]] = []
+        seen_groups: set[tuple[tuple[str, ...], ...]] = set()
+        for g, t in parsed:
+            canon = tuple(sorted(tuple(sorted(s)) for s in g))
+            if canon in seen_groups:
+                continue
+            if any(_covers(og, g) and not _covers(g, og) for og, _ in parsed):
+                continue
+            seen_groups.add(canon)
+            kept.append((g, t))
+        parsed = kept
+    teams = [t for _, t in parsed]
+    # ③ 点名多人：只保留「点到的名字**全在其中**」的队伍，且**跨角色段只列
+    #    一次**——点名时守岸人/吟霖/卡卡罗三个角色各查一遍图，同一支
+    #    `守岸人+吟霖+卡卡罗` 会在三段里各出现一遍（实测 3 段 25 支里重复 3 遍）。
+    #    给模型三份重复清单，它就会照列三遍、甚至混搭。
+    #    命中为空时回落全量：用户点的组合若数据里真没有，宁可给全景，
+    #    也别给空答案（生成侧还有向量检索 + 「一句话不知道」兜底）。
+    if has_multi:
+        hit = [t for t in teams if named_set <= set(_team_key(t))]
+        if hit:
+            teams = [t for t in hit if _team_key(t) not in named_shown]
+            named_shown.update(_team_key(t) for t in teams)
+    if teams:
+        # 排序：① **含「或」的模板优先**——`A+B/C+D` 这种形态来自 wiki 的
+        #    「配队推荐」表（`| 卡卡罗配队 | 守岸人/维里奈/白芷+吟霖/长离/散华+卡卡罗 |`），
+        #    一支模板覆盖多支具体队，信息量最大；不带 `/` 的三人串来自别人的
+        #    「主流队友」双人格（`| 队伍组成 | 卡卡罗+吟霖+守岸人 |`），低一档；
+        # ② 「或」候选越多越先（一个格子能包的位置越多，覆盖的队越多）；
+        # ③ `+` 段数多（位置定得越全）。
+        # 约束：不要用长度作为排序键：守岸人+吟霖/长离/散华+卡卡罗（16 字）会被
+        # 一堆 12 字的双人格串挤出上限之外，而它恰恰是最该出现的那一支。
+        teams.sort(key=lambda t: (-t.count("/"), -t.count("+"), t))
+        total = len(teams)
+        cap = get_settings().TEAM_MAX_SHOWN
+        if cap and total > cap:      # 0 = 不限
+            teams = teams[:cap]
+        out.append("【可组队伍（每行是一支完整队伍，逐行照抄即可）】")
+        out.extend("  " + t for t in teams)
+        log.info("图谱命中 %s/队友: %d 支队伍（指名=%s，去重/剪枝/锁定后展示 %d）",
+                 char, total, "精确" if is_exact else ("多人" if has_multi else "泛问"),
+                 len(teams))
+    return out
+
+
 async def graph_search(
     characters: list[str], slots: list[str], element: str = "", stage: str = ""
 ) -> str:
@@ -199,13 +327,13 @@ async def graph_search(
         return ""
     # 「指名模式」判定（详见队友分支）。两个粒度必须分开，实测踩过：
     #   · has_multi —— 点名了 **≥2 个**角色名。用于「只列同时含这些角色的队」+ 跨段去重。
-    #   · is_exact —— 点名了 ≥3 个角色名。鸣潮一队只有 3 个人，满 3 个名字才是
-    #     「指明某一支具体队伍」，此时才保留被模板覆盖的具体队。
+    #   · is_exact —— 点名了满一队名额的角色名（见 entities.TEAM_SLOTS）。一队只有 3 个
+    #     位置，凑满才算「指明某一支具体队伍」，此时才保留被模板覆盖的具体队。
     #     反例：问「守岸人和吟霖配队」（2 个名字）不是指名某支队，仍要做覆盖剪枝，
     #     否则 `守岸人+吟霖+卡卡罗` 会和覆盖它的模板一起出现（同一件事说两遍）。
     named = [c for c in characters if c]
     has_multi = len(named) >= 2
-    is_exact = len(named) >= 3
+    is_exact = len(named) >= TEAM_SLOTS
     named_set = set(named)
     named_shown: set[tuple[str, ...]] = set()
     blocks: list[str] = []
@@ -239,119 +367,10 @@ async def graph_search(
                 # → `守岸人`。**放在数据侧而不是提示词侧**：同一条规则写 `_SYSTEM` 实测不生效
                 # （模型照旧输出未锁定的三项），确定性变换则零概率残留（详见 text.lock_focus）。
                 if slot == "队友":
-                    # 指名模式（判定见函数开头的 named / has_multi / is_exact）。
-                    # 两者要看的答案不同：
-                    #   · 泛问 → 按「或」讲通用模板（`守岸人+吟霖/长离/散华+卡卡罗`），
-                    #     被模板覆盖的具体队隐藏，否则同一件事说两遍；
-                    #   · 指名 → 用户要的就是那一支，模板收窄成它、且必须出现在答案里。
-                    # 锁角色范围：泛问只锁本次循环到的 `char`；点名多人时把点到的名字**全锁**——
-                    # 模板 `守岸人+吟霖/长离/散华+卡卡罗` 因此被锁成用户点的那支
-                    # `守岸人+吟霖+卡卡罗`，与数据里真实存在的同串（若有）去重合并，
-                    # 答案就干净地落到那一支上，而不是「模板 + 具体队」各列一遍。
-                    locks = named if has_multi else [char]
-                    teams: list[str] = []
-                    seen_keys: set[tuple[str, ...]] = set()
-                    for r in rows:
-                        owner = (r.get("页面主人") or "").strip()
-                        owner = normalize_character_name(owner) or owner
-                        for raw in (r.get("原始队伍") or []):
-                            for t in _split_teams(raw):
-                                # 名字归一（见 characters.normalize_team）：清掉 wiki 表格里的
-                                # 别名与粘连 —— `漂泊者·湮灭`→`漂泊者-男-湮灭`、
-                                # `渊武其他输出`→`渊武`、`维里奈（高熟练度）`→`维里奈`、
-                                # `暗主`→`漂泊者-男-湮灭`；纯占位槽位（`主输出`）整格剔除，
-                                # 队因此变短（这是刻意的：留着它模型会念成一个角色）。
-                                # 约束：必须排在补主人与剪枝之前——段数判断要基于归一后的结果，
-                                # 否则 `守岸人/维里奈/白芷+秧秧+主输出` 会先被当成 3 段完整队，
-                                # 既跳过补主人、又混进一个假队友。
-                                # 归一也让 _team_key 的镜像去重真正生效：此前
-                                # `漂泊者·气动` 与 `漂泊者-男-气动` 是两个名字，同一支队躲过去重
-                                # （实测问「忌炎配队」同时吐出 `莫特斐+漂泊者·气动` 和
-                                # `漂泊者-男-气动+莫特斐`）。
-                                t = normalize_team(t)
-                                if not t:
-                                    continue
-                                # 只有「不满 3 段（=不是完整队伍）」才补主人；见 _TEAM_SLOTS
-                                if t.count("+") < _TEAM_SLOTS - 1 and owner and owner not in t:
-                                    t = f"{owner}+{t}"
-                                if _is_placeholder_team(t):
-                                    continue
-                                for c in locks:
-                                    t = lock_focus(t, c)
-                                key = _team_key(t)
-                                if t and key not in seen_keys:
-                                    seen_keys.add(key)
-                                    teams.append(t)
-                    parsed = [(_team_groups(t), t) for t in teams]
-                    # ① 片段剪枝：只剩片段的两人串（`仇远+守岸人` ⊂ `仇远+嘉贝莉娜+守岸人`）
-                    #    丢掉——它和完整队伍其实是同一支，重复出现只会让模型以为「还有一支」。
-                    #    **只剪「不满 3 个位置段」的**。
-                    full = [g for g, _ in parsed if len(g) >= _TEAM_SLOTS]
-                    parsed = [
-                        (g, t) for g, t in parsed
-                        if len(g) >= _TEAM_SLOTS
-                        or not any(all(any(x <= y for y in fy) for x in g) for fy in full)
-                    ]
-                    # ② 逐位覆盖剪枝（**只在泛问/多人时**）：一条队伍若被**另一条**逐位覆盖
-                    #    （`守岸人+吟霖+卡卡罗` ⊂ `守岸人+吟霖/长离/散华+卡卡罗`），隐藏起来。
-                    #    理由：覆盖者已经把「或」讲清楚了，被覆盖的那条再列一遍既是同一件事
-                    #    说两遍，也会让人误以为「这是一支另外的队伍」。
-                    #    扩围：此前只剪不含 / 的具体队、模板之间不互剪，
-                    #    于是 `守岸人/维里奈/白芷+洛可可+漂泊者-男-湮灭` 明明被
-                    #    `守岸人/维里奈/白芷+洛可可+椿/漂泊者-男-湮灭` 逐位完全覆盖，却仍被列出。
-                    #    现在**模板之间也剪**：被前者逐位完全覆盖的，覆盖掉。
-                    #    两条红线：
-                    #      a) 不能拿**摊平的名字集合**判覆盖：`守岸人+吟霖+长离` 名字集合同样落在
-                    #         模板里，但它压根不是合法队伍（吟霖与长离同位置），逐位比较才准。
-                    #      b) 判据必须**严格**覆盖（对方覆盖我、我不覆盖对方）。等价的两条
-                    #         （位置组一一对应）会**互相**覆盖，若按「被覆盖就剪」两边一起消失；
-                    #         等价时只留排序键最优的一条——先按排序键排好，再把「位置组多重集合」
-                    #         相同的丢掉后面那些。
-                    #    指名时跳过本步——用户点的那支必须出现。
-                    if not is_exact:
-                        parsed.sort(key=lambda gt: (-gt[1].count("/"), -gt[1].count("+"), gt[1]))
-                        kept: list[tuple[list[frozenset[str]], str]] = []
-                        seen_groups: set[tuple[tuple[str, ...], ...]] = set()
-                        for g, t in parsed:
-                            canon = tuple(sorted(tuple(sorted(s)) for s in g))
-                            if canon in seen_groups:
-                                continue
-                            if any(_covers(og, g) and not _covers(g, og) for og, _ in parsed):
-                                continue
-                            seen_groups.add(canon)
-                            kept.append((g, t))
-                        parsed = kept
-                    teams = [t for _, t in parsed]
-                    # ③ 点名多人：只保留「点到的名字**全在其中**」的队伍，且**跨角色段只列
-                    #    一次**——点名时守岸人/吟霖/卡卡罗三个角色各查一遍图，同一支
-                    #    `守岸人+吟霖+卡卡罗` 会在三段里各出现一遍（实测 3 段 25 支里重复 3 遍）。
-                    #    给模型三份重复清单，它就会照列三遍、甚至混搭。
-                    #    命中为空时回落全量：用户点的组合若数据里真没有，宁可给全景，
-                    #    也别给空答案（生成侧还有向量检索 + 「一句话不知道」兜底）。
-                    if has_multi:
-                        hit = [t for t in teams if named_set <= set(_team_key(t))]
-                        if hit:
-                            teams = [t for t in hit if _team_key(t) not in named_shown]
-                            named_shown.update(_team_key(t) for t in teams)
-                    if teams:
-                        # 排序：① **含「或」的模板优先**——`A+B/C+D` 这种形态来自 wiki 的
-                        #    「配队推荐」表（`| 卡卡罗配队 | 守岸人/维里奈/白芷+吟霖/长离/散华+卡卡罗 |`），
-                        #    一支模板覆盖多支具体队，信息量最大；不带 `/` 的三人串来自别人的
-                        #    「主流队友」双人格（`| 队伍组成 | 卡卡罗+吟霖+守岸人 |`），低一档；
-                        # ② 「或」候选越多越先（一个格子能包的位置越多，覆盖的队越多）；
-                        # ③ `+` 段数多（位置定得越全）。
-                        # 约束：不要用长度作为排序键：守岸人+吟霖/长离/散华+卡卡罗（16 字）会被
-                        # 一堆 12 字的双人格串挤出上限之外，而它恰恰是最该出现的那一支。
-                        teams.sort(key=lambda t: (-t.count("/"), -t.count("+"), t))
-                        total = len(teams)
-                        cap = get_settings().TEAM_MAX_SHOWN
-                        if cap and total > cap:      # 0 = 不限
-                            teams = teams[:cap]
-                        lines.append("【可组队伍（每行是一支完整队伍，逐行照抄即可）】")
-                        lines.extend("  " + t for t in teams)
-                        log.info("图谱命中 %s/队友: %d 支队伍（指名=%s，去重/剪枝/锁定后展示 %d）",
-                                 char, total, "精确" if is_exact else ("多人" if has_multi else "泛问"),
-                                 len(teams))
+                    lines.extend(_teams_block(
+                        rows, char=char, named=named, has_multi=has_multi,
+                        is_exact=is_exact, named_set=named_set, named_shown=named_shown,
+                    ))
                     continue
                 lines.append(f"【{SLOT_LABEL.get(slot, slot)}】")
                 for r in rows:
@@ -376,9 +395,28 @@ def _collection():
     return client.get_collection(name=s.CHUNK_COLLECTION)
 
 
-@lru_cache(maxsize=1)
+# BM25 的加载按**磁盘文件的指纹**记忆，而不是 `@lru_cache` 一次性记住对象。
+# 为什么不能 lru_cache(maxsize=1)：索引步 `index_character` 是**另一个进程**（Celery worker）
+# 在重写 `data/chroma/bm25.pkl`，API 进程里那份缓存永远不会知道文件换了 ——
+# 后果是「新角色入库了、五步链也报成功，但稀疏检索这条路永远召不回它」，
+# 只有重启 API 才好（而 dense 那条是实时查 Chroma 的，所以看起来又像偶发召回问题）。
+# 指纹取 (路径, mtime_ns, size)：一次 stat 是微秒级，`BM25Index.load()` 才是贵的那步
+# （要 unpickle jieba 词典快照 + 建表）。三个量一起比是因为 mtime 精度/回滚可能不变，
+# 而同字节数内容不同在"重建即变字节数"的现实里也几乎不会撞。
+_BM25_CACHE: tuple[tuple, BM25Index] | None = None
+
+
 def _bm25() -> BM25Index:
-    return BM25Index.load()
+    global _BM25_CACHE
+    path = get_settings().VECTOR_DIR / "bm25.pkl"
+    try:
+        st = path.stat()
+        sig = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:                       # 文件还没建出来：不缓存，下次再来
+        return BM25Index.load()
+    if _BM25_CACHE is None or _BM25_CACHE[0] != sig:
+        _BM25_CACHE = (sig, BM25Index.load())
+    return _BM25_CACHE[1]
 
 
 @lru_cache(maxsize=1)

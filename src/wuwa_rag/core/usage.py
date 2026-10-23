@@ -51,10 +51,6 @@ def scope(**fields):
         _current.reset(token)
 
 
-def current_scope() -> dict[str, str]:
-    return _current.get()
-
-
 class UsageCollector(BaseCallbackHandler):
     """把一次 LLM 调用的用量写进 `llm_usage`。挂在客户端上，全调用点自动生效。"""
 

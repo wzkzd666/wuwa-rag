@@ -1,3 +1,4 @@
+import LoadFail from '../../components/LoadFail'
 import { useEffect, useState } from 'react'
 import { Trash2, RefreshCw, AlertTriangle, Check, KeyRound, Unlock } from 'lucide-react'
 import { useStore } from '../../store/useStore'
@@ -35,8 +36,12 @@ export function TtsSection() {
   const [unlocking, setUnlocking] = useState(false)
   // 凭据/音色表单的展开态：null = 自动（还没配过就展开，配过就收起）
   const [credOpen, setCredOpen] = useState<boolean | null>(null)
+  // ⚠️ 读取失败 ≠ 没配置：`st`/`cfg` 为 null 时下面原本一律渲染成「尚未配置」，
+  // 后端一挂就把故障说成「你还没配」——用户会去重填表单而不是重试（方向全错）。
+  const [loadErr, setLoadErr] = useState('')
 
   const load = async () => {
+    setLoadErr('')
     try {
       const [s, c] = await Promise.all([api.ttsStatus(apiBase), api.getTtsConfig(apiBase)])
       setSt(s)
@@ -48,8 +53,9 @@ export function TtsSection() {
         setVoice(c.voice)
         setInstruction(c.instruction)
       }
-    } catch {
-      /* 未登录/后端未起：静默，不打扰 */
+    } catch (err) {
+      // 不再静默：把「读不到」如实标出来（见 loadErr 的注释），错误本身留给这张卡里回显
+      setLoadErr(err instanceof Error ? err.message : String(err))
     }
   }
   useEffect(() => { void load() }, [])   // eslint-disable-line react-hooks/exhaustive-deps
@@ -121,8 +127,9 @@ export function TtsSection() {
 
   const voices = st?.voices || []
   const ready = st?.ready === true
-  const srcText = st?.source === 'user' ? '使用你自己的凭据'
-    : st?.source === 'global' ? '使用部署者预置的凭据' : '尚未配置'
+  const srcText = loadErr ? '状态未知（读取失败）'
+    : st?.source === 'user' ? '使用你自己的凭据'
+      : st?.source === 'global' ? '使用部署者预置的凭据' : '尚未配置'
   // 是否已建立过解锁通道（登录密码 / 加密口令任一条）。false = 本次保存将新建 DEK，
   // 此时才需要卡口令长度、才需要提示「填一次以后免输」。
   const bound = !!(cfg?.auto_unlock || cfg?.pp_bound)
@@ -158,6 +165,8 @@ export function TtsSection() {
           )}
         </div>
       </div>
+
+      {loadErr && <LoadFail what="语音服务状态" error={loadErr} onRetry={() => void load()} />}
 
       {cfg && !cfg.crypto_ready && (
         <div className="set-warn">
@@ -209,7 +218,7 @@ export function TtsSection() {
           <p>
             {cfg?.configured
               ? <>已保存（<code>{cfg.key_hint}</code>）。留空 = 保留原 Key 不改。</>
-              : '百炼控制台的 API Key，必须是**北京地域**的。仅保存时加密上传，前端不留存、不回显明文。'}
+              : <>百炼控制台的 API Key，必须是「北京地域」的。仅保存时加密上传，前端不留存、不回显明文。</>}
           </p>
         </div>
         <div className="set-row-ctl">
@@ -235,7 +244,7 @@ export function TtsSection() {
         <div className="set-row-main">
           <label>音色</label>
           <p>
-            音色与模型代次**强绑定**：3.1 只认 <code>_v3.1</code> 后缀的音色。
+            音色与模型代次强绑定：3.1 只认 <code>_v3.1</code> 后缀的音色。
             留空则用默认（{st?.defaults.voice_label || st?.defaults.voice || '内置默认'}）。
           </p>
         </div>

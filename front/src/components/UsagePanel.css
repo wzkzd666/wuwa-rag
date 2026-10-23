@@ -33,14 +33,14 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   margin-bottom: 4px;
 }
 .chart-legend {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   color: var(--text-secondary);
 }
 .chart-legend i {
@@ -58,12 +58,12 @@
   display: block;
 }
 .chart-tick {
-  font-size: 9.5px;   /* SVG 内部刻度不跟 --data-font-size：viewBox 是固定坐标系 */
+  font-size: var(--fs-micro);   /* SVG 内部刻度不跟 --data-font-size：viewBox 是固定坐标系 */
   fill: var(--text-muted);
 }
 .chart-empty,
 .chart-empty-txt {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   fill: var(--text-muted);
   color: var(--text-muted);
   padding: 20px 0;
@@ -85,12 +85,12 @@
   gap: 8px;
   width: 100%;
   padding: 8px 10px;
-  font-size: var(--data-font-size, 12px);
+  font-size: var(--data-font-size, var(--fs-sm));
   background: transparent;
   border: 0;
   cursor: pointer;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: var(--fs-md);
   text-align: left;
 }
 .fb-fold-head:hover {
@@ -113,7 +113,7 @@
   gap: 8px;
 }
 .fb-fold-rate {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 .fb-fold-body {
@@ -131,7 +131,7 @@
   color: var(--text-muted);
 }
 .fb-del:hover {
-  color: var(--err);
+  color: var(--err-text);
   border-color: var(--err);
 }
 
@@ -145,7 +145,7 @@
   width: auto;
   min-width: 150px;
   padding: 5px 9px;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   cursor: pointer;
 }
 
@@ -185,7 +185,7 @@
    行高固定 1.5 不跟字号走 —— 跟着变会让不同字号下行距忽宽忽窄。 */
 .usage-panel .kb-table,
 .fb-fold-body {
-  font-size: var(--data-font-size, 12px);
+  font-size: var(--data-font-size, var(--fs-sm));
   line-height: 1.5;
 }
 .usage-panel .kb-table {
@@ -273,7 +273,7 @@
 }
 .fb-item-time {
   color: var(--text-muted);
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
 }
 .fb-item-q,
 .fb-item-a,
@@ -285,7 +285,7 @@
   overflow-wrap: anywhere;   /* 长英文/URL 不再把卡片撑出横向滚动条 */
 }
 .fb-item-c {
-  color: var(--err);
+  color: var(--err-text);
 }
 @media (max-width: 860px) {
   .fb-fold-stats {

@@ -22,15 +22,23 @@
 ```bash
 cd front
 npm install          # 首次
-npm run dev          # 开发：http://localhost:5173
+npm run dev          # 开发：http://localhost:25173
 npm run build        # 生产构建：tsc 类型检查 + vite build -> dist/
 npm run preview      # 预览构建产物
 ```
 
-开发模式下 `/api/*` 由 Vite 代理转发到 `http://127.0.0.1:8000`（即 `uv run python -m wuwa_rag.api.server`）。
+开发模式下 `/api/*` 由 Vite 代理转发到本机 FastAPI（默认 `http://127.0.0.1:28000`，
+即 `uv run python -m wuwa_rag.api.server`）。
+
+⚠️ **这两个端口都不写死在 `vite.config.ts` 里**：它用 `loadEnv` 读**仓库根**的 `.env`
+（`WEB_PORT` / `API_PORT`），端口只在那一处定义。写在两处会有多难查：Vite 代理指旧端口时
+页面全 502，而后端日志里一个请求都没收到，最容易误判成「后端挂了」。
+`.env` 缺席时才用兜底值，兜底值与 `.env` 当前值一致（由 `tests/test_config_and_prompt.py`
+的端口对账用例钉住），不会静默退回 Vite 默认的 3000。
+
 后端不在默认地址时：
 
-- 临时：`WUWA_API=http://192.168.1.10:8000 npm run dev`（PowerShell：`$env:WUWA_API="http://…"; npm run dev`）
+- 临时：`WUWA_API=http://192.168.1.10:28000 npm run dev`（PowerShell：`$env:WUWA_API="http://…"; npm run dev`）
 - 或在「设置」页填完整 API 地址（此时后端需允许 CORS，前端直连不再走代理）
 
 ## 目录结构
@@ -38,7 +46,7 @@ npm run preview      # 预览构建产物
 ```
 front/
 ├── index.html              # 入口（内联 SVG favicon，防白闪底色）
-├── vite.config.ts          # 代理 /api -> 127.0.0.1:8000（WUWA_API 可覆盖）
+├── vite.config.ts          # 代理 /api -> 根 .env 的 API_PORT（WUWA_API 可覆盖）
 ├── package.json
 ├── tsconfig.json
 └── src/

@@ -20,7 +20,15 @@ _CONFIGURED = False
 # 业务模块独立日志文件（即「大类」，一个名字一个文件，**不按进程角色再拆**），
 # propagate=False 避免重复落 app.log。是 api 还是 worker 写的，看行内 role 列。
 # 只保留真实有写入的 logger（曾经的 ai / pg 两个从未被引用，已移除）。
-_MODULE_LOGS = ("upload", "rag", "neo4j", "vec", "bm25", "celery")
+# ⚠️ 这里必须与各模块 `get_logger(名字)` 的调用点**逐个对齐**：名单漏了不会报错，
+# 只会让那个 logger 静默落进 app.log —— 排查时按业务大类去翻 `<name>.log` 就会发现
+# 「文件不存在/空文件」，误判成「这条链路没跑」（`music` 与 `auth` 曾长期如此，
+# 2026-10-23 由 tests/test_config_and_prompt.py 的名单一致性断言收口）。
+_MODULE_LOGS = (
+    "upload", "rag", "neo4j", "vec", "bm25", "celery",
+    "auth", "conv", "usage", "feedback", "profile",
+    "llm", "llmstore", "tts", "emotion", "music", "settings",
+)
 
 # 第三方库降噪：这些库在 root=INFO 下仍会刷大量 INFO/DEBUG（模型加载进度条、
 # bolt 握手、HF 缓存探测），对排查业务问题无价值。

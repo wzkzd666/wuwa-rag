@@ -1,6 +1,9 @@
+import { fmtDate } from '../lib/format'
 import { useCallback, useEffect, useState } from 'react'
 import { Settings as SettingsIcon, Sun, Moon, Zap, Type, Server, Trash2, Activity, RefreshCw, Camera, Image as ImageIcon, Palette, RotateCcw, User as UserIcon, Sparkles, Eraser, Cpu, Music4, Volume2, Loader2, KeyRound, Mic } from 'lucide-react'
 import { useStore } from '../store/useStore'
+import ConfirmButton from '../components/ConfirmButton'
+import LoadFail from '../components/LoadFail'
 import * as api from '../lib/api'
 import { pickImageFile, fileToDataUrl, formatBytes, dataUrlBytes } from '../lib/image'
 import type { UserFact } from '../types'
@@ -23,7 +26,6 @@ export default function SettingsPage() {
   const toast = useStore((s) => s.toast)
 
   const [testing, setTesting] = useState(false)
-  const [armed, setArmed] = useState(false)
   // 各区块的折叠态：默认只展开高频项（后端连接 / 模型服务 / 外观），
   // 其余「配一次就不看」的（语音、账号、个性化、画像、数据）收起，避免一屏堆满。
   const [fold, setFold] = useState<Record<string, boolean>>({
@@ -88,13 +90,18 @@ export default function SettingsPage() {
   const auth = useStore((s) => s.auth)
   const apiBase = useStore((s) => s.settings.apiBase)
   const [facts, setFacts] = useState<UserFact[] | null>(null)
+  // 读取失败必须和「没有画像」长成两样：原先 catch 里 `setFacts([])`，
+  // 后端一挂界面就报「还没有画像，多聊几轮…」——把故障说成了空态（用户会去多聊天而不是重试）。
+  const [factsErr, setFactsErr] = useState('')
 
   const loadFacts = async () => {
+    setFactsErr('')
     try {
       const out = await api.getProfile(apiBase)
       setFacts(out.facts)
-    } catch {
+    } catch (err) {
       setFacts([])
+      setFactsErr(err instanceof Error ? err.message : String(err))
     }
   }
   // 挂载后拉一次画像（简单起见不轮询——设置页本来就不是常驻页面）。
@@ -151,7 +158,7 @@ export default function SettingsPage() {
         <div className="set-row">
           <div className="set-row-main">
             <label>API 地址</label>
-            <p>留空则使用默认的本地服务地址。跨机访问时填后端完整地址，如 http://192.168.1.10:8000。</p>
+            <p>留空则使用默认的本地服务地址。跨机访问时填后端完整地址，如 http://192.168.1.10:28000（端口见根目录 .env 的 API_PORT）。</p>
           </div>
           <div className="set-row-ctl">
             <input
@@ -198,7 +205,7 @@ export default function SettingsPage() {
             <label><Volume2 size={13} /> 语音朗读</label>
             <p>
               为每条回答提供语音合成：系统先识别回答的语气，再以匹配的情绪朗读出来。
-              这是**本机显示偏好**（关掉只是不显示朗读按钮）；凭据与音色在下面
+              这是「本机显示偏好」（关掉只是不显示朗读按钮）；凭据与音色在下面
               「语音合成」里配置。
             </p>
           </div>
@@ -606,6 +613,8 @@ export default function SettingsPage() {
         </p>
         {facts === null ? (
           <div className="profile-loading">读取中…</div>
+        ) : factsErr ? (
+          <LoadFail what="画像" error={factsErr} onRetry={() => void loadFacts()} />
         ) : facts.length === 0 ? (
           <div className="profile-loading">
             还没有画像。多聊几轮（比如「我主玩守岸人，是萌新」），这里就会长出来~
@@ -616,7 +625,7 @@ export default function SettingsPage() {
               <li key={f.id} className="profile-item">
                 <span className="profile-text">{f.fact}</span>
                 <span className="profile-meta">
-                  {f.created_at ? new Date(f.created_at).toLocaleDateString('zh-CN') : ''}
+                  {fmtDate(f.created_at)}
                 </span>
                 <button
                   className="profile-del"
@@ -664,21 +673,18 @@ export default function SettingsPage() {
               界面偏好（主题/字号/头像/背景）不受影响。此操作不可恢复。</p>
           </div>
           <div className="set-row-ctl">
-            <button
-              className={`btn btn-danger ${armed ? 'armed' : ''}`}
-              onClick={() => {
-                if (armed) {
-                  void clearAll()
-                  setArmed(false)
-                  toast('info', '已清空全部会话')
-                } else {
-                  setArmed(true)
-                  setTimeout(() => setArmed(false), 4000)
-                }
+            <ConfirmButton
+              className="btn btn-danger"
+              icon={Trash2}
+              iconSize={14}
+              label="清空数据"
+              confirmLabel="确认清空"
+              onConfirm={async () => {
+                // 成功了才说「已清空」：clearAll 失败时会自己弹错误提示，
+                // 这里无条件 toast 会让用户看到「失败」与「已清空」同时出现。
+                if (await clearAll()) toast('info', '已清空全部会话')
               }}
-            >
-              <Trash2 size={14} /> {armed ? '确认清空' : '清空数据'}
-            </button>
+            />
           </div>
         </div>
       </Fold>

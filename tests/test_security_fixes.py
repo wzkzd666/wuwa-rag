@@ -230,3 +230,110 @@ def test_解密异常口径必须接住_InvalidToken() -> None:
         Fernet(k2).decrypt(cipher)
     # 合法密钥必须能解回——防止把判据写成「什么都算解密失败」的假绿
     assert Fernet(k1).decrypt(cipher) == b"sk-secret"
+
+
+# ---------- 云端 chat 客户端：重定向必须关（SSRF 的第二跳） ----------
+
+def test_云端客户端不得跟随重定向() -> None:
+    """openai SDK 建 httpx 客户端时写死 `follow_redirects` 默认 True。
+
+    `llmstore.validate_base_url` 只核**第一跳**的地址：留着跟随重定向，用户填的
+    base_url 就能用一条 302 把服务端请求甩进内网/云元数据端点。
+    httpx 跨源重定向会剥掉 Authorization（key 不泄），但请求仍打出去、响应仍进上下文。
+    这里断言的是「我们塞进去的两个客户端都是关的」——不依赖 SDK 的默认值。
+    """
+    from langchain_openai import ChatOpenAI
+
+    from wuwa_rag.core.llm import _build_openai
+
+    cfg = {"model": "gpt-test", "api_key": "sk-none", "base_url": "https://example.invalid/v1"}
+    llm: ChatOpenAI = _build_openai(cfg, strict=False)
+    for name in ("http_async_client", "http_client"):
+        client = getattr(llm, name)
+        assert client is not None, f"ChatOpenAI 没用上我们注入的 {name}"
+        assert client.follow_redirects is False, f"{name} 仍在跟随重定向"
+    # 光看字段还不够：必须确认 SDK 真拿这两个对象发请求
+    # （不注入时 `http_async_client` 是 None，客户端由 SDK 自己建，实测 follow_redirects=True）
+    assert llm.root_client._client is llm.http_client
+    assert llm.async_client._client._client is llm.http_async_client
+
+
+# ---------- 反馈输入：长度帽与 thread_id 判据只能有一处来源 ----------
+
+def test_反馈入口按帽拒绝而不静默截断() -> None:
+    """`/feedback` 的 `thread_id`/`target_id` 是 upsert 键的一部分，**截断会把两个 id 合成一个**。
+
+    表现是「给 A 点的赞跑到 B 上」——数据不报错、只是悄悄错位，最难发现的一类。
+    所以两列都必须「拒绝而不是截断」，而快照三列（comment/question/answer）才允许截断。
+    """
+    import asyncio
+
+    from pydantic import ValidationError
+
+    from wuwa_rag.api.usage import FeedbackIn
+    from wuwa_rag.core import feedback as fb
+
+    base = {"thread_id": "abc123", "target_id": "168", "rating": 1}
+    FeedbackIn(**base)                                     # 正常输入必须过
+    with pytest.raises(ValidationError):
+        FeedbackIn(**{**base, "thread_id": "x" * 65})      # 超长的 thread 串
+    with pytest.raises(ValidationError):
+        FeedbackIn(**{**base, "thread_id": "../../etc/passwd"})   # 模式不符
+    with pytest.raises(ValidationError):
+        FeedbackIn(**{**base, "target_id": ""})            # 空键会 upsert 到同一行
+
+    # core 侧是第二道闸（脚本/别的调用方未必过 pydantic），同样只拒不断
+    with pytest.raises(ValueError):
+        asyncio.run(fb.save_feedback(user_id="1", username="u", thread_id="y" * 100,
+                                     target_id="168", rating=1),
+                     loop_factory=asyncio.SelectorEventLoop)
+    with pytest.raises(ValueError):
+        asyncio.run(fb.save_feedback(user_id="1", username="u", thread_id="ok",
+                                     target_id="", rating=1),
+                     loop_factory=asyncio.SelectorEventLoop)
+
+
+def test_反馈帽只定义在core一处() -> None:
+    """入口模型用的数字必须**引用** core 的常量，而不是再抄一遍字面量。"""
+    from wuwa_rag.api.usage import FeedbackIn
+    from wuwa_rag.core import conversations as conv
+    from wuwa_rag.core import feedback as fb
+
+    meta = {name: {type(m).__name__: getattr(m, "max_length", None) or getattr(m, "min_length", None)
+                   for m in field.metadata}
+            for name, field in FeedbackIn.model_fields.items()}
+    assert meta["comment"].get("MaxLen") == fb.COMMENT_MAX
+    assert meta["question"].get("MaxLen") == fb.QUESTION_MAX
+    assert meta["answer"].get("MaxLen") == fb.ANSWER_MAX
+    assert meta["target_id"].get("MaxLen") == fb.TARGET_ID_MAX
+    # thread_id 的模式来自 conversations（入口校验与反馈落库共用同一个正则对象）
+    pats = [getattr(m, "pattern", None) for m in FeedbackIn.model_fields["thread_id"].metadata]
+    assert conv.THREAD_ID_RE.pattern in pats
+
+
+def test_会话搜索转义_like_元字符() -> None:
+    """`%` / `_` 是 LIKE 的通配符：不转义时用户搜「100%」会匹配到全部会话。
+
+    不是注入（参数化已经挡住了注入），是**结果不对** + 「随便打个百分号就全表扫」。
+    """
+    from wuwa_rag.core.conversations import _like_pattern
+
+    assert _like_pattern("守岸人") == "%守岸人%"
+    B = chr(92)          # 反斜杠：这里一律用 chr(92) 拼，避开源码里 `\` 被转义层级吃掉
+    assert _like_pattern("100%") == f"%100{B}%%"                 # 百分号变字面量
+    assert _like_pattern("a_b") == f"%a{B}_b%"                   # 下划线不再匹配任意字符
+    assert _like_pattern(f"C:{B}x") == f"%C:{B}{B}x%"            # 反斜杠自己先转义
+
+def test_入库失败原因对非管理员只给一句话() -> None:
+    """措辞只有一处（`_public_step_error`），两个出口共用；管理员照旧看原文。"""
+    from wuwa_rag.api.app import CANCEL_ERROR, _public_step_error
+
+    raw = "fetch: ConnectionError to https://wiki.internal/…（trace 之类）"
+    assert _public_step_error("crawl", raw, is_admin=True) == raw
+    got = _public_step_error("crawl", raw, is_admin=False)
+    assert got is not None and "抓取" in got and "ConnectionError" not in got
+    # 没有失败步骤时不许输出「「」这种空引号」
+    assert _public_step_error("", raw, is_admin=False) == "入库失败，详情请联系管理员"
+    # 取消哨兵必须原样透出（下游靠它显示「已取消」）
+    assert _public_step_error("chunk", CANCEL_ERROR, is_admin=False) == CANCEL_ERROR
+    assert _public_step_error("chunk", None, is_admin=False) is None

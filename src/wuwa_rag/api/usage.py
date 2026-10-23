@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from wuwa_rag.api import auth as authn
+from wuwa_rag.core import conversations as conv
 from wuwa_rag.core import feedback as fb
 from wuwa_rag.core import usage
 
@@ -18,14 +19,18 @@ router = APIRouter()
 
 
 class FeedbackIn(BaseModel):
-    thread_id: str = Field(..., description="所属会话（thread）id")
-    target_id: str = Field(..., description="被评价的那条回答 id（前端消息 id）")
+    # 帽全部取自 `core/feedback.py` 的常量（键的两列在 core 侧还会**拒绝**而不是截断，
+    # 这里提前 422 只是为了让报错发生在「提交反馈」这一步而不是落到日志里）。
+    thread_id: str = Field(..., pattern=conv.THREAD_ID_RE.pattern,
+                           description="所属会话（thread）id")
+    target_id: str = Field(..., min_length=1, max_length=fb.TARGET_ID_MAX,
+                           description="被评价的那条回答 id（前端消息 id）")
     rating: int = Field(..., description="1 满意 / -1 不满意")
-    comment: str = Field("", max_length=1000, description="可选补充说明")
-    question: str = Field("", description="快照：当时的问题")
-    answer: str = Field("", description="快照：当时的回答")
-    provider: str = Field("", description="local / cloud")
-    model: str = Field("", description="回答所用模型")
+    comment: str = Field("", max_length=fb.COMMENT_MAX, description="可选补充说明")
+    question: str = Field("", max_length=fb.QUESTION_MAX, description="快照：当时的问题")
+    answer: str = Field("", max_length=fb.ANSWER_MAX, description="快照：当时的回答")
+    provider: str = Field("", max_length=fb.NAME_MAX, description="local / cloud")
+    model: str = Field("", max_length=fb.NAME_MAX, description="回答所用模型")
 
 
 @router.get("/usage/summary")

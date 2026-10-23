@@ -15,7 +15,7 @@ uv sync                                # 安装依赖（含 torch cu130 索引�
                                        #   2026-10-06 已拆到 `train` extra：只有跑 ms-swift 训练才需要
                                        #   `uv sync --extra train`。torch 本身仍留在主依赖
                                        #   （sentence-transformers 跑 bge-m3 / reranker 运行时需要）。
-uv sync --extra dev && uv run pytest    # 单元测试：413 条，**全量离线**，约 5s
+uv sync --extra dev && uv run pytest    # 单元测试：450 条，**全量离线**，约 5s
                                        # 不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络，
                                        # 容器没起也能跑 → 可以当提交门禁（不会「假失败」）。
                                        # pytest 在 `dev` extra 里；asyncio_mode=auto 必须显式声明
@@ -23,9 +23,19 @@ uv sync --extra dev && uv run pytest    # 单元测试：413 条，**全量离�
                                        #  **静默跳过**——不失败，根本不跑，比没测试更危险）。
 docker compose up -d                   # PG(pgvector16) / Neo4j 5.26 / Redis / RustFS，密码读根目录 .env
                                        # （PG_PASSWORD / NEO4J_PASSWORD / S3_ACCESS_KEY / S3_SECRET_KEY；.env 本身 gitignore）
+                                       # ⚠️ 宿主机端口同样只认根 .env 的 *_PORT，一律用 2xxxx 不常用段：
+                                       #   PG 25432 / Neo4j 27687+27474 / Redis 26380 / RustFS 29000+29001
+                                       #   API 28000 / Vite 25173；Ollama 11434 是外部依赖，不改。
+                                       #   口径：宿主机端口 = 2 + 标准端口（Redis 例外取 26380，
+                                       #   26379 是 Sentinel 默认端口）。容器内部端口保持标准值。
+                                       #   为什么：本机 9000 实测被另一个项目的常驻服务占死，
+                                       #   RustFS 一起就 port is already allocated；8000/5173 是公共端口。
+                                       #   为什么不取 5xxxx+：Windows 动态端口区从 49152 起，
+                                       #   落在里面会被系统给出站连接随机占走，偶发且最难复现。
+                                       #   start.ps1 会在 compose up 前做端口占用预检并报出占用者 PID/命令行。
 # 建表：把 pgsql/001_init.sql 应用到 wuwa 库（documents/chunks/images/crawl_runs/记忆四表 + lg schema）
 
-.\dev.bat                                # 【一键启动】docker 四件套 + celery + FastAPI(:8000) + 前端(:5173)
+.\dev.bat                                # 【一键启动】docker 四件套 + celery + FastAPI(:28000) + 前端(:25173)
                                        # 建表 SQL 幂等自动应用；就绪后轮询 /health 并检查 ollama aemeath
                                        # 各服务独立窗口，PID 记录到 .runtime/dev.pids.json（运行时状态，与日志分离）
                                        # ⚠ 停止必须连子进程树一起杀（stop.ps1 用 taskkill /T + 命令行特征兜底）：
@@ -39,7 +49,7 @@ docker compose up -d                   # PG(pgvector16) / Neo4j 5.26 / Redis / R
 uv run celery -A wuwa_rag.tasks.worker:celery_app worker --pool=solo --loglevel=info
                                        # 【必开】/ingest 与「库外角色自动爬取」都依赖它。
                                        # Windows 必须 --pool=solo 且并发 1：chunk 任务按角色整写 chunks.jsonl，并行会互相覆盖
-uv run python -m wuwa_rag.api.server   # FastAPI :8000，端点 /health /ask /ask/stream(SSE) /ingest {"character":"忌炎"}
+uv run python -m wuwa_rag.api.server   # FastAPI :28000，端点 /health /ask /ask/stream(SSE) /ingest {"character":"忌炎"}
 
 # 离线全量流水线（各步幂等、可单独重跑）：
 uv run wuwa-chunk [src目录 [输出jsonl]]  # 默认 data/raw -> data/chunks/chunks.jsonl
@@ -123,9 +133,57 @@ uv run ruff check src                  # lint（line-length=100）
 这个差值才翻案——**PG 行数必须等于 distinct hash 数**这件事本身就是 hash 全局唯一的指纹。）
 
 
+#### ⚠️⚠️ 2026-10-23 实测并已修：`chunks.jsonl` 是 0 字节，而 PG 里 6741 块完好
+
+**发现路径**：第三轮审计里子智能体报「中间产物为空」，`ls data/chunks/` 复核 →
+`chunks.jsonl` **0 字节**（mtime 2026-10-21 21:32），而 PG `chunks` 表
+`count(*)=6741 / count(DISTINCT character)=58`。今天重跑 `uv run wuwa-chunk` 后
+文件恢复 **6741 行 = PG 行数**（两边逐字符对上，才算闭环）。
+
+为什么这事危险（三条都是实测口径，不是推测）：
+
+1. **全量 CLI 用 `open("w")` 就地截断再逐行写**（`chunker.py` 的 `main()`）——
+   进程被打断或 `data/raw` 读空时，旧文件在第一次 flush 前就已经被清空，
+   留下一个「看起来是产物、实际是空壳」的文件。现在改成
+   **① 空结果直接 `SystemExit`，绝不用空内容覆盖已有文件；② 先写 `.tmp` 再 `replace()`**。
+2. **单角色增量链会把空文件写成「只剩这一个角色」**：`worker._chunk_character_async` 的
+   「保留别人」是从**当前文件**里取的，文件空 = 别人全没了，而五步链照样报 success。
+   现在 0 块直接 `raise`（账本落 fail，前端进度会红），不再静默通过。
+3. **覆盖不全只能 warn 不能拦**：空 jsonl 对**全新安装**是合法起点
+   （第一个角色入库时本来就只有它），一刀切拦死会让 clone 即用变成「先手工造文件」。
+   所以 `_warn_missing_characters` 拿 PG 的 `DISTINCT character` 比一次，
+   把缺的角色名 + 补救命令（`uv run wuwa-chunk`）写进日志，流水线照常跑；
+   这个诊断**任何异常都吞掉**（PG 没起不能带崩入库）。
+
+配套的两条同型问题（同一轮一起修）：
+
+- **BM25 的跨进程陈旧**：`retrieve._bm25` 原先是 `@lru_cache(maxsize=1)`，
+  而 `bm25.pkl` 是**另一个进程**（Celery worker）在重写 —— API 进程首次查询后
+  一直用旧快照，只有重启才好。表现极具误导性：「新角色入库了、五步链全绿，
+  但稀疏检索永远召不回它」，而 dense 那条实时查 Chroma，所以看着像偶发召回问题。
+  现在按 `(路径, mtime_ns, size)` 指纹记忆：文件没变不重载（缓存的意义），
+  变了必重载（这个 bug 的修法）。
+- **pickle 就地截断**：`index/bm25.py` 写盘同样是直接覆盖，API 正在 `load` 时
+  可能读到半截文件（会直接打挂 `vector_search`）。
+
+**排查提示**：`chunks.jsonl` / `bm25.pkl` / Chroma 目录都是**可重建的派生物**，
+怀疑坏了就照上面的命令重生成，不要手改文件；三方对账口径仍是
+「jsonl 行数 == PG chunks 行数 == PG distinct character 覆盖数」。
+
 ### 问答链（`dialog/graph.py`，LangGraph StateGraph）
 
-`intent → {chitchat: chitchat | time: time | fact: graph→verify | semantic: vector→verify | hybrid: graph→vector→verify}`
+`intent → {chitchat: chitchat | time: time | clarify: clarify | fact: graph→verify | semantic: vector→verify | hybrid: graph→vector→verify}`
+⚠️ **`clarify` 是 2026-10-23 才真正接通的分支**（此前恒不可达，见下条）：句子只有
+**纯指代/语气词**（`那个 / 继续 / 嗯`，判据 `nlu.needs_clarification`）且主题分类器判 chitchat 时，
+才从 chitchat **改判 clarify** 去反问，而不是让模型猜着答。三条硬要求：
+① 判据必须挂在**闲聊分流之后**（`classify()` 只返回 hybrid/fact/semantic，挂在它后面判
+   `intent == "chitchat"` 是恒假条件——原来就是这么写的，反问一次都没触发过）；
+② 只收 ②（主题分类器）那一条出口：音乐回指、`is_identity`、`is_self_intro`、`pure_time`
+   都有自己的动作要执行，被改成反问就把功能吞了；
+③ 新分支必须同时进 `graph._TEXT_NODES` 与 `_STAGE_LABELS`——**漏了不报错**，
+   只会让 `done.answer` 成空串、前端一片空白（token 是旁路抽取的）。
+   三条各有一条守卫测试（`test_intent_routing.py`：可达性 + 白名单对账，后者是结构性判据、
+   不抄节点名清单，新增产正文分支漏加白名单当场红）。
 ⚠️ 上面只是**意图层**的分支；图跑到 `graph` 之后还有一层 `_after_graph` 决定要不要补向量，
 两条硬规则：**技能类强制补向量** / 指名队伍（≥3 个角色名）强制补向量。
 ⚠️ **「概括性配队不走向量」不在 `_after_graph` 判** —— 它由 `intent` 承载：`intent_node` 把这类问题的
@@ -138,7 +196,7 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 - **生成侧禁注入摘要**：实测把 `context_summary` 塞进 `build_context` 会被 aemeath 原样复述进答案（第三人称摘要腔穿帮）。摘要只喂改写器，生成靠窗口内 history + 改写后检索结果。
 - **生成侧口吻要求（2026-09-22）**：`prompt.SYSTEM_PROMPT` 里必须**显式**写「用第一人称『我』、活泼亲切，不要第三人称复述资料」。不加这句，模型会输出「她曾在雪原上…爱弥斯挨了一顿训」这种**第三人称资料搬运腔**（实测问「角色故事」→ 530 字 bullet 罗列、人设全丢、用户反馈过）。补上后同一问题变成第一人称叙述（「我的角色故事呀~…我扮演英雄…」709 字），且**数值表完整性不受影响**（技能 13 行 / 材料 11 行照旧逐行、符号原样）。配套保留了「口吻可以活泼，但事实必须严格依据资料，不许发挥」这条防幻觉约束。
   - ⚠️ **第一人称必须限定作用域（同日补）**：原来那句话没说清「我」指谁，问**别的角色**时模型会把「我」套到被问的角色身上（用户报「把清宵当自己了」）。现在明确：**讲爱弥斯自己的事**才用「我」；**资料讲的是别人（清宵/守岸人/尤诺…）时一律用角色名或「他/她」，不许自称「我」、不许冒充那个角色**——你是爱弥斯，不是被问的人。同一条硬要求里另加了「列表/配队条目每条只准出现一次，不许给条目编序号计数器（如『守岸人 + 尤诺*5』）」。
-- **「不知道」也要有人设（2026-09-22）**：用户报「不知道的时候回答没有人设感」。两处收口都改了口径——① `graph._unknown_text(names)`（角色不在知识库 + 联网抓取也失败）：由原来越读越像公文的「不知道（知识库里没有这个角色，尝试联网抓取也没找到）。」改成爱弥斯口吻，但**保留三件事实**：翻了本地、联网找过、确实没有；`ask()` 与 `ask_stream()` 共用（顺带把流式那条早退的 `done` 事件从「只有 `{"done": True}`」补齐成与正常路径同构的字段，前端 meta/引用面板不再拿到 undefined）。② `build_context` 零资料约束：明确要求「**用你自己的口吻**、一句话说明没有这份记录，可以俏皮一点带点小遗憾」，不再只说「说明你不清楚」（那样会答成干巴巴的公文腔）。
+- **「不知道」也要有人设（2026-09-22）**：用户报「不知道的时候回答没有人设感」。两处收口都改了口径——① `graph._unknown_text(names)`（角色不在知识库 + 联网抓取也失败）：由原来越读越像公文的「不知道（知识库里没有这个角色，尝试联网抓取也没找到）。」改成爱弥斯口吻，但**保留三件事实**：翻了本地、联网找过、确实没有；`ask()` 与 `ask_stream()` 共用（流式那条早退的 `done` 事件从「只有 `{"done": True}`」补齐成与正常路径同构的字段，前端 meta/引用面板不再拿到 undefined；**2026-10-23 起同构由构造函数保证**——`graph._done_event(...)` 是 `done` 的唯一形状来源，早退与正常收尾都走它，不再靠「记得把十一个键写两遍」。同一轮还补了 `emotion` / `web_reason` 两键：此前早退那条少这两个，同一个「不知道」在两条路径上形状不一样，前端只能靠 optional 兜着。另有一条跨模块断言钉住「`done` 里有的键，`api/app._meta_of` 必须全部落库」（`_meta_of` 是白名单式的 `evt.get(...)`，加键忘了进它就表现为「流式当场有、刷新历史就没」））。② `build_context` 零资料约束：明确要求「**用你自己的口吻**、一句话说明没有这份记录，可以俏皮一点带点小遗憾」，不再只说「说明你不清楚」（那样会答成干巴巴的公文腔）。
 - ⚠️ **澄清一个易误读点**：`generate_node` 只传 `HumanMessage`，`prompt.SYSTEM_PROMPT` 是**拼进该 message 文本**的，**不是** system 参数 —— 所以 aemeath 的 Modelfile SYSTEM 人设**并未被覆盖**。`llm.py` 那句「调用侧不得传 system 参数，否则人设被覆盖」的约束对象是「别传 `SystemMessage`」，与 `prompt.SYSTEM_PROMPT` 这个变量名无关（命名容易误导）。真正让人设丢的是「第三人称复述腔」，不是覆盖。
 - **验证升级闭环（verify→重检索→刷新→联网）**：`verify_node`（`services/verify.py`，qwen3:8b 判「资料能否回答问题」，ainvoke 带 `wwa:verify` 标签防流式泄漏）插在检索与 generate 之间——重排低分只挡得住「无资料」，挡不住跑题/脏数据。不匹配按代价从低到高升级：①已识别角色且没刷过 → `worker.build_refresh_pipeline`（**先按角色清 PG documents（chunks 级联）/Chroma 向量/Neo4j 私有节点，再重爬 5 步**——不清就是新旧块并存召回旧知识的根源，chunks 表 DO NOTHING 只挡同 hash；同步等待 `REFRESH_WAIT_TIMEOUT`，`reset_progress` 让前端五步重走）→重检索；②有重试额度 → 用 verifier 给的 refined 检索式重检索（`_rescan` 重算信号，按 intent 回 graph/vector）；③额度尽 → 百度千帆 `web_search`（`services/websearch.py`，v2 chat/completions + web_search 参数按官方文档；**`QIANFAN_API_KEY` 留空=联网兜底整体关闭**，返回 (False,"") 降级，不发任何外部请求）；⚠️ 千帆接线三个坑（2026-09-22 真跑实测后修，见 `config.py` 与 `websearch.py` 注释）：**(a) `QIANFAN_TIMEOUT` 必须 ≥45s**——实测联网请求 6.1s（命中搜索缓存）~26.5s（真搜），多数 21~26s，原来 20s 会**随机 ReadTimeout**，表现成「配了 key 也用不了」；**(b) 溯源要开 `enable_trace: True`**——不开时响应里根本没有 `search_results`（`web_search` 段里那段拼 `- title: url` 的代码此前是死代码，恒 0 条），开了才有（实测 10 条 index/url/title）；**(c) key 用 `AliasChoices("QIANFAN_API_KEY","BAIDUQIANFAN_API_KEY")` 读**——原来写 `os.getenv('BAIDUQIANFAN_API_KEY')` 会在**类体求值**，① 只认进程环境，把 key 写进 `.env` 完全无效（pydantic 的 env_file 不注入 os.environ）；② 变量不存在时默认值是 `None`（字段类型却是 `str`）→ pydantic 抛 ValidationError，而 `ww_logger` 第 10 行 import 时就调 `get_settings()` → **整个服务起不来**，与「留空=优雅降级」的设计相反（已实测复现）。判活判据：响应的 `usage.prompt_tokens_details.search_tokens > 0` 说明真联网了（实测 1905~3430）；④都不行 → exhausted 直接 generate，由 `build_context` 一句话不知道兜底。`web_facts` 以「## 联网搜索资料」并入生成上下文，零资料判定（graph_facts+docs+web_facts 全空）才会触发不知道约束。防死循环三道闸：`retry_count≤VERIFY_MAX_RETRY(1)` + `refreshed` 仅一次 + `used_web` 仅一次，verify 最多进两次。⚠️ 实测抓到的坑：`_purge_async` 跑在 `_run` 循环里，`close_pool` 必须 `await`（再 `_run` 即 loop 套 loop 崩）；重检索分支 stage 必须写死 `"retrieval"`，不能用 `_retry_or_web` 给（它在 MAX_RETRY=1 下只会回 web/exhausted，重检索成死代码——「跑题材料且无角色」的用例第一轮测试没覆盖差点漏网）。⚠️ 部署提醒：worker 重启前旧进程不认识 `purge_character_data`，刷新会失败并安全降级为收口，`.\dev.bat` 重启 worker 后才真正生效。`VERIFY_ENABLED=False` 整闸旁路。
 - **摘要模型用 8b 不用 0.6b**：实测 0.6b 合并多轮会**丢角色名**（输出「讨论了声骸组合等话题」空话，摘要价值归零）；8b 能保名（「卡卡罗声骸彻空冥雷，长离两链质变…」）。失败/超长回落：保留原摘要并追加降级标记，下轮压缩完整窗口时自我修复。
@@ -156,14 +214,20 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 - **双模型分工（多 agent）**：`llm.py` 两个客户端——`get_chat_llm(strict=False)` = **aemeath**（chat 专用，只做最终作答；`strict=True` 走 `LLM_REPEAT_PENALTY_STRICT` 低惩罚档，照抄长表格用）；`get_tool_llm()` = **qwen3:8b**（字典抽取 / 工具调用等结构化任务）。两者都 `bind(think=False)` 关思考。⚠️ **不要用 `/no_think` 软开关**：实测对 aemeath 无效（仍 38.3s、输出 3735 字、带 `v` 泄漏前缀，并触发 Ollama 500 `peg-native format` 错误）；改 `bind(think=False)` 后 1.3s 且干净。qwen3:8b 同理：抽取准确率不因开 thinking 提升（多样本均 4/8），耗时却从 0.20s 涨到 6.36s。`TOOL_TEMPERATURE=0`（要稳定 JSON，不要文采）。
 - **人格与作答**：整条 prompt 以单条 HumanMessage 发出；人设完全由 Ollama 端 aemeath 微调模型自带（Modelfile SYSTEM），`prompt.SYSTEM_PROMPT` 只做术语对照 + 答题约束 + 防重复，**不再引导口吻**。⚠️ 这些约束必须拼进 HumanMessage——Ollama 的 `system` 参数会**覆盖** Modelfile 内置 SYSTEM，改成 `SystemMessage` 传就会把人设弄丢（但 `knowledge/entities.py`/`agent.py`/`verify.py`/`dialog/nlu.py` 用 qwen3:8b 无人设可覆盖，用 `SystemMessage` 是安全的）。
 - **多轮记忆**：`ask()` 与 `ask_stream()` **共用同一张图和 checkpointer**，`thread_id` 在两条路径都生效。`generate_node`/`chitchat_node` 是 **streaming node**（`async for llm.astream()` 内部累积，只在结束时 yield 最终状态——token 由 `llm.astream` 自带回调产出，无需逐 token yield 中间态），流式走 `chain.astream_events(version="v2", config=...)`：从 `on_chat_model_stream` 抽 token，从 `on_chain_end name=="LangGraph"` 拿最终状态（含 intent/slots/docs/truncated）。⚠️ **抽 token 必须按 `metadata.langgraph_node` 过滤只留 generate/chitchat**——intent_node 里的主题分类器也调 LLM，其流式事件同样挂在 `on_chat_model_stream` 上（node='intent'），不过滤会把 `{"topic":"chitchat"}` 当答案吐给前端（实测发生过）。⚠️ streaming node 对 str 字段是**覆盖非拼接**，故节点内必须自己累积全文做复读检测。
-- **阶段进度事件**：`ask_stream` 除 token 外还 yield `{"stage", "label"}`，由 `on_chain_start` 的节点名映射 `_STAGE_LABELS`（intent/chitchat/graph/vector/generate）。原因：检索+重排实测约 19s 而生成仅 1~2s，静默期是用户焦虑主因。streaming node 会触发**两次** `on_chain_start`，已用 `emitted_stages` 去重。`LangGraph`/`_route`/`_after_graph` 是图容器与路由函数，对用户无意义，不进映射。
+- **阶段进度事件**：`ask_stream` 除 token 外还 yield `{"stage", "label"}`，由 `on_chain_start` 的节点名映射 `_STAGE_LABELS`（**取值以该字典为准**，别再抄一份清单——抄过，于是文档里长期少 `time`/`verify`/`web`/`clarify`/`music` 几条）。新增产正文的节点必须同时补 `_STAGE_LABELS` 与 `_TEXT_NODES`，理由见「clarify 三条硬要求」。原因：检索+重排实测约 19s 而生成仅 1~2s，静默期是用户焦虑主因。streaming node 会触发**两次** `on_chain_start`，已用 `emitted_stages` 去重。`LangGraph`/`_route`/`_after_graph` 是图容器与路由函数，对用户无意义，不进映射。
 - **闲聊回复的删除线**：aemeath 爱用 `~`/`~~` 当语气破折号，marked 的 GFM 把成对波浪号当删除线定界符（实测 `来~玩呀~` → `来<del>玩呀</del>`）。前端 `lib/markdown.ts` 在渲染前对**代码区外**的波浪号逐个转义（`~~` → `\~\~`，CommonMark 反斜杠转义按单个标点计），代码块/行内代码内的 `~` 保留。本域从不需要删除线，故一律禁用。
 - **防复读三道闸**（8B 角色扮演模型在「检索不到资料」时易陷入人设独白循环，整句周期性重复）：① 采样参数 `repeat_penalty`/`repeat_last_n=512`/`top_p`/`top_k`（`config.py` 可调）；② `build_context` 在**无图谱事实且无文档**时注入明确的一句话作答指令——判断必须基于 `graph_facts`/`docs` 而非 join 结果是否为空，否则多轮对话时 history 非空会把「无资料」信号吞掉；③ `dialog/guard.py` 运行时行级检测，命中即中断生成并 `trim_loop` 截断（流式 break 可提前止损，实测省下 76% 无效生成）。表格行与短碎句不参与判重，避免误杀突破材料表。截断状态经 `RagState.truncated` → `AskOut.truncated` / SSE `done.truncated` 透传前端显示「已截断重复内容」。
   - ⚠️ **2026-09-22 补第二类规则（周期块循环）**：原来只判「同一长句出现 >2 次」，实测漏网——问「清宵配队」时模型输出把 6 行一组的目标配队循环了 5 遍，且每行带 `*1`…`*28` 计数后缀（`守岸人 + 尤诺*17`）：① 每行都短于 `LLM_LOOP_MIN_CHARS=12` 被跳过；② 后缀让每行看起来都唯一，精确判重根本抓不到。故新增「周期块循环」判定：一组行（周期 2~`LLM_LOOP_PERIOD_MAX` 行、周期内至少 2 种不同行）整体重复 ≥ `LLM_LOOP_MIN_CYCLES` 遍即判退化。**比较前剥掉行尾计数标记（`*N`/`×N`），但只用于周期序列比较、不参与精确计数**——否则「- 贝币×5000 / ×10000」会被归一成同一行，真实材料表必被误杀。
   - 检测分两档：`feed()`（流式，每个 token 都跑）只查**尾部 `span+p` 行**窗口内所有对齐位置（O(1) 级、与已生成行数无关；留 p 行余量是因为退化块后面常还跟着几行别的内容）；`find_degenerate_start()`（`trim_loop` 里每次生成只跑一次）做**全文扫描**——只查尾部会在「退化块后面还有正常内容」时算不出截断点，trim 什么都不做，流式兜底等于白做（本轮真跑回归抓到的 bug）。切点取所有命中里**最早**的那个，并向前扩展同类周期块。
   - 回归基线（可复用）：退化样本必须命中且截断（455→93 字）、干净答案/真实补料块/技能 13 行/材料 11 行四个负样本必须**不**命中。
 - ⚠️ **`repeat_penalty` 别调回 1.3**：1.3 会把「彼此高度相似的成片行」罚到写不下去，症状是**提前收尾而不是报错**——同一张满级数值表只输出前 4 行就收口，还补一句「其他参数未在该列表中出现」；问「爱弥斯共鸣解放伤害倍率」时 7 行稳定丢 1~3 行，**连没有补料块的普通轮次也丢行**。消融结论：`repeat_last_n=64/512/1024` 三档结果一致（**窗口不是主因，惩罚强度才是**）；换 markdown 表格 / 纯文本无项目符号 / 编号列表 / 把数值改成中文表述**全都无效**；`penalty=1.15` 与 `1.0` 均 7 行全出，且「零资料兜底」「闲聊」两个复读高发场景都不见复读（重复句占比 0.00，闲聊反而从 252 字缩到 85 字）。故默认 `LLM_REPEAT_PENALTY=1.15`，要照抄长表格的轮次再用 `LLM_REPEAT_PENALTY_STRICT=1.05`（`get_chat_llm(strict=True)`，由 `generate_node` 在补料块非空时启用）。抗复读靠第③道闸兜，不靠加码惩罚。
-- **技能数值 / 突破材料确定性补料（不走检索）**：问技能自动附「满级数值表（Lv 10）」，问培养/突破自动附「突破材料表（一阶~六阶 + 各技能满级一档）」。为什么不用向量召回：技能数值表是 11 列宽表、突破材料每块仅 70~90 字，在 bge-reranker 眼里都输给大段机制描述——实测问「共鸣解放伤害倍率」时 **top6 里数值表 0 条**，且 top6 分数挤在 0.9983~0.9994 完全无区分度。改为按元数据直取：`retrieve.fetch_chunks(character, component)`（Chroma `get(where=…)`，零 embedding、零重排，只多一次本地查询）→ `graph._max_level_rows` / `_max_level_material` / `_material_items` **在 Python 里替模型读表**（8B 读 11 列宽表会串列，实测把 Lv7 读数读成中文数字）→ 拼成块注入 `build_context`。触发：`slots` 含「技能」或问句点名技能页签 → 数值表（优先问句点名的 `tab`，否则用本轮检索命中的 `tab`，都取不到则兜底「共鸣解放+共鸣技能」，保证问技能就有倍率）；问句命中 `突破|材料|素材|培养|养成|练度` → 材料表。两者都只在 `characters` 非空时跑，异常只记日志、绝不影响主链。配套三条：① `build_prompt(..., blocks=…)` 在 prompt **末尾**（近因位）加硬要求——禁止「各需不同数量」这类概述，禁止把参考文档里**分等级展开**的长表拼成混合清单；② `prompt.SYSTEM_PROMPT` 加一条「逐行完整列出、`+`/`*`/`%` 原样照抄」；③ 补料块固定排在 `build_context` **最末**（紧贴 `## 问题`）——同参数下放 `## 资料` 第一节更容易被截断，末尾是第二道保险。实测效果：技能答案从「至于具体效果嘛…我记不清了啦」→ 7 行满级数值齐全；培养答案从跑题讲普攻连段 → 一~六阶 + 5 个技能满级材料逐条列出。
+- **技能数值 / 突破材料确定性补料（不走检索）**：问技能自动附「满级数值表（Lv 10）」，问培养/突破自动附「突破材料表（一阶~六阶 + 各技能满级一档）」。为什么不用向量召回：技能数值表是 11 列宽表、突破材料每块仅 70~90 字，在 bge-reranker 眼里都输给大段机制描述——实测问「共鸣解放伤害倍率」时 **top6 里数值表 0 条**，且 top6 分数挤在 0.9983~0.9994 完全无区分度。改为按元数据直取：`retrieve.fetch_chunks(character, component)`（Chroma `get(where=…)`，零 embedding、零重排，只多一次本地查询）→ `graph._max_level_rows` / `_max_level_material` / `_material_items` **在 Python 里替模型读表**（8B 读 11 列宽表会串列，实测把 Lv7 读数读成中文数字）→ 拼成块注入 `build_context`。触发：`slots` 含「技能」或问句点名技能页签 → 数值表（优先问句点名的 `tab`，否则用本轮检索命中的 `tab`，都取不到则兜底「共鸣解放+共鸣技能」，保证问技能就有倍率）；问句符合 `nlu.is_material_question` → 材料表。
+  ⚠️ 该判据**刻意比 `SLOT_PATTERNS["突破材料"]` 窄**，不是遗漏（2026-10-23 统一）：
+  以前 `graph` 里另写了一份 `突破|材料|素材|培养|养成|练度`，实测 8 条问法里 **5 条两边不一致**
+  （「60级需要什么」「升满要消耗多少」认槽位不认补料；「练度怎么提升」反之）。
+  现在词表只有 `nlu` 那一份，且补料**不认**弱词与声骸/武器共现的句子——
+  「声骸需要什么」问的是配装，硬附一张「必须逐条照抄」的突破材料表会把答案带偏。
+  两者都只在 `characters` 非空时跑，异常只记日志、绝不影响主链。配套三条：① `build_prompt(..., blocks=…)` 在 prompt **末尾**（近因位）加硬要求——禁止「各需不同数量」这类概述，禁止把参考文档里**分等级展开**的长表拼成混合清单；② `prompt.SYSTEM_PROMPT` 加一条「逐行完整列出、`+`/`*`/`%` 原样照抄」；③ 补料块固定排在 `build_context` **最末**（紧贴 `## 问题`）——同参数下放 `## 资料` 第一节更容易被截断，末尾是第二道保险。实测效果：技能答案从「至于具体效果嘛…我记不清了啦」→ 7 行满级数值齐全；培养答案从跑题讲普攻连段 → 一~六阶 + 5 个技能满级材料逐条列出。
 
 ### `dialog/prompt.py`：提示词构建（2026-10-06 从 graph.py 拆出）
 
@@ -171,10 +235,10 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 
 - 拆分只搬代码、**未改任何函数体与提示词文本**（提示词是实测校准过的，逐字节不变很重要）。
 - 公开函数去掉了下划线前缀（`_build_prompt` → `build_prompt`），因为跨模块调用了。
-- ⚠️ `graph.py` 仍**再导出** `doc_sources`（`from wuwa_rag.dialog.prompt import doc_sources`），`api/app.py` 照旧从 `dialog.graph` 导入它——不要改成从 `prompt` 导入，否则要同时动 app.py。
+- `graph.py` 曾长期**再导出** `doc_sources`，只因 `api/app.py` 从 `dialog.graph` 导入它。2026-10-23 引用来源改成「文档面包屑 + 联网溯源」的统一口径 `prompt.all_sources` 后，app.py 改用它，`doc_sources` 那份纯转发随最后一个消费者一起删了——**留着就是无人使用的间接层**。守卫用例同步改钉 `graph.all_sources is prompt.all_sources`（`test_config_and_prompt.py`）。
 - `graph.py` 因此不再需要 `lock_focus` 与 `chunk_text` 之外的部分文本工具导入；改 prompt 逻辑一律去 `prompt.py`，别在 `graph.py` 里加回来（加回去会形成两份实现，本项目对「同一语义两处判据」已有大量踩坑记录）。
-- 架构守卫（`scripts/check_layers.py`）当前报 **49 模块 / 132 条依赖边 / 0 违规 / 0 环**，其中已包含 `dialog.prompt`（4 条出边：`config` `dialog.state` `text` `ww_logger`）与 `api.ratelimit`（2 条：`config` `ww_logger`），方向均合规。
-  - 📌 2026-10-06 清掉了 5 个 2026-09-30 重构遗留的空壳包（`rag/` `graph/` `ingest/` `retrieval/` `storage/`，只含 `__init__.py`、贡献 0 条依赖边、全项目零引用），模块计数由虚增的 54 回落到真实的 **49**（边数 132 不变）。删除走的是**回收站**（可恢复）。此后随新模块增加，2026-10-07 为 **56 模块 / 164 边**。
+- 架构守卫（`scripts/check_layers.py`）当前报 **56 模块 / 166 条依赖边 / 0 违规 / 0 环**，其中已包含 `dialog.prompt`（4 条出边：`config` `dialog.state` `text` `ww_logger`）与 `api.ratelimit`（2 条：`config` `ww_logger`），方向均合规。
+  - 📌 2026-10-06 清掉了 5 个 2026-09-30 重构遗留的空壳包（`rag/` `graph/` `ingest/` `retrieval/` `storage/`，只含 `__init__.py`、贡献 0 条依赖边、全项目零引用），模块计数由虚增的 54 回落到真实的 **49**（边数 132 不变）。删除走的是**回收站**（可恢复）。此后随新模块增加，2026-10-07 为 **56 模块 / 164 边**，2026-10-23 复核 **56 模块 / 165 边**；同日 `/music/status` 的失败路径补日志，新增一条 `api.music → ww_logger` 出边 → **166 边**。
     - ⚠️ 最大的误删风险点：`wuwa_rag/graph`（空壳，已删）与 `wuwa_rag/knowledge/graph`（活跃包，含 `extract.py` / `neo4j_client.py` / `build_graph.py`）**同名不同物**。清理后已逐个核验 9 个活跃包完好。
     - 核验方式（可复用，零外部依赖）：守卫模块数应等于**分层小计之和**；`pkgutil.walk_packages` 扫描到的模块数应与守卫一致；被删的旧包名 `importlib.import_module` 应抛 `ModuleNotFoundError`；全部 py 文件 `py_compile` 通过。（2026-10-07 复核：**56 模块 = `3+10+17+2+8+9+7`，164 条依赖边，0 违规 0 环**。）
   - ⚠️ 守卫的模块数会把**只含 `__init__.py` 的空包**也计入。将来若见「模块数 > 分层小计之和」，先查是否又留下了空壳目录。
@@ -200,7 +264,7 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 ### 输出侧兜底：来源标记 `[n]`、重复列表项、百分比单位、昵称引号（`graph._clean_answer`）
 
 - **`[n]` 引用编号**：aemeath 只要「依据资料作答」就爱在句末缀 `[1]` `[2]`（会自编到 `[10]`，还把一个 `[1]` 重复用十几次）。提示词侧只能概率压住（实测 3 轮里仍有 2 轮），故由 `text.strip_ref_marks` / `text.AnswerFilter` 在**输出侧**剥离（流式逐 token，会先扣住疑似 `[` / `[1` 的尾巴再吐）。语料正文从不含 `[n]`，游戏术语用的是 `【】`，不受影响。
-- **`## 参考文档` 不要加 `[n]` 编号**：加了必被抄进正文。前端引用面板走 SSE `done.sources`（`doc_sources`），**不依赖模型写编号**；将来真要做「正文引用徽章」请换 `（资料1）` 这类非方括号标记。
+- **`## 参考文档` 不要加 `[n]` 编号**：加了必被抄进正文。前端引用面板走 SSE `done.sources`（`prompt.all_sources` = 文档面包屑 + `联网 › 标题 · url`），**不依赖模型写编号**；将来真要做「正文引用徽章」请换 `（资料1）` 这类非方括号标记。
 - **重复列表项**：图谱事实与参考文档给的是同一批队伍、只是组合里角色名先后不同（图谱 `清宵+莫宁+达妮娅` vs 文档 `清宵+达妮娅+莫宁`），8B 读成「还有一批」又列一遍（4 支队伍列成 6 项）。`text.dedup_list_items` **只丢整行内容完全相同的列表行**——⚠️ 千万别升级成「语义合并」：技能/材料表的「满级 Lv10 一档」5 行材料完全相同、只有行首技能名不同，语义合并必误杀。
 - **百分比单位串味（2026-09-30）**：问「六链是什么」时，资料原文 `暴击固定为80%，暴击伤害固定为275%`（`data/raw/爱弥斯.md` 共鸣链六链）被复述成「固定**八十万**暴击伤害」+「**两百七十五**暴击伤害」——三种走形同时出现：① 凭空加量纲（`80%`→`八十万`）；② 丢单位（`275%`→`两百七十五`）；③ 把「暴击率」与「暴击伤害」两个分句并把化。补了两道：
   - **prompt 侧**（`build_prompt` 的输出格式块第 3 条 + `persona.DOMAIN_RULES`）：「带单位或符号的数字一律照原样抄回，百分号必须跟着数字，不擅自加『万』『亿』」。原先这条**只作用于「满级数值表/突破材料表」**，共鸣链不在范围内 —— 这正是漏网的根因。
@@ -214,7 +278,12 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
     - **不支持中文数字**：模型把 `275%` 写成「两百七十五」本身就是违规改写，补 `%` 只会固化它。
     - 验证口径：全语料 51198 行只应有 6 行改动（`暴击提升2.80`，原文自身缺 `%`），多于此即回归。
 - **昵称外层的引号（2026-10-10）**：模型叙述用户时爱给称呼套「」/“”（实测答案「「颗粒」刚刚让我放…」）。按提示词铁律**不写**「别加引号」这类负向指令（negative-example 污染），改为 `text.unquote_mentions` 确定性剥离：只剥**恰好包裹画像昵称**的那一层引号对，歌名《…》、术语【…】、别的「强调」一概不动。昵称词由 `services/profile.nicknames_from_context(注入串)` 现取——画像事实本身是干净的（`用户自称是颗粒`），所以「剥谁的」必须从 `user_context` 反解，不能写死。
-- ⚠️ **四步清洗只能有一处实现：`graph._clean_answer(raw, user_context)`**（2026-10-10 收敛）。`generate_node` 与 `ask_stream` 收尾**都要过这四步**，而流式的 `done.answer` 是**旁路重算**的（token 从 `on_chat_model_stream` 抽，节点里那份只进 history 与「截断时覆盖」分支）。本轮评审就是抓到 `unquote_mentions` 只加进了节点、漏在 `ask_stream`，表现成「流式回答还带「」，下一轮 history 里却已剥掉」——同一语义两处判据的必然结局。新增清洗规则一律改 `_clean_answer`，并往 `tests/test_text.py::test_清洗管线四步都在` 加一条断言（该用例锁住「四步都在」）。
+- ⚠️ **四步清洗只能有一处实现：`graph._clean_answer(raw, user_context)`**（2026-10-10 收敛）。`generate_node`、`_chat_turn`（chitchat / time / clarify 三条不检索分支的共用出口）与 `ask_stream` 收尾**都要过这四步**，而流式的 `done.answer` 是**旁路重算**的（token 从 `on_chat_model_stream` 抽，节点里那份只进 history 与「截断时覆盖」分支）。本轮评审就是抓到 `unquote_mentions` 只加进了节点、漏在 `ask_stream`，表现成「流式回答还带「」，下一轮 history 里却已剥掉」——同一语义两处判据的必然结局。
+  **2026-10-23 又抓到同一个洞的另一半**：`_chat_turn` 只手工做了第 ④ 步，① ② ③ 在闲聊/时间/澄清
+  三条分支上**全部缺席**——`[n]` 角标、丢百分号、重复列表行原样进 history 与非流式 `/ask`，
+  表现成「检索轮干净、闲聊轮带 [1]」。现在三处都调 `_clean_answer`，并由
+  `tests/test_text.py::test_两条输出口都只过唯一清洗实现` 用**源码判据**钉住（出口里单独调任何
+  一步就红——造一次 LLM 调用才能验的断言不符合本仓的全量离线约定）。新增清洗规则一律改 `_clean_answer`，并往 `tests/test_text.py::test_清洗管线四步都在` 加一条断言（该用例锁住「四步都在」）。
 
 ### 队友槽位：不能输出「队友→队伍」反查表
 
@@ -285,9 +354,11 @@ intent 从 `hybrid` **降级为 `fact`**（见下），`_route` 自然走 fact �
 | **多人** | `守岸人和吟霖配队`（2 个名字） | 同样剪枝；只出「两人都在其中」的队；跨角色段去重 | **只走图谱**（不向量，`intent=fact`）+ 答完追问一句 |
 | **指名** | `守岸人+吟霖+卡卡罗配队`（3 个名字） | **精确**：全锁三名字 → 模板收窄成那一支 → 只出它 | 图谱 **+ 强制向量**（`intent=hybrid`，打法循环在正文） |
 
-判定在 `retrieve.graph_search`，用 `extract_characters` 的命中个数切三档：
-`has_multi = len(named) >= 2`、`is_exact = len(named) >= 3`——**鸣潮一队只有 3 人，
-凑满 3 个名字才算「指明一支具体队伍」**。
+判定在 `retrieve.graph_search`（队友那串输出已拆到 `retrieve._teams_block`，判据一行未改，改动需按该函数文档里的逐角色比对验收），用 `extract_characters` 的命中个数切三档：
+`has_multi = len(named) >= 2`、`is_exact = len(named) >= TEAM_SLOTS`——**鸣潮一队只有 3 人，
+凑满 3 个名字才算「指明一支具体队伍」**。这个 3 自 2026-10-23 起只写在
+`knowledge/entities.TEAM_SLOTS` 一处（`retrieve` 的段数判断与 `graph._is_named_team` 都取它）；
+此前它在两个模块各有 `_TEAM_SLOTS = 3` + 一处字面量 `>= 3`，而这个阈值真的从 2 改到过 3。
 ⚠️ 实测踩到过：一开始两者都按 `>=2` 判，问「守岸人和吟霖配队」时会跳过覆盖剪枝，
 `守岸人+吟霖+卡卡罗` 和覆盖它的模板同时出现（同一件事说两遍，7 支里混着 1 支冗余）。
 
@@ -592,13 +663,14 @@ wiki 以后出现同形新词也不会被误切。这也是它敢替代旧 `_RE_
 | `/auth/register` `/auth/login` | 公开 |
 | `/ask` `/ask/stream` `/profile` `/auth/me` `/auth/logout` `/auth/password` | 登录即可（`get_current_user`） |
 | `/llm/providers` `/llm/config` `/llm/config/test` `/llm/models` `/llm/unlock` `/llm/lock` `/llm/passphrase` | 登录即可（个人云端模型配置，见下节） |
-| `/ingest` `/ingest/status` `/admin/users` | admin 专属（`require_admin`） |
+| `/knowledge/refresh` `/knowledge/characters` DELETE、`/admin/users` | admin 专属（`require_admin`） |
+| `/ingest` `/ingest/status` `/ingest/records` `/ingest/control` | 登录即可（2026-10-23 校正：矩阵曾写 admin 专属，与代码和知识库页的**刻意设计**不符——「提交 / 暂停 / 取消 / 删除**自己**提交的记录」对全体登录用户开放，只有重爬与删知识库才 require_admin；`_may_control` 负责校验只能控自己的） |
 
 ⚠️ **FastAPI 依赖链两个坑（实测）**：① 依赖函数的参数必须 `= Depends(...)`，否则类型被当**请求体字段** → 422 `missing body.user`；② 依赖的返回类型必须是 Pydantic `BaseModel`（`AuthUser`），dict 子类报 Invalid args。
 
 ### 限流（`api/ratelimit.py`，slowapi，2026-10-06 新增）
 
-四档限额在 `config.py` 的 `RATE_LIMIT_*`：`auth` 10/min 按 IP（挡登录暴力枚举）、`ask` 20/min 按用户（一轮 20s 量级且抢 GPU）、`tts` 10/min 按用户（真实费用）、`outbound` 20/hour 按用户（`/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，SSRF 面）。兜底 `default_limits` 200/min。来源 IP 统一走 `ratelimit.client_ip`：默认按连接 IP，**不信任** `X-Forwarded-For`（客户端可自报，信了按 IP 限速即作废）；挂反代才设 `TRUST_PROXY_HEADERS=true` 取最左项。
+限额档位在 `config.py` 的 `RATE_LIMIT_*`：`auth` 10/min 按 IP（挡登录暴力枚举）、`ask` 20/min 按用户（一轮 20s 量级且抢 GPU）、`tts` 10/min 按用户（真实费用）、`outbound` 20/hour 按用户（`/llm/models`、`/llm/config/test` 会向用户填的地址发出站请求，SSRF 面）、**`ingest` 5/hour 按用户**（2026-10-23 补：`/ingest` + `/knowledge/refresh` 跑整条五步链并写**共享语料**，此前只吃兜底档等于没限；`/ingest/control` 不占额度，否则排队时连止损都做不了）、**`creds` 复用 `RATE_LIMIT_AUTH` 的数值但单独计数**（改密/解锁/换口令/保存云端与语音凭据五个端点，每次都要跑 PBKDF2 20 万次 ~50ms，`/auth/password` 再加一次 scrypt ~733ms）。兜底 `default_limits` 200/min。来源 IP 统一走 `ratelimit.client_ip`：默认按连接 IP，**不信任** `X-Forwarded-For`（客户端可自报，信了按 IP 限速即作废）；挂反代才设 `TRUST_PROXY_HEADERS=true` 取最左项。
 
 改动这块前必读的四条：
 
@@ -900,11 +972,113 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 - ⚠️ **Celery 任务体是「先落账再抛」**：`_step_update(..., "fail", ...)` 后 `raise`。收窄会让某些异常跳过落账，前端五步进度永远卡在 `running`。
 - `knowledge/s3.py` 原来吞掉全部异常有真实缺陷：鉴权失败/网络不通时也去 `create_bucket`（真病因被换成更莫名的报错），`exists()` 在基础设施故障时返回 `False` → `put_raw` 误判「没传过」而重传。现在只有确认「桶/对象不存在」（`_NOT_FOUND_CODES`）才走原逻辑，其余如实抛出。
 
-**`docker-compose.yml` 四个容器都加了 `deploy.resources.limits`**：PG 1G/1.0 CPU、Neo4j 2G/1.0（另有原有的 heap 1G + pagecache 512M）、Redis 512M/0.5、RustFS 512M/0.5。Redis 额外加 `--maxmemory 256mb --maxmemory-policy allkeys-lru`。⚠️ `deploy.resources.limits` 在 `docker compose up`（非 swarm）下生效于 Compose v2；若用的是老版 `docker-compose` v1 需改用 `mem_limit`/`cpus` 顶层键。
+**`docker-compose.yml` 四个容器都加了 `deploy.resources.limits`**：PG 1G/1.0 CPU、Neo4j 2G/1.0（另有原有的 heap 1G + pagecache 512M）、Redis 512M/0.5、RustFS 512M/0.5。Redis 额外加 `--maxmemory 512mb --maxmemory-policy noeviction`（2026-10-23 校正：此处曾写 256mb/allkeys-lru，与 compose 实际值不符——这是**durability 关键旗标**，allkeys-lru 会在内存触顶时连 Celery 队列消息和任务结果一起淘汰，表现成「提交了入库却永远不跑、进度卡住」且无报错；noeviction 让故障变响亮）。⚠️ `deploy.resources.limits` 在 `docker compose up`（非 swarm）下生效于 Compose v2；若用的是老版 `docker-compose` v1 需改用 `mem_limit`/`cpus` 顶层键。
+
+**第三轮加固（2026-10-23 深夜，同一轮审计的收尾）**
+
+- ⚠️ **云端 chat 客户端必须禁跟随重定向**：`llmstore.validate_base_url` 只核**第一跳**，
+  而 openai SDK 建 httpx 客户端时写的是 `kwargs.setdefault("follow_redirects", True)`
+  （实测 openai 3.13 `_base_client.py`，且运行时确认默认客户端 `follow_redirects=True`）——
+  用户填的 base_url 一条 302 就能把服务端请求甩进内网/云元数据端点（SSRF 第二跳）。
+  现在 `core/llm.py::_build_openai` 自己造两个客户端塞给 `ChatOpenAI`
+  （`http_client` 同步 / `http_async_client` 异步，都 `follow_redirects=False`），
+  回归桩除了断言这两个字段，还断言**SDK 真拿的就是这两个对象**
+  （`llm.root_client._client is llm.http_client`；不注入时那两个字段是 None，
+  只断言字段值会写出一个恒真的假桩）。
+  附一条减轻严重度的事实：httpx 在**跨源**重定向时会剥掉 `Authorization`
+  （实测 `_redirect_headers`），所以 key 不跟着外泄，但请求仍打进去、响应仍回落到模型上下文。
+  `llmstore.list_models` 那边本来就 `follow_redirects=False`，**两处必须一起保持**。
+- `validate_base_url` 的**残留缺口如实写进了 docstring**（别再当它是闭合的）：
+  ① 「先解析后判断」，真正发请求时 httpx 会再解析一次 DNS，两次之间换记录（重绑定）
+     仍能落到私网——彻底封堵要把解析出的 IP 钉进请求（自建 transport + 改 Host 头），
+     只有公网多租户才值得付这个复杂度；缓解是 `CLOUD_ALLOW_PRIVATE_NET` 默认 False。
+- **`AskIn.question` 长度帽 512**（`api/app.py`）：问句进 embedding、进 prompt、进 PG 与
+  checkpointer 三处存储，限流只数请求数不看体积，不设上限等于给注册用户一张
+  提示词注入 + 存储放大票；再长的内容属于「资料」，该走 `/ingest`。
+  ⚠️ 跨语言成对：`front/src/components/Composer.tsx` 的 `QUESTION_MAX = 512` 与它同口径，
+  前端先挡是**手感**（超限时浏览器不让再输入，比发出去收一个 422 好），改一边必须改另一边。
+  同一轮里**没有**给凭据字段加 `max_length`——`api/auth.py` 已经有「2~24 / ≥6」的判据，
+  模型层再加一份就是本项目最忌讳的第二判据；TTS 也**不加**，它已有 `TTS_MAX_CHARS`
+  的句末优雅截断，加 422 会把好手感换成报错。
+- **`/music/status` 的失败不再静默**：宽捕获保留（它是 5 秒一次的轮询读，卡住必须降级成
+  `available=false`，不能拖住事件循环），但补一条 `log.warning`——这条路径坏掉的形态
+  恰恰是「播放条悄悄不见了、什么错都没有」，本文件已经记过同类难排查故障（无日志的超时）。
+  顺手改掉 `except (TimeoutError, Exception)`：`Exception` 本就覆盖 `TimeoutError`，
+  并列写会让人以为两类判据不同。
+- **Vite 只绑一种回环**（`front/vite.config.ts`）：`host: 'localhost'` 在本机解析到 IPv6，
+  实测只有 `[::1]:25173` 在听，`curl http://127.0.0.1:25173` 直接连接被拒
+  （浏览器无感，它两个都试；但后端 FastAPI 是两个回环都绑的，
+  于是「API 用 127.0.0.1 通、前端不通」会误导排查）。Vite 的 `host` 只能给一个地址，
+  Node 也没有「同时绑两个回环但不绑网卡」的写法，所以**不改默认值**（默认绑 0.0.0.0
+  等于把 dev server 与 `/api` 代理暴露到局域网），要跨机访问显式 `WUWA_WEB_HOST=0.0.0.0`。
+
+**第四轮加固（2026-10-23 凌晨，三个只读子智能体审计 + 逐条复核）**
+
+先记一条方法论：子智能体的清单里 **7 条有 2 条是错的或路径不存在**
+（`tools/qqmusic_mcp` 报在 `src/wuwa_rag/tools/` 下、`TtsSection.tsx` 报在 `components/` 下、
+「MusicBar 的 `setSt` 缺 alive 保护」在 React 18 下是无害的）。
+所以每条都先读代码再动手，判据是「这条改动会不会让某个真实故障变可见/变不发生」。
+
+- **入库必须有自己的一档**：`/ingest` 与 `/knowledge/refresh` 此前只吃 200/minute 的兜底档
+  （等于没限），而一次提交要跑「爬外部 wiki → 分块 → 写 PG/S3 → BM25 全量重建 → 写 Neo4j」
+  并改动**全体用户共享的语料**。现在两端口共用 `shared_limit(RATE_LIMIT_INGEST, "ingest")`
+  （默认 5/hour，按登录用户）。⚠️ 与 `ask` 档同一条铁律：**分开计数就能换端点绕过**。
+  `/ingest/control`（暂停/继续/取消）**故意不占额度**——排队时连止损都做不了就本末倒置了。
+- ⚠️ **口令类 CPU 必须离事件循环**（本轮实测数字）：`hashlib.scrypt` 单次 **733ms**、
+  PBKDF2-HMAC-SHA256 20 万次单次 **50ms**（本机 python3.13 实测）。这些是**同步**函数，
+  原先直接在 async 处理函数里调 —— 一次登录就把整个 API 钉住 0.73 秒，
+  并发登录等于全站停摆，而且改密/解锁/保存凭据这五个端点当时**没有任何专属限额**。
+  现在 `api/auth.py` 四处 + `core/llmstore.py` 五处 `await asyncio.to_thread(...)` /
+  `_derive_async(...)`（`_bootstrap` 是同步函数，在**调用它的那一步**整体丢线程池），
+  五个端点共用 `shared_limit(RATE_LIMIT_AUTH, "creds")`。
+- **三条判据从「多处各写一遍」收成一处**：
+  ① 角色名：`knowledge/entities.CHARACTER_NAME_PATTERN` 是唯一判据，四个入口共用
+     （`IngestIn` / `IngestControlIn` / `GET /ingest/status?character=` /
+     `DELETE /knowledge/characters/{character}`）；
+     后两个此前**完全不校验**，名字会拼进文件路径、S3 key、Redis 键与 Cypher 参数。
+     （写这条的同时我就把常量名拼错过一次 `CHACTER`，靠导入期 AttributeError 才发现——
+     说明「字符串写四处」的漂移不止是理论问题。）
+  ② `thread_id`：`core/conversations.THREAD_ID_RE` 是唯一判据，
+     `api/app._client_thread_id` 与 `core/feedback.save_feedback` 都引用它
+     （此前 `/feedback` 绕开了校验，可以写入任意超长/带特殊字符的 thread 串）。
+  ③ 反馈各列长度帽：常量只定义在 `core/feedback.py`
+     （`COMMENT_MAX/QUESTION_MAX/ANSWER_MAX/TARGET_ID_MAX/NAME_MAX`），
+     `api/usage.FeedbackIn` 用 `Field(max_length=fb.*)` 引用而不是再抄一遍数字，
+     并由 `test_反馈帽只定义在core一处` 钉住。
+     ⚠️ **键列（thread_id/target_id）必须拒绝而不是截断**：截断会把两个不同的 id
+     折叠成同一个 `(user_id, target_id)`，表现是「给 A 点的赞跑到 B 上」——
+     数据不报错、只是悄悄错位。只有快照三列（comment/question/answer）允许截断。
+- **入库失败原文不再发给全体登录用户**：`crawl_runs.error` / 进度里的 error 是
+  worker 写的 `f"fetch: {exc}"` 之类**异常原文**，可能带 URL、内部路径。
+  项目既有口径是「客户端只给中文一句话，原文进日志」（`on_unhandled`、SSE 的 error 事件都这样），
+  而 `/ingest/records` 与 `/ingest/status` 这两个出口漏了。现在非管理员拿到的是
+  「『抓取』这一步失败了，详情请联系管理员」（用五步快照里第一个 failed 的步骤判，
+  不另起一套判据），管理员照旧看原文；`CANCEL_ERROR` 哨兵**必须原样透出**，
+  因为下游靠它显示「已取消」。
+- 会话搜索转义 LIKE 元字符（`conversations._like_pattern`）：不转义时搜 `100%` 命中全部会话、
+  搜 `a_b` 命中「AXBY」。不是注入（参数化早就挡住了），是**结果不对 + 全表扫**。
+- `api/ratelimit.py` 的文档段曾写「`/docs`、`/redoc`、`/openapi.json` 同样豁免」——
+  **代码里从来没有那段**（全文件只有 `/health` 一处 `@limiter.exempt`）。已改成如实描述：
+  它们走 200/minute 兜底档；要收紧就用 `FastAPI(docs_url=None, ...)` 关掉，
+  而不是留一句假承诺（读的人会以为已经处理过）。
+- `DELETE /ingest/records/{id}` 里那段裸 `psycopg.connect` 补了 `to_thread`：
+  它是同文件里唯一还在事件循环里做同步 PG 往返的地方（其余三处都是 `to_thread` 口径）。
+
+**审过但决定不改的两条**（不改的理由也要留，否则下一个人会再来一遍）：
+
+- `MusicControlIn.action` **不加** `pattern` 白名单。动作词表（12 个 + `volume_set_<float>`）
+  的权威定义在 MCP server 里（`tools/qqmusic_mcp/qqmusic_local_mcp.py:player_control`），
+  它自己会拒绝未知动作并给可读原因；在 API 再写一份就是**第二判据**，
+  而且那个 server 是独立进程、刻意自包含（导入它会把 mcp/comtypes 依赖拖进 API）。
+  已核实没有注入面：`act` 只进 `smtc.control(act)` 与 `float(...)` 解析，
+  `taskkill` 那条分支只在硬编码的 `act == "stop"` 下走。
+- `/auth/register` 的用户名密码**不加** pydantic `max_length`。`api/auth.py` 已经有
+  「2~24 / ≥6」的判据（且已覆盖体积问题），模型层再写一份就是两处判据。
+  TTS 同理：它已有 `TTS_MAX_CHARS` 的句末优雅截断，加 422 会把好手感换成报错。
 
 ### 测试套件（`tests/`，2026-10-06 新增）
 
-`uv run pytest` → **413 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
+`uv run pytest` → **450 条用例、全量离线、约 5s**。pytest 在 `dev` extra（`uv sync --extra dev`）。
 
 十四个文件，各自守一类「功能没坏，只是没被验证」的高危判据：
 
@@ -913,19 +1087,19 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 | `test_entity_names.py` | 角色名提及判定：单字名正样本 12 条 + 常用词负样本 10 条 |
 | `test_intent_routing.py` | 意图分流（双断言 intent+chars）、`is_self_intro` 30 条、`is_identity` 边界 |
 | `test_profile_facts.py` | 画像 `_fact_category` 22 条、注入串拼接与 `MAX_FACTS_IN_PROMPT` 截断 |
-| `test_ratelimit_cors.py` | 限流四档、豁免、429 头、CORS 顺序、真实 app 接线完整性 |
+| `test_ratelimit_cors.py` | 限流各档、豁免、429 头、CORS 顺序、真实 app 接线完整性（含 **`ask`/`ingest`/`creds` 三组必须各自共用一个计数器** —— 分开计就等于换个端点把配额翻倍） |
 | `test_architecture_layers.py` | 分层方向、循环依赖、计数基线、空包清理与同名子包未误删 |
-| `test_config_and_prompt.py` | config 默认值口径、prompt 拆分后 `doc_sources` 再导出与提示词构建 |
-| `test_ingest_control.py` | 入库暂停/继续/取消旗标、状态聚合与操作留痕 |
+| `test_config_and_prompt.py` | config 默认值口径、prompt 拆分后 `all_sources` 再导出与提示词构建、**联网溯源去重与失败原因**（含 `web_*` 三字段每轮清零）、**端口四处对账**（compose 宿主机侧只准引用 `${VAR}`；`.env` 的 `*_PORT` == `config.py` 默认；`ports.ps1` 与 `vite.config.ts` 的兜底值必须等于代码默认；一律不许退回常用端口或落进 Windows 动态区 49152+）、**SSE `done` 事件与落库 meta 同键**（`_done_event` 是唯一构造器，加键忘了进 `_meta_of` 就红）、**日志大类名单与 `get_logger` 调用点双向一致** |
+| `test_ingest_control.py` | 入库暂停/继续/取消旗标、状态聚合与操作留痕、**分块 0 块必须失败**（且失败时不许先把 jsonl 写坏）、**覆盖不全只 warn 不拦路**（PG 挂了也不能带崩入库）、**BM25 缓存随磁盘指纹失效**（文件没变不重载、变了必重载） |
 | `test_music.py` | 音乐 NLU 正/负样本（差一字即漏的动词锚定）、可用性四层判定、as_user 契约 |
 | `test_qqmusic_mcp.py` | MCP server 侧：常驻会话、工具面收敛、搜索降级重试 |
-| `test_security_fixes.py` | 2026-10-09 安全修复回归桩：默认凭据/CORS/XFF/verify 分片/TTS workspace/错误体不泄原文/must_change/`_DECRYPT_ERRORS` 接住 InvalidToken |
-| `test_text.py` | **`text.py` 全部清洗规则的实测基线**：图标残渣 5 正 8 负、`fix_percent_units` 六条红线（`27%5%`/`1%.20%`/术语前瞻/量纲）、`[n]` 剥离与 COST 还原、AnswerFilter 流式（含「短答案整段重复」回归）、`lock_focus`、dedup 只丢整行相同 |
+| `test_security_fixes.py` | 2026-10-09 安全修复回归桩：默认凭据/CORS/XFF/verify 分片/TTS workspace/错误体不泄原文/must_change/`_DECRYPT_ERRORS` 接住 InvalidToken、**反馈键列拒而不截断 + 帽只定义在 core 一处**、**ILIKE 元字符转义**；**云端 chat 客户端禁跟随重定向**（openai SDK 默认 True，会把 `validate_base_url` 只核过第一跳的地址 302 进内网 = SSRF 第二跳） |
+| `test_text.py` | **`text.py` 全部清洗规则的实测基线**：图标残渣 5 正 8 负、`fix_percent_units` 六条红线（`27%5%`/`1%.20%`/术语前瞻/量纲）、`[n]` 剥离与 COST 还原、AnswerFilter 流式（含「短答案整段重复」回归）、`lock_focus`、dedup 只丢整行相同、**两条输出口都只过 `_clean_answer`**（源码判据，防再出现「④ 补了 ①②③ 漏」） |
 | `test_guard.py` | 防复读闸：整句重复三次必中/两次放行、周期块循环（计数后缀形态）从最早块截断、退化块后跟正常内容也能算出切点、材料表/技能 13 行/短碎句负样本不命中、流式逐 token 触发 |
 | `test_team_prune.py` | 名册归一五类形态（漂泊者补男属性/剥括号/剥位置词/前缀最长匹配/纯槽位→None）+「绝不猜着切」红线；`_covers` 逐位不摊平、等价对互 True、占位串判定、镜像指纹 |
 | `test_offline_gate.py` | **守卫的守卫**：conftest 的非回环 socket/DNS 拦截必须真的能红（fixture 写错条件恒假 = 离线约束静默失效） |
 
-**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热））。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
+**全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
 三条写用例时必须遵守的经验（都是实际踩过的）：
 
@@ -933,7 +1107,7 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 - ⚠️ **写断言前先实测键名/返回值形态**。`check_layers.modules()` 的键**不带** `wuwa_rag.` 前缀（是 `dialog.prompt`）。若按直觉写成 `assert "wuwa_rag.rag" not in modules`，该断言**恒真**——空包回来了也不会红。这类假绿靠跑测试发现不了，只能靠「变异测试」：临时造回一个空包（`src/wuwa_rag/storage/__init__.py`），确认对应用例真的变红，再清理。
 - ⚠️ **`limiter` 是模块级单例**，合成 app 必须 **module 级只建一次**（`scope="module"` fixture）。每个用例都新建 app 会把同名端点反复注册进 `_route_limits`，导致①真实 app 接线断言看到多余项、②同一路由挂上多份限额使 429 提前。断言真实 app 时还要按 `wuwa_rag.api.app.` 前缀过滤掉合成端点。
 
-**覆盖边界（诚实说明）**：`tests/` 里的 413 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
+**覆盖边界（诚实说明）**：`tests/` 里的 450 条单测守的是**判据**（规则层），不是**效果**（检索质量）。检索质量由另外两个工具覆盖：
 
 - **`tests/eval_retrieval.py`**：检索质量评测脚本。依赖真实向量索引（Chroma + BM25）与本地 reranker 权重，所以**不离线**、需 `data/chroma/` 完好；文件名不以 `test_` 开头，pytest 不会收集（缺索引不会假失败）。手动跑：`uv run python tests/eval_retrieval.py [--topk N] [--stage recall|rerank] [--json]`，17 条约 1~2 分钟（每条要跑一次 CrossEncoder）
 - **`tests/retrieval_eval_dataset.json`**：17 条带标注 query（6 人工标注 + 8 声明式选择器 + 3 真域外负样本），覆盖 fact / semantic / multi / single_char / value_table / negative。两种标注可混用：
@@ -957,11 +1131,208 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 - **`tests/ab_topk_rerank_in.py`**：`TOPK_RERANK_IN` 的 A/B 实测脚本（一次性诊断用，非测试）。2026-10-06 跑过 20/25/30/40 四档，**结论是维持 20**——详见 `config.py` 该参数的注释（含完整数据表与「首版 A/B 因把 `TOPK_RERANK_IN` 误当 `topk` 而得出相反结论」的教训）。
 - ⚠️ 绝对值受评测集规模与标注松紧影响，**只用于同一评测集下不同参数的相对比较**，别跨版本比绝对值。
 
+**前端也有测试基线了（2026-10-23 新增，`front/`）**：`cd front && npm test` → **vitest 35 条 / 4 个文件，纯 node、不起浏览器、不碰后端**。
+装的是 `vitest@^2`（**不是最新**：vitest 5 的 peer 要求 vite ≥6，而本项目是 vite 5.4；
+升 vite 会牵动构建与没人目视验证过的界面，所以按 vite 5 选大版本）。
+
+| 文件 | 守什么 |
+|---|---|
+| `store/useStore.test.ts`（12 条） | 见下面 ①~④（断流落 error、两条路径同判据、loading 态被消费、clearAll 失败不误报已清空）+ **三条出口都把 `message_id` 换进气泡 id**（流式 send / regenerate / 非流式 `/ask`），并断言非流式那份 meta 与流式**键集合相同**（它原先真的少了 `web_reason`） |
+| `styles/tokens.test.ts`（12 条） | **配色令牌的可读性契约**：9 个「文字角色」令牌在两主题的每块平底下都 ≥4.5:1；**同一条规则里「文字色 × 半透明底」的组合**按 alpha 合成后也要过；语义饱和色（`--accent/--ok/--warn/--err/--accent-2/3`）不许再被直接当 `color:`（只准 `-text` 档）；浅色主题必须真的覆盖那六个 `-text` 令牌。详见「主题与配色令牌」一节 |
+| `lib/format.test.ts`（4 条） | 时间/字节格式化的三条判据：**null / 空串 / 畸形串一律「—」**（裸写 `toLocaleString` 时这些会印成 "Invalid Date"）、24 小时制不许出现「上午/下午」、KB 一位小数且 0 走破折号 |
+| `lib/feedbackHydrate.test.ts`（7 条） | 评价回填的**同帧合并**（三条气泡只发一个 `/feedback/mine`）、非服务端 id 不发、按 apiBase 分批、成功落缓存/失败不落缓存（否则永远回填不上）、`rememberRating` 必须覆盖旧缓存、取消只丢回调不丢别人的回调 |
+
+`useStore.test.ts` 守的是**这一批真实缺陷**：
+① SSE 干净断流（流结束但没收到 `done`）必须落 `error` 态而不是永停「帮家人找资料…」；
+② **同一条判据在 `send` 与 `regenerate` 两条路径都成立**——修复时只补 `send` 就漏了它，
+   所以两条各有一例（`metaOfDone` 也由此收成一份，后端加字段只改一处）；
+③ `loadingConvs` 在请求期间为真（这个字段曾只写不读，于是加载期拿空状态冒充「没有数据」）；
+④ `clearAll` 失败返回 `false` 且不许清本地列表（旧写法吞掉异常还照报「已清空」）。
+替身纪律：整个 `../lib/api` 用 `vi.mock` 顶掉；`listConversations` 在「新建会话」用例里
+**必须返回那条会话**，否则会撞上 `loadConversations` 里「当前会话已不存在 → 退回草稿态并清空
+messages」这条**正确**逻辑，测出来的是替身不像真而不是代码有问题（踩过）。
+带模块级状态的用例（`feedbackHydrate` 的缓存）每条都要 `vi.resetModules()` + 动态 `import()`
+取一份干净实例，共享一份模块会让用例互相污染；计时器用 `await vi.advanceTimersByTimeAsync()`
+而不是 `advanceTimersByTime()`——后者不排微任务，`await` 掉的响应永远落不到断言里（踩过）。
+变异验证：把两条断流判据改回旧写法 → 恰好那 2 条红，还原即绿；
+配色那条同理做过三次（把 `--accent-text` 退回 #0f766e → `.kb-count` 那组红；
+往 `_done_event` 加一个新键 → done/meta 那条红；把 `cached.set` 删掉 → 缓存那条红）。
+
 `pyproject.toml` 的 `[tool.pytest.ini_options]` 里 `asyncio_mode = "auto"` **不能省**：pytest-asyncio 1.x 默认 strict，不声明会让异步用例**静默跳过**（不失败，根本不跑），比没测试更危险。
+
+### 前端交互收口（2026-10-23）
+
+界面这一侧的几条**规则**（不是改动清单，改这些组件前先读）：
+
+- **破坏性操作的两步确认只有 `components/ConfirmButton.tsx` 一处实现**。全站 5 个调用点。
+  四条不可回退的行为：① 待确认态定时器挂在组件 ref 上并在卸载时清掉（列表行删完组件就没了，
+  旧写法会把回调留到已消失的行上）；② 外部把按钮置灰（`disabled`/`busy`）必须同时解除待确认，
+  否则恢复可点那一瞬间用户看到的还是「再点一次」，等于默认放行了一次破坏操作；
+  ③ **`title` 在待确认态不许抑制**——知识库两处删除把后果（清文档/索引/图谱、只删账本不动流水线）
+  只写在 `title` 上，按钮脸上的文案只是「再点一次确认删除」不含后果，而那一刻正是用户
+  最需要读到它的瞬间（触屏没有 tooltip，这条已经是仅存的提示通道）；
+  ④ 自动解除时长只有一个模块常量 `AUTO_DISARM_MS = 4000`，
+  曾经挂在组件上的 `autoDisarmMs` prop 没有任何调用点用过它，已删（要按站点调手感时再按需求加回来，
+  不要为假想需求留开关）。
+- **`GET /feedback/mine` 的回填走 `lib/feedbackHydrate`，不许在气泡里直接发请求**。
+  同帧挂载的 id 合并成一个请求、按 apiBase 分批、成功落缓存/失败**不**落缓存。
+  三条判据都有用例（见测试套件表）。为什么不「把 rated 从 ChatPage 往下传」：
+  回填是每个气泡自己的显示增益，调度权不该交给列表；合并层放在 lib 里也才测得了
+  （组件级测试要引 React 测试环境，而本项目 vitest 跑的是纯 node）。
+  ⚠️ 提交成功后必须 `rememberRating(id, rating)`：缓存里可能已有这条的 `0`（挂载时问过、
+  那时还没评），不回写就会出现「点完 👍 切走再切回，按钮显示没评过」。
+- **层级与尺寸只从令牌取**：`--z-gate` / `--z-toast`（登录门禁与 toast 谁压谁都写死在令牌里，
+  不要再在组件里写 `z-index: 9999`）、`--fs-*` / `--space-*`、内容宽度 `--content-max`
+  （唯一入口在 `App.tsx` 写 CSS 变量，页面自己再写一套 max-width 就会「设置里调了没反应」）。
+  同一条弱化提示底色全站共用 `.kb-warn, .set-warn` 一个原语，别再复制第二份黄底。
+- **`done.message_id` = 这条回答的 `messages` 行号，前端必须拿它换掉气泡的本地 uid**
+  （`store/useStore.ts` 的 `send` 与 `regenerate` 两处 + 非流式 `/ask` 的 `AskOut.message_id`，
+  三条出口都要换）。原因：满意度反馈按 `msg.id` 提交，而本轮新气泡出生时只有 `uid()` 随机串——
+  不换就会把评价挂到一个「刷新后再也不会出现」的 id 上，表现为
+  「刚点过 👍，刷新回来变成没评过」+「同一条回答能被评两次（一次 uid、一次数字 id）」。
+  评价记录本身没丢，丢的是**归属**，所以这类 bug 靠后端查是查不出来的，只能前端自证。
+  键的归属：`message_id` 与 `done`/`thread_id`/`answer` 一样属于**事件信封**，不进 `messages.meta`
+  （`_meta_of` 的白名单里没有它，契约用例按这个集合断言）。
+- **展示格式化只有一份：`lib/format.ts` 的 `fmtTime / fmtDate / fmtSize`**。
+  原来 `fmtTime` 在 `KnowledgePage.tsx` 与 `AdminUsersCard.tsx` 里**逐字重复两份**，
+  而 `FeedbackPanel.tsx`、`HistoryPage.tsx` 干脆裸写 `new Date(x).toLocaleString('zh-CN')` ——
+  裸写的两处遇到 null/空串会把 **"Invalid Date"** 直接印在界面上（时间戳为空的记录是真实存在的）。
+  两处重复 + 两处裸写 = 四种口径；现在四处都调用同一份，异常值统一成「—」。
+- **图表的空态文案不许写死天数**：用量面板可以选 1/7/30 天，
+  而 `UsageCharts` 的两个子图原来硬编码「近 7 天没有用量」——选 30 天时看到这句话就是假信息。
+  现在 `days` 由 `UsagePanel` 传进来（两个子图各自接一次），与表格里已有的 `近 {days} 天…` 同口径。
+- **`@media (prefers-reduced-motion: reduce)` 只写一条全局规则**（`global.css`）。
+  原先只有 `ConfirmButton.css` 自己处理，`blink`（在线点）、`dot-bounce`（进度点）、
+  `fade-up`（气泡入场）、`spin`（加载圈）照旧无限转。
+  ⚠️ 写法是「时长压到 0.01ms + 只跑一轮」而**不是** `animation: none`：
+  转圈是「正在进行」的反馈，彻底抹掉会让用户以为界面卡死。
+- **输入框去掉默认描边后必须自己补聚焦态**：`.kb-search input` 与 `.session-edit input`
+  都写了 `outline: none`（内部无边框的观感需要它），但没有任何替代 —— 键盘用户看不出光标在哪。
+  现在按 `.hist-search:focus-within` 的既有口径补上（外壳描边 / `:focus-visible` 描边）。
+- ⚠️ **这台机器上的浏览器实测有一个硬限制**：in-app 浏览器视口是 0×0，
+  `getBoundingClientRect()` 全部返回 0、截图工具直接报 `NATIVE_BROWSER_VISPORT_UNAVAILABLE`。
+  所以「尺寸类/视觉类」的结论不能靠量 DOM 得到；改成的口径是
+  ① 颜色对比：遍历 DOM 用 `getComputedStyle` 按 alpha 合成底色后算比值（这个不需要视口）；
+  ② 规则是否真的生效：查**构建产物** `dist/assets/*.css` 里有没有那条选择器
+     （`grep -o "kb-search:focus-within{[^}]*}"` 这种），比读源码更接近真相。
+
+- **列表行不是按钮**：会话行用 `div` + `tabIndex` + `keydown`，不要加 `role="button"`
+  （行内有删除按钮，嵌套可点击元素对读屏是非法结构）；`onClick` 里必须判
+  `e.target !== e.currentTarget` 才返回，否则点行内按钮会连带切会话；
+  当前会话行用 `aria-current` 而不是只靠颜色。
+- **toast 容器常驻挂载**（`aria-live="polite"`）：条件渲染会让读屏错过第一条播报。
+
+- **行内操作不能只在 `:hover` 出现**：会话栏的「重命名 / 删除」原本只有
+  `.session-item:hover` 一支显示规则，而 `display:none` 是把按钮整个移出 tab 序的——
+  键盘用户**永远够不到**，触屏用户（没有 hover 事件）也永远看不见。
+  现在是 `:hover` / `:focus-within` / `:focus-visible` 三支 + `@media (hover: none)` 常显
+  （行本身 `tabIndex=0` 可聚焦，所以顺序是「聚焦行 → 按钮出现 → Tab 进入按钮」）。
+  ⚠️ 不要退回「常显」：会话栏只有 248px，图标常驻会把标题挤成三五个字。
+  图标按钮同时补了 `min-width/min-height: 24px`（WCAG 2.5.8 最小可点区；
+  用 min-size 而不是加 padding，因为加 padding 会把整行撑高）。
+  实测口径：这些规则是否真的下发，看 `dist/assets/*.css` 里的
+  `session-item:focus-within` 与 `@media (hover: none)` —— 本机的 in-app 浏览器
+  视口是 0×0，`getBoundingClientRect()` 全是 0，**量不了尺寸**，只能查 CSSOM/产物。
+- **「读不到」绝不能渲染成「没有」**：新增 `components/LoadFail.tsx`，
+  用在画像卡、云端模型、语音合成三处。原来的形态是三处各写了一遍同一句谎话——
+  `load()` 里 `catch { setFacts([]) }` / `st`/`cfg` 留 null，渲染分支把 null 当
+  「还没配过」，于是后端一挂界面就说「你还没有画像 / 尚未配置」，
+  用户会去多聊两句、去重填表单，而不是重试。⚠️ 只改了这三处：知识库/用量/反馈各面板里同型的「catch 后当空态」还没逐个核。
+- **删除会话要成功了才报成功**：`deleteConversation` 改成返回 `Promise<boolean>`
+  （与 `clearAll` 同口径），`HistoryPage` 只在 `true` 时 toast「会话已删除」；
+  原来无条件报成功，失败时同一屏会出现「删除失败」与「已删除」互相打脸。
+- **`target="_blank"` 必须钉 `rel="noopener noreferrer"`**：`markdown.ts` 里
+  `ADD_ATTR: ['target']` 只是**放行**这个属性，答案里的链接来自检索语料与模型输出，
+  写不写 rel 不由我们控制 —— 所以在 `afterSanitizeAttributes` 钩子里统一补，
+  而不是拿正则去改已经净化好的 HTML 字符串。
+- **react-router 的两个 v7 future flag 显式打开**（控制台从此只剩真消息）：
+  打开前逐个核过行为中立性 —— 全站 `to=` 都是绝对路径（grep `to="[^/]` 为空），
+  唯一的 splat `path="*"` 渲染的是 `<Navigate to="/" replace />`，
+  所以 `v7_relativeSplatPath` 是 no-op；`v7_startTransition` 只影响路由引起的
+  state 更新批次，本应用状态在 zustand 里、导航只有 7 个扁平页面。
+  实测：六页来回点正常、控制台从 5 条降到 3 条（剩下的是 vite debug 与 DevTools 提示）。
+
+**第五轮：复核自己今天的 diff（两条真实回归，都值得记）**
+
+- ⚠️ **「静默降级」的诊断函数必须留痕，测试必须能验它「出声」**。`worker._warn_missing_characters`
+  里我写了 `r["character"]` —— 但 `core/db.py` 的池**没有** dict_row factory（那是 authdb 池才有的），
+  psycopg3 默认返回**元组行**，于是每次都是 TypeError → 被这个诊断自己的宽 except 吞掉 →
+  函数变成「永远不会出声的死代码」，而它的 docstring 写着会写日志。
+  我的第一条用例还把 `get_cursor` stub 成「直接抛」，只验了「不拦路」，完全没验「能 warn」——
+  这就是 AGENTS 里反复警告的**假绿**。修法两件事一起做：
+  ① 按位置取列（`{r[0] for r in await cur.fetchall() if r[0]}`，与本仓其余 `core.db` 用法一致）；
+  ② 补一条**返回元组行**的用例，断言 `log.warning` 真的被调用（`test_覆盖不全时真的写出warning`）。
+  变异验证：把判据改回 `r["character"]` → 恰好这条用例红。
+  推广出来的规矩：**宽捕获可以，但要 `log.debug("…跳过: %s", type(exc).__name__, exc)` 留痕**；
+  只 stub 成抛异常的测试等于没测这条分支。
+- **给「行」加内联按钮时，防冒泡不能写成 `e.target !== e.currentTarget`**。
+  会话行是 flex 容器、面积几乎全被图标与标题（`flex:1`）占满，那条判据等于
+  「只有 8px 内边距能点」——点标题不切会话（我第二轮引入的真回归，第五轮才被抓到）。
+  正确判据是按**容器**：`if ((e.target as HTMLElement).closest('.session-ops, .session-edit')) return`。
+  键盘侧（`onKeyDown`）保留 `e.target !== e.currentTarget` 是**对的**：那里要的就是
+  「焦点落在行本身才算数」，两者语义不同，别再统一成一份。
+- **采纳服务端 id 必须同时把列表 key 与 id 解耦**。`done.message_id` 换 id 之后
+  `key={m.id}` 变了 → React 卸载重挂那条气泡，答案刚收尾的一瞬间**重播 0.32s 入场动画**（闪一下）。
+  现在 `Message.listKey` 出生即定、永不改写，列表 key 用 `m.listKey ?? m.id`。
+  推广：凡是「前端临时 id → 服务端真 id」的替换，都要问一句「有没有什么以 id 为身份」。
+- **焦点环也是非文字对比度，门槛 3:1**：`ConfirmButton.css` 的 `outline` 原先用饱和
+  `--accent-2`（浅底实测 2.98:1，刚好不达标），换成 `--accent-2-text`；
+  它自带的那份 `prefers-reduced-motion{animation:none}` 也删了，只留 global.css 那一条
+  （两份实现不但重复，写法还互相矛盾：全局刻意不写 `none`）。
+- 顺带收掉一处措辞重复：入库失败原因的掩码文案原先在 records 里内联写一遍、
+  `_public_step_error` 里又写一遍，现在只有后者一处，且它不再自己打日志
+  （那个端点被前端 3s 轮询，按条写会刷满；改成整批汇总一条）。
+
+### 主题与配色令牌（2026-10-23）
+
+**浅色主题是事后补的，只补了 `--text-*` 三档 —— 语义色整族在浅底上全是洗掉的。**
+`--accent / --accent-2 / --accent-3 / --ok / --warn / --err` 在深色底上是 7~13:1，
+同一份色值放到白底实测只有 **1.29~2.98:1**，而全站有 **36 处** `color:` 直接引用它们：
+浅色主题里错误按钮、「已收录」标签、markdown 链接、点赞/点踩选中态、入库进度点文字
+全部洗成一片淡彩。默认主题是深色，人眼扫一遍很容易漏，所以它活到今天。
+
+三条口径，改配色前必读：
+
+1. **饱和色只用于装饰，文字/图标一律走 `-text` 档**。不在浅色主题里整体覆盖 `--err`：
+   状态圆点、toast 左边框、开关滑块要的是「信号灯」，加深反而像脏了。
+   `--accent-2-text` 是这个家族最早的一个（早有注释说明「两者是不同的颜色，不是别名」），
+   本轮把它补齐成六个：`--accent-text / --accent-3-text / --ok-text / --warn-text / --err-text`。
+   深色主题这些基本就是原色别名，唯一例外 `--err-text: #fca5a5`（见下面第 3 条）。
+2. **逐个底色核，不许只看白底**：`--bg-deep` 浅色是 #eceff8，**比白底更深**，
+   所以「白底 4.74:1 合格」的 `--text-muted` #69738c 在它上面只有 **4.12:1**、
+   在 `--bg-base` #f4f6fc 上 4.39:1 —— 三块浅底里两块不达标（正是搜索框、空态、进度点
+   走的路径）。现值 #5f6a83：5.42 / 4.71 / 5.01。
+   浅色 `-text` 一族取值：teal `#0d655c`、indigo `#5a4bd6`、pink `#a21caf`、
+   green `#047857`、amber `#92400e`、red `#b91c1c`。
+   常见的 `#0d9488 / #dc2626 / #b45309` 在纯白上是 3.74 / 4.83 / 5.02，
+   「看着像过了」，落到 `--bg-deep` 只有 3.26 / 4.20 / 4.37 —— 别按白底选色。
+3. **半透明芯片比平底更深**：`--grad-soft` 是两层 0.16 alpha 的品牌渐变，
+   叠在白底上合成出 rgb(211,232,248)。`--accent-text` 当时取 #0f766e：五块平底全过
+   （最差 4.76），落到 `.kb-count` 这个芯片上只有 **4.34:1**。现值 #0d655c（芯片 5.50、
+   平底 6.02~6.92）。深色同理，`--err-text` 的待确认态芯片（`--err-tint-14` 叠在
+   `--bg-hover` 上）让 #f87171 掉到 4.34，提到 #fca5a5 后 6.33。
+   ⚠️ 算这类底**必须按 alpha 逐层合成**，拿令牌原色或拿平底代替都会得出错的比值。
+
+`::selection` 也是同一类：白字压在浅靛选中芯片（`--accent-2-tint-38` 叠白底）上实测
+1.46:1 —— 划选一段文字等于整段看不见；深色主题同一组合是 9.90:1，所以只在浅色主题里
+把选中字换成墨色档（`[data-theme='light'] ::selection`）。
+
+**静态契约**：`front/src/styles/tokens.test.ts` 把这些变成断言（9 个文字令牌 × 两主题 ×
+五块平底、以及「同一条规则里的 文字色 × 半透明底」组合、语义饱和色不许再直接当 `color:`、
+浅色主题必须真的覆盖六个 `-text` 令牌）。它按 `themeScope/tailOf` 跳过被主题作用域覆盖过的
+基础规则，否则 `.markdown code` 那种「深色给 #b9c2ff、浅色给 #5a4bd6」会报假案。
+
+**浏览器实测口径**（一次性核对，非门禁）：遍历 `body *` 里**有自有文字节点**的元素，
+把自身与祖先的 `backgroundColor` 和渐变 stop 按 alpha 依次合成，再按字号/字重取
+4.5 或 3.0 的门槛。两个必须知道的坑：
+① 隐藏页面里 **CSS 过渡不推进**（`transition: all` 让 `getComputedStyle().color` 停在
+   切换主题前的值），要先注入 `*{transition:none!important}` 再测；
+② 渐变色底不能用「平均色当不透明底」，会把 `.btn-primary` 的深墨字误判成 1.0:1。
+实测结果：6 个页面 × 2 主题、790 个文字元素，除上述合成口径造成的假阳性外为 0 项不达标。
 
 ### 日志
 
-`ww_logger.get_logger(name)` → `logs/<name>.log`，**一个大类一个文件**（既有 logger 名：app/upload/rag/neo4j/vec/bm25/celery），每日轮转留 7 天，另有 `app.log` 兜底。每行格式 `时间 | 级别 | role | logger | 消息`，**role 列**逐行标注是谁写的：`api`（FastAPI）/ `worker`（Celery）/ `main`（兜底）。⚠️ **文件不再按 role 拆分**（曾产出 `rag.api.log` / `rag.worker.log` / `rag.main.log` 一堆文件，2026-09-22 已废止）：api 与 worker **共写同一个 `rag.log`**，靠 role 列区分，跨进程轮转安全由 `concurrent-log-handler` 的文件锁保证。**`start.ps1` 启动的两个窗口会显式注入 `WUWA_LOG_ROLE`**（Celery=worker、FastAPI=api），argv 推断只是兜底——注意 `python -m wuwa_rag.api.server` 时 `sys.argv[0]` 是模块**文件路径**（反斜杠），必须先归一化斜杠才能匹配 `wuwa_rag/api`（2026-09-22 首轮线上就因漏了这步，API 进程的 role 被记成 `main`）。
+`ww_logger.get_logger(name)` → `logs/<name>.log`，**一个大类一个文件**（名单在 `ww_logger._MODULE_LOGS`：app 是 root 兜底，独立文件 17 个 —— upload/rag/neo4j/vec/bm25/celery/auth/conv/usage/feedback/profile/llm/llmstore/tts/emotion/music/settings），每日轮转留 7 天，另有 `app.log` 兜底。⚠️ **`_MODULE_LOGS` 漏一个名字不报错，只会让那个 logger 静默落进 `app.log`** —— 排查时按大类去翻 `<name>.log` 就会读成「这条链路没跑」（`music` 与 `auth` 长期如此，2026-10-23 补全并由 `test_config_and_prompt.py::test_日志大类名单与调用点一致` 双向钉住：调用点用了却没进名单 = 红；名单里留着没人引用的名字 = 也红）。扫描调用点时两个坑：名字带数字（neo4j/bm25），以及引号两种风格混用（`get_logger('upload')` 与 `get_logger("rag")`）。每行格式 `时间 | 级别 | role | logger | 消息`，**role 列**逐行标注是谁写的：`api`（FastAPI）/ `worker`（Celery）/ `main`（兜底）。⚠️ **文件不再按 role 拆分**（曾产出 `rag.api.log` / `rag.worker.log` / `rag.main.log` 一堆文件，2026-09-22 已废止）：api 与 worker **共写同一个 `rag.log`**，靠 role 列区分，跨进程轮转安全由 `concurrent-log-handler` 的文件锁保证。**`start.ps1` 启动的两个窗口会显式注入 `WUWA_LOG_ROLE`**（Celery=worker、FastAPI=api），argv 推断只是兜底——注意 `python -m wuwa_rag.api.server` 时 `sys.argv[0]` 是模块**文件路径**（反斜杠），必须先归一化斜杠才能匹配 `wuwa_rag/api`（2026-09-22 首轮线上就因漏了这步，API 进程的 role 被记成 `main`）。
 
 ✅ **跨进程日志轮转（已修，2026-09-22）**：曾因 FastAPI 与 Celery worker 共用同一个 `rag.log`，`doRollover` 的「先 close 自己的 stream、再 os.rename」被另一进程占用句柄 → `PermissionError [WinError 32]`；且 `shouldRollover()` 此后会逐条重试这个失败的 rename，**该 logger 当天所有日志一条都写不进去**（实测指纹：`app.log` / `neo4j.log` 都产出了 `.2026-09-21` 轮转文件，唯独 `rag.log` 没有且停更）。
 修法（两层）：① **基类换成 `concurrent-log-handler` 的 `ConcurrentTimedRotatingFileHandler`**（即 `_SafeTimedRotatingFileHandler`）—— 靠**跨进程文件锁**协调轮转 + 基于文件 mtime 智能判断是否真需轮转，这才是根治，也让「api 与 worker 共写同一个 `rag.log`」重新成立（这正是按 role 拆文件的做法被废止的前提）。实测两进程对齐同一时刻并发 `doRollover()`：双双成功、无异常、只产出**一份**轮转产物、12 行日志一条不丢，且没有兜底 warning（说明是锁机制本身起效，不是靠兜底救场）。② 兜底：`doRollover` 抛 `OSError` 时重开 stream + 把 `rolloverAt` 推到次日，只留一条 warning，避免该 logger 整天哑掉。`_process_tag()` 现在只用于给每行日志打 role 标签（见上条），**不再参与文件名**。

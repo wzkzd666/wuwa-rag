@@ -42,7 +42,7 @@ log = get_logger("rag")
 # 补充：「家人问的是哪位，那位所在的那个『或』组只列他」这条**不在
 # _SYSTEM 里写**（写过，实测完全不生效：问守岸人时答案照旧输出 `守岸人 / 维里奈 / 白芷`）。
 # 它已改由 `text.lock_focus` 在**数据侧确定性落实**：图谱（retrievers.graph_search）与
-# 参考文档（chain._lock_focus）进 prompt 之前，含本次角色的「或」组就已收窄成他本人。
+# 参考文档（本模块 `_lock_focus`）进 prompt 之前，含本次角色的「或」组就已收窄成他本人。
 SYSTEM_PROMPT = """依据下面的资料作答。你是爱弥斯（《鸣潮》里那个爱笑、话多的女孩），资料是
 存档记录，要用你自己的口吻把它讲给家人听。
 
@@ -83,6 +83,35 @@ def doc_sources(docs: list[dict]) -> list[str]:
         seen.add(bc)
         out.append(bc)
     return out
+
+
+def web_source_lines(web_sources: list[dict]) -> list[str]:
+    """联网溯源 → 引用面板用的字符串行（与 `doc_sources` 同形态，前端不用改）。
+
+    为什么单列：以前溯源只拼进 prompt 文本（`- title: url`），`done.sources` 里
+    根本没有它 —— 于是**靠联网答出来的内容，引用面板是空的**，
+    而「这句是从哪儿查来的」恰恰是联网答案最需要被看见的部分。
+    标题截到 40 字：面板一行放不下长标题，宁可短而可核对。
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in web_sources or []:
+        url = str(s.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title = str(s.get("title") or "").strip()
+        out.append(f"联网 › {title[:40]} · {url}" if title else f"联网 › {url}")
+    return out
+
+
+def all_sources(docs: list[dict], web_sources: list[dict] | None = None) -> list[str]:
+    """引用面板的**唯一**口径：文档面包屑 + 联网溯源，按此顺序。
+
+    `/ask`（非流式）与 `/ask/stream`（SSE done）两条出口都走它 —— 分开拼迟早一边
+    加了另一边忘（本仓已有多处「同一语义两处判据」的记录）。
+    """
+    return doc_sources(docs or []) + web_source_lines(web_sources or [])
 
 
 def _lock_focus(text: str, characters: list[str]) -> str:
@@ -201,7 +230,7 @@ def build_prompt(context: str, question: str, blocks: list[str] | None = None,
         （否则术语表/作答要求会重复两遍，白白吃 token 且稀释指令）。
       两条路径的 `## 资料 / ## 问题 / tail / 输出格式` 部分完全一致。
 
-    参数 now 非空表示「这句里顺带问了时间」（intent.mentions_time + chain._now_if_needed）：
+    参数 now 非空表示「这句里顺带问了时间」（nlu.mentions_time + graph._now_if_needed）：
     它是一句**附带**信息，所以放近因位、与 user_context 同级，措辞明确只要求顺带提一句。
     """
     # 不在这里注入 /no_think：实测它对 aemeath 无效（仍 38s + 'v' 泄漏前缀 + 触发
@@ -229,7 +258,7 @@ def build_prompt(context: str, question: str, blocks: list[str] | None = None,
         tail += ("\n用户已经点名了一支具体队伍，本轮就围绕这一支展开："
                  "成员是谁、怎么打（出手顺序 / 循环）、为什么这么配。")
     if user_context:
-        # 用户画像（rag/profile.py，user_facts 表）：注入到近因位。措辞是「可参考」
+        # 用户画像（services/profile.py，user_facts 表）：注入到近因位。措辞是「可参考」
         # 而非硬要求——画像只是个性化佐料，答错资料比忽略画像严重得多；且不写
         # negative-example（本文件铁律：反例会被当成样本照抄）。
         tail += ("\n\n## 这位用户的小档案\n"
@@ -237,7 +266,7 @@ def build_prompt(context: str, question: str, blocks: list[str] | None = None,
                  "回答时可以自然贴合这位玩家的情况（比如TA主玩的角色、熟悉程度），"
                  "与资料冲突时以资料为准。")
     if now:
-        # 顺带问了时间（见 intent.mentions_time / chain._now_if_needed）：
+        # 顺带问了时间（见 nlu.mentions_time / graph._now_if_needed）：
         # 服务端真值放近因位，与「小档案」同级——它只是附带一句，不能挤掉资料主体。
         # 措辞只写「怎么做」（本文件铁律：不写否定式反例，模型会照抄反例）。
         tail += ("\n\n## 现在的时间（服务端真实时钟）\n"

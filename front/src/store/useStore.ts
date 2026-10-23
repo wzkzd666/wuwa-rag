@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import type {
-  AuthInfo, ConversationMeta, IngestRecord, Message, Settings, StreamEvent, StoredMessage,
+  AskMeta, AskOut, AuthInfo, ConversationMeta, IngestRecord, Message, Settings, StreamEvent, StoredMessage,
 } from '../types'
 import * as api from '../lib/api'
 
@@ -150,8 +150,8 @@ interface Store {
   newConversation: () => void
   selectConversation: (threadId: string) => Promise<void>
   renameConversation: (threadId: string, title: string) => Promise<void>
-  deleteConversation: (threadId: string) => Promise<void>
-  clearAll: () => Promise<void>
+  deleteConversation: (threadId: string) => Promise<boolean>
+  clearAll: () => Promise<boolean>
 
   // 问答
   send: (text: string) => Promise<void>
@@ -168,7 +168,44 @@ interface Store {
   checkHealth: () => Promise<void>
 }
 
-/** 当前正在进行的一次流式请求的中断器 */
+/**
+ * 回答的元信息 → 消息 meta。**三条出口共用这一份键表**：
+ * 流式 `send`、流式 `regenerate`、非流式 `/ask`。
+ *
+ * 为什么要收成函数：三条原先各手写一遍七个键，后端每加一个字段都得记得改三处
+ * （`web_reason` 就差点成为漏网的——实测非流式那一份**真的漏了**它，
+ * 只在关掉 stream 时表现为「联网失败的原因不显示」）。
+ * 参数取两个来源的**交集字段**，所以 TS 会强制两边都给齐。
+ */
+type MetaSource = Pick<
+  Extract<StreamEvent, { done: true }>,
+  'intent' | 'slots' | 'characters' | 'docs' | 'sources' | 'truncated' | 'emotion' | 'web_reason'
+>
+& Partial<Pick<AskOut, 'intent' | 'slots' | 'characters' | 'docs' | 'sources' | 'truncated' | 'emotion' | 'web_reason'>>
+
+function metaOf(evt: MetaSource): AskMeta {
+  return {
+    intent: evt.intent,
+    slots: evt.slots,
+    characters: evt.characters,
+    docs: evt.docs,
+    sources: evt.sources,
+    truncated: evt.truncated,
+    emotion: evt.emotion,
+    web_reason: evt.web_reason,
+  }
+}
+
+/** 新建一条助手气泡（`send` 与 `regenerate` 同一形状，故收成一处）。见 `Message.listKey` 的注释。 */
+function newBotMsg(): Message {
+  const id = uid()
+  return {
+    id, listKey: id, role: 'assistant', content: '',
+    createdAt: Date.now(), streaming: true, status: 'retrieving',
+  }
+}
+
+/** 当前正在进行的一次流式请求的中断器（停止按钮 abort 的就是它） */
 let activeAbort: AbortController | null = null
 
 /** 启动时读档：先看设备级登录态，再按它取该用户的界面偏好 */
@@ -390,24 +427,29 @@ export const useStore = create<Store>()((set, get) => {
         await api.deleteConversation(threadId, get().settings.apiBase)
       } catch (err) {
         fail(err, '删除失败：')
-        return
+        return false
       }
       set((s) => {
         const convs = s.convs.filter((c) => c.thread_id !== threadId)
         if (s.activeThreadId !== threadId) return { convs }
         return { convs, activeThreadId: '', messages: [] }
       })
+      return true
     },
 
+    // 返回是否真的清掉了：调用方要在**成功时**才说「已清空」。
+    // 以前它自己吞掉异常（fail 里弹错误 toast）却照常返回，
+    // 于是失败时用户会同时看到「清空失败：…」和「已清空全部会话」两条互相打脸的提示。
     clearAll: async () => {
       try {
         await api.clearConversations(get().settings.apiBase)
       } catch (err) {
         fail(err, '清空失败：')
-        return
+        return false
       }
       // 只清会话与入库记录；界面偏好是另一个维度，不动
       set({ convs: [], activeThreadId: '', messages: [], ingests: [] })
+      return true
     },
 
     send: async (text) => {
@@ -417,29 +459,19 @@ export const useStore = create<Store>()((set, get) => {
       if (s.busy || !s.auth) return
 
       const userMsg: Message = { id: uid(), role: 'user', content: q, createdAt: Date.now() }
-      const botMsg: Message = {
-        id: uid(),
-        role: 'assistant',
-        content: '',
-        createdAt: Date.now(),
-        streaming: true,
-        status: 'retrieving',
-      }
+      const botMsg = newBotMsg()
       set({ messages: [...s.messages, userMsg, botMsg], busy: true })
 
       // 草稿态传 null：由服务端建会话并把 id 回传（见 StreamEvent.thread_id）
       const threadId = s.activeThreadId || null
       const base = s.settings.apiBase
+      // 是否收到过后端的 done 事件。它是「这条回答正常收尾」的唯一凭据：
+      // 反代超时、后端进程被杀、连接被干净关闭时，reader 会正常读到结束而不抛异常，
+      // 于是 status 会永远停在 retrieving —— 气泡卡在「帮家人找资料…」且没有重试入口。
+      let sawDone = false
       const onDone = (evt: Extract<StreamEvent, { done: true }>) => {
-        const meta = {
-          intent: evt.intent,
-          slots: evt.slots,
-          characters: evt.characters,
-          docs: evt.docs,
-          sources: evt.sources,
-          truncated: evt.truncated,
-          emotion: evt.emotion,
-        }
+        sawDone = true
+        const meta = metaOf(evt)
         // done.answer 是后端给出的权威全文：触发复读兜底时它是「截断后」的内容，
         // 必须覆盖掉已流式渲染的复读文本，否则前端仍显示重复内容，后端兜底等于白做。
         // 仅在 answer 为空（异常兜底）时保留已渲染内容，避免把气泡清空。
@@ -454,6 +486,10 @@ export const useStore = create<Store>()((set, get) => {
                   stageLabel: undefined,
                   meta,
                   content: evt.answer || m.content,
+                  // 换成服务端真 id：本轮这条气泡出生时拿的是本地随机 uid，
+                  // 而满意度反馈按 msg.id 提交——不换就会把评价挂到一个
+                  // 「刷新后再也不会出现」的 id 上（刷新后回填不到、且能被重复评一次）。
+                  id: evt.message_id ? String(evt.message_id) : m.id,
                 }
               : m,
           ),
@@ -498,7 +534,19 @@ export const useStore = create<Store>()((set, get) => {
           )
           activeAbort = controller
           await done
-          patchMsg(botMsg.id, { streaming: false })
+          // 没收到 done 就是没答完。落 error 态而不是继续显示「检索中」；
+          // 但若已经吃过后端的 error 事件，则保留后端那份更具体的文案，不覆盖。
+          const cur = get().messages.find((m) => m.id === botMsg.id)
+          if (!sawDone && cur?.status !== 'error') {
+            patchMsg(botMsg.id, {
+              streaming: false,
+              status: 'error',
+              stageLabel: undefined,
+              error: '回答中断了（连接提前结束），可以重新生成。',
+            })
+          } else {
+            patchMsg(botMsg.id, { streaming: false })
+          }
         } else {
           const out = await api.ask(q, threadId, base)
           set((st) => ({
@@ -507,18 +555,12 @@ export const useStore = create<Store>()((set, get) => {
               m.id === botMsg.id
                 ? {
                     ...m,
+                    // 与流式那条同一份键表（原先这里手打七个键、漏了 web_reason）
                     content: out.answer,
                     streaming: false,
                     status: 'done' as const,
-                    meta: {
-                      intent: out.intent,
-                      slots: out.slots,
-                      characters: out.characters,
-                      docs: out.docs,
-                      sources: out.sources,
-                      truncated: out.truncated,
-                      emotion: out.emotion,
-                    },
+                    meta: metaOf(out),
+                    id: out.message_id ? String(out.message_id) : m.id,
                   }
                 : m,
             ),
@@ -579,16 +621,11 @@ export const useStore = create<Store>()((set, get) => {
       }
       if (idx < 0) return
 
-      const botMsg: Message = {
-        id: uid(),
-        role: 'assistant',
-        content: '',
-        createdAt: Date.now(),
-        streaming: true,
-        status: 'retrieving',
-      }
+      const botMsg = newBotMsg()
       set({ messages: [...s.messages.slice(0, idx + 1), botMsg], busy: true })
 
+      // 与 send 同一条判据（为什么不能只信 `await done` 正常返回，见 send 里的说明）
+      let regenSawDone = false
       try {
         const { controller, done } = api.regenerateStream(
           s.activeThreadId,
@@ -614,28 +651,41 @@ export const useStore = create<Store>()((set, get) => {
               })
               get().toast('err', evt.error)
             } else if ('done' in evt && evt.done) {
+              regenSawDone = true
               patchMsg(botMsg.id, {
                 streaming: false,
                 status: 'done',
                 stageLabel: undefined,
                 content: evt.answer || get().messages.find((m) => m.id === botMsg.id)?.content || '',
-                meta: {
-                  intent: evt.intent,
-                  slots: evt.slots,
-                  characters: evt.characters,
-                  docs: evt.docs,
-                  sources: evt.sources,
-                  truncated: evt.truncated,
-                  emotion: evt.emotion,
-                },
+                meta: metaOf(evt),
               })
+              // 与 send 同一件事：把这条新气泡的本地 uid 换成落库真 id，
+              // 否则满意度反馈会挂在一个刷新后再也不会出现的 id 上。
+              if (evt.message_id) {
+                set((st) => ({
+                  messages: st.messages.map((m) =>
+                    m.id === botMsg.id ? { ...m, id: String(evt.message_id) } : m,
+                  ),
+                }))
+              }
             }
           },
           s.settings.apiBase,
         )
         activeAbort = controller
         await done
-        patchMsg(botMsg.id, { streaming: false })
+        // 与 send 同口径：流干净关闭却没有 done，就是没答完，落 error 态给重试入口
+        const cur = get().messages.find((m) => m.id === botMsg.id)
+        if (!regenSawDone && cur?.status !== 'error') {
+          patchMsg(botMsg.id, {
+            streaming: false,
+            status: 'error',
+            stageLabel: undefined,
+            error: '回答中断了（连接提前结束），可以重新生成。',
+          })
+        } else {
+          patchMsg(botMsg.id, { streaming: false })
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (msg.includes('abort')) {

@@ -104,7 +104,7 @@ export default function UsagePanel() {
                 onClick={() => setView('detail')}>用量明细</button>
       </div>
 
-      {sum && view === 'trend' && <UsageCharts daily={sum.daily} />}
+      {sum && view === 'trend' && <UsageCharts daily={sum.daily} days={days} />}
 
       {sum && view === 'detail' && (
         <table className="kb-table">

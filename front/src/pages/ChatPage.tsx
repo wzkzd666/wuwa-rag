@@ -7,6 +7,7 @@ import {
 import { useStore } from '../store/useStore'
 import MessageBubble from '../components/MessageBubble'
 import Composer from '../components/Composer'
+import ConfirmButton from '../components/ConfirmButton'
 import './ChatPage.css'
 
 const EXAMPLES = [
@@ -22,6 +23,7 @@ function SessionList() {
   // 两级都收起时聊天区拿到整屏宽度 —— 窄屏（小窗口/分屏）下这是刚需。
   const collapsed = useStore((s) => s.settings.sessionListCollapsed)
   const convs = useStore((s) => s.convs)
+  const loadingConvs = useStore((s) => s.loadingConvs)
   const activeThreadId = useStore((s) => s.activeThreadId)
   const select = useStore((s) => s.selectConversation)
   const create = useStore((s) => s.newConversation)
@@ -33,8 +35,6 @@ function SessionList() {
 
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
-  // 两步删除确认：首次点击标记，再次点击才删
-  const [confirmDel, setConfirmDel] = useState<string | null>(null)
   // 收录入口仅管理员可见（后端 /ingest 也是 admin 守卫）
   const isAdmin = useStore((s) => s.auth?.role === 'admin')
 
@@ -46,12 +46,6 @@ function SessionList() {
     void rename(id, draft)
     setEditing(null)
   }
-
-  useEffect(() => {
-    if (!confirmDel) return
-    const t = setTimeout(() => setConfirmDel(null), 3000)
-    return () => clearTimeout(t)
-  }, [confirmDel])
 
   return (
     <div className={`session-list ${collapsed ? 'rail' : ''}`}>
@@ -88,14 +82,52 @@ function SessionList() {
         </button>
       )}
       <div className="session-scroll">
+        {/* 加载中不许显示「暂无会话」：那是**空状态**，会把「请求还没回来」说成「你没有会话」。
+            loadingConvs/loadingMsgs 之前只写不读，这个区分就一直没生效（见 useStore:335/359）。 */}
         {convs.length === 0 && (
-          <div className="session-empty">暂无会话</div>
+          <div className="session-empty">
+            {loadingConvs ? (
+              <span className="dots">
+                <i />
+                <i />
+                <i />
+              </span>
+            ) : (
+              '暂无会话'
+            )}
+          </div>
         )}
         {convs.map((c) => (
           <div
             key={c.thread_id}
+            tabIndex={0}
+            aria-current={c.thread_id === activeThreadId ? 'true' : undefined}
             className={`session-item ${c.thread_id === activeThreadId ? 'session-active' : ''}`}
-            onClick={() => !busy && void select(c.thread_id)}
+            // ⚠️ 不能用 `role="button"`：按钮的子孙在无障碍树里是**呈现性**的，
+            // 一加上去，行里的改名输入框与删除/重命名按钮就对读屏彻底消失了——
+            // 键盘可达性买回来了，读屏可达性反而丢得更多。
+            // 保持 div + tabIndex + 下面的 Enter/Space 处理即可（行本身仍可键盘操作）。
+            onClick={(e) => {
+              // ⚠️ 判据不能写成 `e.target !== e.currentTarget` —— 行是 flex 容器，
+              // 面积几乎全被 `.session-icon` / `.session-title`(flex:1) 占满，
+              // 那样写等于「只有那 8px 内边距能点」，点标题根本不切会话（实测复核抓到）。
+              // 真正要挡的是行内的操作区（改名输入框、重命名/删除按钮），按**容器**判：
+              // 它们的 stopPropagation 本来也已经挡了冒泡，这里是第二道闸。
+              // 键盘侧不同：焦点落在行本身才算数（见 onKeyDown），那里的 target 判据是对的。
+              const t = e.target as HTMLElement
+              if (t.closest('.session-ops, .session-edit')) return
+              if (!busy) void select(c.thread_id)
+            }}
+            onKeyDown={(e) => {
+              // 原来这是个只有 onClick 的 div —— 切会话是主导航，键盘/读屏完全够不着。
+              // 只认焦点落在「行本身」的按键：行里嵌着改名输入框和操作按钮，它们的
+              // Enter 会冒泡上来，不挡住就会「敲回车改名 → 顺手又切了一次会话」。
+              if (e.target !== e.currentTarget) return
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault() // 空格默认会把滚动容器推到底
+                if (!busy) void select(c.thread_id)
+              }
+            }}
           >
             <MessageSquare size={14} className="session-icon" />
             {editing === c.thread_id ? (
@@ -123,20 +155,15 @@ function SessionList() {
                   <button title="重命名" onClick={() => startEdit(c.thread_id, c.title)}>
                     <Pencil size={12} />
                   </button>
-                  <button
-                    title={confirmDel === c.thread_id ? '再点一次确认删除' : '删除'}
-                    className={confirmDel === c.thread_id ? 'danger-confirm' : ''}
-                    onClick={() => {
-                      if (confirmDel === c.thread_id) {
-                        void remove(c.thread_id)
-                        setConfirmDel(null)
-                      } else {
-                        setConfirmDel(c.thread_id)
-                      }
-                    }}
-                  >
-                    <Trash2 size={12} />
-                  </button>
+                  {/* 待确认文案刻意比别页短：会话栏只有 248px，
+                      「再点一次确认删除」会把标题挤到只剩几个字。 */}
+                  <ConfirmButton
+                    icon={Trash2}
+                    iconSize={12}
+                    title="删除"
+                    confirmLabel="确认删除"
+                    onConfirm={() => void remove(c.thread_id)}
+                  />
                 </span>
               </>
             )}
@@ -164,6 +191,7 @@ export default function ChatPage() {
   const stop = useStore((s) => s.stop)
   const regenerate = useStore((s) => s.regenerate)
   const health = useStore((s) => s.health)
+  const loadingMsgs = useStore((s) => s.loadingMsgs)
   const avatarAssistant = useStore((s) => s.settings.avatarAssistant)
   const navigate = useNavigate()
 
@@ -191,7 +219,16 @@ export default function ChatPage() {
 
       <div className="chat-main">
         <div className="chat-scroll" ref={scrollRef}>
-          {isEmpty ? (
+          {isEmpty && loadingMsgs ? (
+            /* 切会话时消息还在路上：先给三个点，别把欢迎页当成「这个会话是空的」 */
+            <div className="empty-state">
+              <span className="dots">
+                <i />
+                <i />
+                <i />
+              </span>
+            </div>
+          ) : isEmpty ? (
             <div className="chat-welcome">
               {/* 标题与副标题收进一块带底色的面板：自定义背景图下，气泡/卡片外的
                   文字直接压在图片上，深色图里几乎读不出来（见 ChatPage.css .welcome-card）。 */}
@@ -227,7 +264,7 @@ export default function ChatPage() {
             <div className="msg-list">
               {messages.map((m, i) => (
                 <MessageBubble
-                  key={m.id}
+                  key={m.listKey ?? m.id}
                   msg={m}
                   canRegenerate={m.role === 'assistant' && i === messages.length - 1 && !busy}
                   onRegenerate={regenerate}

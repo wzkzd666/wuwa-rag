@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+from wuwa_rag.core import conversations as conv
 from wuwa_rag.core.db import get_cursor
 from wuwa_rag.ww_logger import get_logger
 
@@ -12,6 +13,17 @@ log = get_logger("feedback")
 
 RATING_UP = 1
 RATING_DOWN = -1
+
+# 各列的长度帽。**入口（`api/usage.FeedbackIn`）与这里引用同一组常量**，
+# 不在两处各写一遍数字——那正是本项目反复出问题的「同一语义两处判据」。
+# 为什么两处都要用：pydantic 那层负责「早失败 + 422 给对的人」，
+# 这里这层负责「无论如何都不会把超长串写进库」（脚本/将来别的调用方未必过 pydantic）。
+COMMENT_MAX = 1000
+QUESTION_MAX = 2000
+ANSWER_MAX = 4000
+TARGET_ID_MAX = 32
+NAME_MAX = 64            # provider / model
+USERNAME_MAX = 64
 
 
 async def save_feedback(*, user_id: str, username: str, thread_id: str, target_id: str,
@@ -24,6 +36,13 @@ async def save_feedback(*, user_id: str, username: str, thread_id: str, target_i
     """
     if rating not in (RATING_UP, RATING_DOWN):
         raise ValueError("rating 只能是 1（满意）或 -1（不满意）")
+    # thread_id / target_id 是**键的一部分**（upsert 靠 (user_id, target_id)），
+    # 绝不能像快照那样截断——截断会把两个不同的 id 合成一个，
+    # 表现为「给 A 点的赞跑到 B 上」。所以这里校验并拒绝，交给 API 层转 4xx。
+    if not conv.THREAD_ID_RE.match(thread_id or ""):
+        raise ValueError("thread_id 只能是字母/数字/下划线/连字符，最长 64 字符")
+    if not target_id or len(target_id) > TARGET_ID_MAX:
+        raise ValueError(f"target_id 不能为空且不得长于 {TARGET_ID_MAX} 字符")
     async with get_cursor() as cur:
         await cur.execute(
             "INSERT INTO answer_feedback (user_id, username, thread_id, target_id, rating,"
@@ -33,8 +52,10 @@ async def save_feedback(*, user_id: str, username: str, thread_id: str, target_i
             "   rating = EXCLUDED.rating, comment = EXCLUDED.comment, model = EXCLUDED.model,"
             "   provider = EXCLUDED.provider, created_at = now()"
             " RETURNING id",
-            (user_id, username, thread_id, target_id, rating, comment[:1000] or None,
-             question[:2000] or None, answer[:4000] or None, provider or None, model or None),
+            (user_id, username[:USERNAME_MAX] or None, thread_id, target_id,
+             rating, comment[:COMMENT_MAX] or None,
+             question[:QUESTION_MAX] or None, answer[:ANSWER_MAX] or None,
+             provider[:NAME_MAX] or None, model[:NAME_MAX] or None),
         )
         return (await cur.fetchone())[0]
 

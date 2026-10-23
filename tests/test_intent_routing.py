@@ -38,6 +38,7 @@ from wuwa_rag.dialog import nlu as nlu_mod
 from wuwa_rag.dialog.nlu import (
     asks_about_own_nickname,
     is_identity,
+    is_material_question,
     is_self_intro,
     veto_ambiguous_names,
 )
@@ -83,6 +84,69 @@ async def test_intent_node_路由(offline_intent, question, expected_intent, exp
     # 双断言：intent 与 characters 都要对（只验 intent 会假绿，见模块 docstring）
     assert out["intent"] == expected_intent, f"{question!r} intent={out['intent']}"
     assert out["characters"] == expected_chars, f"{question!r} chars={out['characters']}"
+
+
+# 「培养要花什么」判据（决定是否附突破材料表）。前 5 条是 2026-10-23 实测到的
+# **两边口径不一致**的问法：旧的 graph 正则认不出「需要什么/消耗」，
+# 而 nlu 的槽位词表又认不出「练度/培养」。
+MATERIAL_YES = [
+    "卡卡罗突破材料", "突破到六阶要什么", "练度怎么提升", "卡卡罗培养路线",
+    "60级需要什么", "升满要消耗多少", "声骸突破材料",
+]
+# 关键是「声骸需要什么」这一类：槽位词表会命中「需要什么」，但用户问的是声骸搭配，
+# 附上「必须逐条照抄」的突破材料表反而会把答案带偏 —— 补料判据必须比槽位窄。
+MATERIAL_NO = [
+    "声骸需要什么", "武器选什么", "共鸣解放倍率", "心怎么配队", "", "主词条选什么",
+    # 「消耗/需要多少」在鸣潮还指**技能的能量开销**，不是培养材料（2026-10-23 审查抓到的
+    # 假阳性：弱词单独命中时把「必须逐条照抄」的突破材料表挂到了技能能量问题上）。
+    "共鸣回路消耗多少能量", "延奏技能消耗多少协奏", "技能需要消耗多少能量",
+]
+
+
+@pytest.mark.parametrize("question", MATERIAL_YES)
+def test_材料补料判据_该附表的问法都认(question: str) -> None:
+    assert is_material_question(question), f"{question!r} 应判为培养材料问题"
+
+
+@pytest.mark.parametrize("question", MATERIAL_NO)
+def test_材料补料判据_拿不准就不附表(question: str) -> None:
+    assert not is_material_question(question), f"{question!r} 不该附突破材料表"
+
+
+async def test_裸指代转澄清_且各硬信号出口不被抢走(offline_intent, monkeypatch) -> None:
+    """守 `clarify` 分支的**可达性**。
+
+    它曾经是恒假条件：判据写成 `intent == "chitchat"`，却挂在 `classify()` 之后——
+    而 `classify()` 只可能返回 hybrid/fact/semantic，闲聊判定根本还没发生
+    （它在下面的 ⓪①①′② 分流里才赋值）。于是反问分支从上线起一次都没执行过。
+    2026-10-23 实测：说「那个」落到闲聊，模型自己圆出一句「怎么突然这么小声呀」——
+    正是 `clarify` 存在的理由（不许猜着答）所禁止的行为。
+
+    这里把主题分类器 stub 成 'chitchat'（clarify 唯一可能的上游），断言三件事：
+      ① 纯指代/重试/语气词 → clarify（真的会反问）；
+      ② 语义完整的招呼 → 仍是 chitchat（不许把正常闲聊一律打回反问）；
+      ③ 有自己出口的硬信号（问助手身份、自我介绍、时间）不许被改道。
+    音乐回指（「继续」带历史）由 if/elif 顺序天然优先，见同一函数里的 ① 之前的 music 分支。
+    """
+    from wuwa_rag.dialog import graph as graph_mod
+
+    async def _topic_chitchat(_question: str) -> str:
+        return "chitchat"
+
+    monkeypatch.setattr(graph_mod, "classify_topic", _topic_chitchat)
+
+    for q in ["那个", "这个", "上面那个", "继续", "嗯", "啊"]:
+        out = await offline_intent(q)
+        assert out["intent"] == "clarify", f"{q!r} 应转澄清，实得 {out['intent']}"
+
+    for q in ["你好呀", "今天天气不错"]:
+        out = await offline_intent(q)
+        assert out["intent"] == "chitchat", f"{q!r} 语义完整，不该被打回反问：{out['intent']}"
+
+    # ③ 硬信号各自守出口：这三条都在 ② 之前的分支里落定，不会被澄清改道
+    assert (await offline_intent("你是谁"))["intent"] == "chitchat"
+    assert (await offline_intent("我是颗粒"))["intent"] == "chitchat"
+    assert (await offline_intent("现在几点"))["intent"] == "time"
 
 
 async def test_自我介绍走闲聊_即使主题分类器判游戏(offline_intent):
@@ -248,3 +312,42 @@ def test_对话图能编译_且每条边的端点都已注册为节点() -> None
     for edge in compiled.get_graph().edges:
         assert edge.source in nodes, f"边的起点不是已注册节点: {edge.source}"
         assert edge.target in nodes, f"边的终点不是已注册节点: {edge.target}"
+
+
+def test_产正文的节点必须全在流式白名单里() -> None:
+    """守「分支能生成答案,却被流式 token 白名单挡成空气泡」。
+
+    上一条测试断言了 `"clarify" in nodes`,而 2026-10-23 抓到的 bug 恰恰是**它全绿**
+    的情况下发生的:节点注册了、路由表指了、`_chat_turn` 也正常生成了,
+    只有 `ask_stream` 的白名单漏了 `clarify`。token 是从 `on_chat_model_stream`
+    **旁路抽取**的,名单漏一个名字不抛异常、不报错,只让 `done.answer` 变成空串 ——
+    前端留下一条永远空白的气泡,而服务端日志里答案写得明明白白。
+    （「没听懂→反问」是任何含糊输入都会走的活路径,不是死代码。）
+
+    判据**不抄节点名清单**,而是从源码现取:调 `_chat_turn(` 或 `.astream(` 的节点
+    就是「会产出给用户看的正文」的节点。将来新加一条分支忘了进 `_TEXT_NODES`,
+    这条当场红,而不是等用户看到空气泡。
+    """
+    import inspect
+
+    from wuwa_rag.dialog import graph as graph_mod
+
+    producers: set[str] = set()
+    for obj in vars(graph_mod).values():
+        name = getattr(obj, "__name__", "")
+        if not (callable(obj) and name.endswith("_node")):
+            continue
+        src = inspect.getsource(obj)
+        if "_chat_turn(" in src or ".astream(" in src:
+            producers.add(name[: -len("_node")])
+
+    assert producers, "一个产正文的节点都没解析到，多半是 _chat_turn/.astream 的写法变了"
+    assert producers == set(graph_mod._TEXT_NODES), (
+        f"产正文节点与流式白名单不一致：只在节点={sorted(producers - set(graph_mod._TEXT_NODES))}"
+        f"、只在白名单={sorted(set(graph_mod._TEXT_NODES) - producers)}"
+        "——漏白名单的那条分支前端一个字都收不到"
+    )
+    # 回归钉桩：2026-10-23 实测漏的就是它
+    assert "clarify" in graph_mod._TEXT_NODES
+    # 反问这条分支也得有阶段提示，否则用户只看到三个点干转（上限 7 字，见 _STAGE_LABELS）
+    assert graph_mod._STAGE_LABELS["clarify"]

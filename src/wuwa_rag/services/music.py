@@ -130,9 +130,28 @@ async def get_exe(user_id: int | str | None = None) -> str:
     return get_settings().MUSIC_EXE
 
 
+# 只允许这一个可执行文件名（不分大小写）。**不是**多余的洁癖：
+# 这个字段原本随便填，任何登录用户（含 guest）都能把路径设成
+# `C:\Windows\System32\calc.exe`，随后 `/music/control` 会让 **API 进程以部署者身份
+# 把它 spawn 出去**（MCP 子进程只判 isfile，不判是谁）。跨进程边界的执行原语必须收口成
+# 「只能是播放器」，而不是靠「部署默认关着」——个人开关一开就绕过了那道默认。
+_ALLOWED_EXE_NAMES = ("qqmusic.exe",)
+
+
+def _check_exe(value: str) -> str:
+    """校验并归一自定义播放器路径。空串=清空回落默认；非法则抛 ValueError。"""
+    value = (value or "").strip().strip('"')
+    if not value:
+        return ""
+    name = value.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name not in _ALLOWED_EXE_NAMES:
+        raise ValueError("播放器路径只能指向 QQMusic.exe；留空则自动探测")
+    return value
+
+
 async def set_exe(user_id: int | str, path: str | None) -> None:
     """设置自定义播放器路径。改完要**重建常驻会话**才会用新路径（env 是启动时注入的）。"""
-    value = (path or "").strip()
+    value = _check_exe(path or "")
     await _put(user_id, EXE_KEY, value or None)
     # 会话是常驻单例且 env 已固化，只能重建；下次调用会自动重新建起来
     await aclose()

@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from wuwa_rag.api import auth as authn
 from wuwa_rag.config import get_settings
 from wuwa_rag.services import music
+from wuwa_rag.ww_logger import get_logger
 
 router = APIRouter()
+log = get_logger("music")
 
 # 播放状态读取的硬超时（秒）。前端 5 秒轮询一次，卡住就会持续占用事件循环。
 _STATUS_TIMEOUT = 3.0
@@ -61,7 +63,11 @@ async def api_music_setting_put(body: MusicSettingIn,
         if body.enabled is not None:
             await music.set_enabled(user.id, body.enabled)
         if body.exe is not None:
-            await music.set_exe(user.id, body.exe)
+            try:
+                await music.set_exe(user.id, body.exe)
+            except ValueError as exc:
+                # 校验失败要如实 400 并带上原因，不能 500（也不能静默忽略用户填的路径）
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"enabled": await music.is_enabled(user.id), "exe": await music.get_exe(user.id)}
 
 
@@ -76,7 +82,14 @@ async def api_music_status(user: authn.AuthUser = Depends(authn.get_current_user
     """
     try:
         return await asyncio.wait_for(music.now_playing(user.id), timeout=_STATUS_TIMEOUT)
-    except (TimeoutError, Exception) as exc:  # noqa: BLE001
+    except Exception as exc:   # noqa: BLE001 —— 宽捕获是有意的：见上面 docstring 的硬超时说明
+        # ⚠️ 必须留一行日志：这条路径原先**静默**返回 available=false，
+        # 而它坏掉的形态恰恰是「播放条悄悄不见了、什么错都没有」——
+        # 本项目记过一次同类难排查故障（SMTC 读取在某些环境下必挂到超时且无任何日志）。
+        # TimeoutError 在 3.11+ 就是 OSError 的子类、已被 Exception 覆盖，不必并列写
+        # （写成 `(TimeoutError, Exception)` 会让人误以为两类判据不同）。
+        log.warning("音乐状态读取失败/超时（%.1fs 内未返回）: %s: %s",
+                    _STATUS_TIMEOUT, type(exc).__name__, str(exc)[:160])
         return {"available": False, "playing": False, "paused": False, "title": "",
                 "artist": "", "volume": None, "muted": False, "app": "",
                 "reason": f"读取超时或失败：{type(exc).__name__}"}

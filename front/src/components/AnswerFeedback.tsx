@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Check, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 
 import { useStore } from '../store/useStore'
 import { feedbackSubmit } from '../lib/api'
+import { hydrateRating, rememberRating } from '../lib/feedbackHydrate'
 import type { Message } from '../types'
 
 /**
@@ -14,6 +15,8 @@ import type { Message } from '../types'
  * ⚠️ 提交前**明确告知**管理员会查看这次问答 —— 反馈里带着问题与回答原文，
  * 这是知情而不是偷偷收集。反馈内容会随截图/导出离开本机，所以文案写得很直白。
  */
+/** 已回填过评价的消息 id 与请求调度都在 lib/feedbackHydrate（同帧合并成一个请求） */
+
 export default function AnswerFeedback({ msg, question }: { msg: Message; question: string }) {
   const apiBase = useStore((s) => s.settings.apiBase)
   const threadId = useStore((s) => s.activeThreadId)
@@ -22,6 +25,12 @@ export default function AnswerFeedback({ msg, question }: { msg: Message; questi
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // 装载时回填服务端已有的评价：原来 👍/👎 只是组件内存态，刷新即消失、
+  // 同一条回答还能被重复点 —— 这里让按钮显示服务端真值。
+  // 失败一律静默（回填只是显示增益）；真提交时的错误仍由 send() 里的 toast 负责。
+  // 非服务端 id（本轮刚生成的随机串）与「已在别处问过」都由 hydrateRating 判掉。
+  useEffect(() => hydrateRating(msg.id, apiBase, setRated), [msg.id, apiBase])
 
   const send = async (rating: 1 | -1, comment: string) => {
     setBusy(true)
@@ -38,6 +47,7 @@ export default function AnswerFeedback({ msg, question }: { msg: Message; questi
         apiBase,
       )
       setRated(rating)
+      rememberRating(msg.id, rating)   // 不回写缓存的话，切走再切回会被旧缓存显示成「没评过」
       setOpen(false)
       setText('')
       toast('ok', rating === 1 ? '已记录，谢谢' : '已记录，管理员会看到这条差评')
@@ -84,7 +94,7 @@ export default function AnswerFeedback({ msg, question }: { msg: Message; questi
           />
           <div className="fb-panel-foot">
             <span className="fb-notice">
-              提交后**管理员可查看这次问答原文**用于改进（不含你的账号密码等信息）。
+              提交后管理员可查看这次问答原文用于改进（不含你的账号密码等信息）。
             </span>
             <button
               className="btn btn-primary btn-sm"

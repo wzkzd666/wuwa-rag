@@ -23,13 +23,29 @@
 
   --text-primary: #e8edf9;
   --text-secondary: #9aa7c7;
-  --text-muted: #64708f;
+  /* 弱化文字（时间戳 / 提示 / 空状态）也要过 WCAG AA 4.5:1。
+     原值 #64708f 在面板底色 #121a2e 上实测只有 3.51:1 —— 而它是全站用得最多的
+     文字色（48 处），等于大面积小字号内容不达标。#8290b0 实测 5.41:1，
+     仍明显低于 --text-secondary 的 7.19:1，层级关系不变。 */
+  --text-muted: #8290b0;
 
   --accent: #5eead4;
   --accent-2: #818cf8;
+  /* 比 --accent-2 更浅的一档靛色，专用于**文字**（紫色标签的文字、进度点的「进行中」）。
+     两者是不同的颜色，不是别名：实测在 .tag 的底色 --bg-elevated 上 #a5b0ff 是 7.80:1、
+     --accent-2 (#818cf8) 是 5.35:1，在 hover 底 --bg-hover 上更是只有 4.88:1。
+     所以不能把这里换成 --accent-2（会变暗、并顶到 AA 边缘）；单独建名只是为了
+     终结「同一个色值重打两处」。 */
+  --accent-2-text: #a5b0ff;
   --accent-3: #f0abfc;
   --grad: linear-gradient(135deg, #5eead4 0%, #818cf8 55%, #f0abfc 110%);
-  --grad-soft: linear-gradient(135deg, rgba(94, 234, 212, 0.16), rgba(129, 140, 248, 0.16));
+  /* 渐变面上的墨色（发送键、品牌/头像/欢迎屏那几枚 logo 底、开关的滑块、主按钮的文字）。
+     ⚠️ **故意不跟随主题翻转**，所以不能拿 --bg-base 顶替它：浅色主题里 --bg-base 是
+     #f4f6fc，而 `--grad` 在两个主题下都是同一份浅色渐变 —— 换成 --bg-base 等于
+     把「浅靛渐变上的深色字」变成「浅靛渐变上的近白色字」，直接看不清。
+     它今天被逐字重打了 8 次（7 处在页面/组件样式里，1 处在下面的 .btn-primary）。 */
+  --grad-ink: #0b1020;
+  --grad-soft: linear-gradient(135deg, rgba(94, 234, 212, 0.16), var(--accent-2-tint-16));
 
   --user-bubble: linear-gradient(135deg, #2b3a67 0%, #23305a 100%);
   --bot-bubble: rgba(18, 26, 46, 0.72);
@@ -38,6 +54,100 @@
   --warn: #fbbf24;
   --err: #f87171;
 
+  /* 语义色的**文字角色**单独一档（`--accent-2-text` 是最早的一个，其余五个补齐）。
+     为什么不能直接用上面那些：它们是「信号灯」色，在深色底上有 7~13:1，
+     而浅色主题不覆盖它们 —— 实测同一份色值放到白底/浅靛底上只有 1.29~2.98:1：
+     `--accent` 1.48、`--ok` 1.92、`--warn` 1.67、`--err` 2.77、`--accent-2` 2.98。
+     于是浅色主题里错误按钮、`已收录`标签、markdown 链接、点赞/点踩选中态、
+     入库进度点文字全部洗成一片淡彩（全站 36 处 `color:` 中招）。
+     ⚠️ 为什么要 `-text` 一档而不是在浅色主题里整体覆盖 `--err`：
+     状态圆点、toast 左边框、开关滑块这些**装饰**用法要保留饱和色（点就得像信号灯），
+     只有**文字/图标**用法需要可读档——一个变量扛不住两个方向。
+     深色主题这些色本身基本达标，`-text` 大多就是它们的别名（唯一例外见下面 --err-text）；
+     浅色主题见 `[data-theme='light']`。 */
+  --accent-text: var(--accent);
+  --accent-3-text: var(--accent-3);
+  --ok-text: var(--ok);
+  --warn-text: var(--warn);
+  /* 深色主题这一档**不是** --err 的别名：待确认态的芯片底是 `--err-tint-14`，
+     叠在 hover 底 #1c2846 上合成出 #3b324c（比任何一块平底都偏亮偏紫），
+     #f87171 压上去实测只有 4.34:1；提到 #fca5a5 后同一芯片 6.33:1，
+     五块平底也从 4.56~7.11 一起抬到 6.3~9.6。危险文字宁亮勿暗。 */
+  --err-text: #fca5a5;
+
+  /* 半透明档位（品牌色的「空间分隔 RGB」形态）。
+     CSS 自定义属性塞不进旧式逗号写法的 rgba()，只能把三个通道单独存成空格分隔的值，
+     再用 rgb(var(--x-rgb) / alpha) 组合 —— 与上面 --panel-rgb 是同一个套路，不另发明技术。
+     为什么要有这一段：审计实测 `rgba(129, 140, 248, …)` 重打 23 处、
+     `rgba(248, 113, 113, …)` 17 处，改一次品牌色要动 40 行。
+     ⚠️ 两组 rgb 值必须分别与 --accent-2 / --err 逐通道一致；换品牌色时**两处一起改**。
+     浅色主题不覆盖 --accent-2 / --err，所以这些档位两个主题下通用，无需 light 覆盖块。 */
+  --accent-2-rgb: 129 140 248;
+  --err-rgb: 248 113 113;
+
+  /* 档位名后的数字就是 alpha 的百分比（tint-16 = 0.16）。
+     **只列现有声明真正用到的 alpha**，不预留用不上的档：空 token 会诱导后人顺手取一个
+     新的半透明值，那才是第二轮漂移的开始。 */
+  --accent-2-tint-6: rgb(var(--accent-2-rgb) / 0.06);
+  --accent-2-tint-10: rgb(var(--accent-2-rgb) / 0.1);
+  --accent-2-tint-12: rgb(var(--accent-2-rgb) / 0.12);
+  --accent-2-tint-14: rgb(var(--accent-2-rgb) / 0.14);
+  --accent-2-tint-16: rgb(var(--accent-2-rgb) / 0.16);
+  --accent-2-tint-18: rgb(var(--accent-2-rgb) / 0.18);
+  --accent-2-tint-25: rgb(var(--accent-2-rgb) / 0.25);
+  --accent-2-tint-30: rgb(var(--accent-2-rgb) / 0.3);
+  --accent-2-tint-38: rgb(var(--accent-2-rgb) / 0.38);
+  --accent-2-tint-40: rgb(var(--accent-2-rgb) / 0.4);
+  --accent-2-tint-45: rgb(var(--accent-2-rgb) / 0.45);
+  --accent-2-tint-50: rgb(var(--accent-2-rgb) / 0.5);
+  --accent-2-tint-55: rgb(var(--accent-2-rgb) / 0.55);
+  --accent-2-tint-65: rgb(var(--accent-2-rgb) / 0.65);
+
+  --err-tint-8: rgb(var(--err-rgb) / 0.08);
+  --err-tint-9: rgb(var(--err-rgb) / 0.09);
+  --err-tint-10: rgb(var(--err-rgb) / 0.1);
+  --err-tint-12: rgb(var(--err-rgb) / 0.12);
+  --err-tint-14: rgb(var(--err-rgb) / 0.14);
+  --err-tint-16: rgb(var(--err-rgb) / 0.16);
+  --err-tint-40: rgb(var(--err-rgb) / 0.4);
+  --err-tint-50: rgb(var(--err-rgb) / 0.5);
+  --err-tint-60: rgb(var(--err-rgb) / 0.6);
+  --err-tint-70: rgb(var(--err-rgb) / 0.7);
+
+  /* 字阶。**值逐个抄自实测在用的 16 档字号**，不是设计出来的等比数列：
+     带 `-plus` 的半档（11.5 / 12.5 / 13.5 / 14.5）是历史形成的高频档
+     （12.5px 一处就用了 26 次），把它们并进整数档会直接改变渲染结果，
+     而这次改版的验收标准就是「零视觉变化」。要收敛成真正的等比字阶，
+     请单独立一次「观感改版」逐档比对，别塞进任何一次清理里。
+     ⚠️ 全站字号是 px、不是 rem：设置页的「基础字号」走 documentElement 的 zoom
+     （见 App.tsx），所以这些 token 的值**不需要**也不应该改成 rem。 */
+  --fs-micro: 9.5px;        /* 仅图表 SVG 内部刻度：viewBox 是固定坐标系，不跟数据区字号 */
+  --fs-2xs: 10.5px;
+  --fs-xs: 11px;
+  --fs-xs-plus: 11.5px;
+  --fs-sm: 12px;
+  --fs-sm-plus: 12.5px;
+  --fs-md: 13px;
+  --fs-md-plus: 13.5px;
+  --fs-base: 14px;          /* body 与 .bubble 的正文，也是 --ui-zoom 的基准 */
+  --fs-base-plus: 14.5px;
+  --fs-lg: 15.5px;
+  --fs-xl: 19px;
+  --fs-2xl: 20px;
+  --fs-display-sm: 21px;
+  --fs-display: 22px;
+  --fs-display-lg: 26px;
+
+  /* 间距阶（4px 基准）。目前只在 global.css 自己的规则里收口，
+     页面侧的 padding/gap 组合值（18px 20px、10px 12px 这类）大量落不到整档上，
+     强行套档等于改留白 —— 留给真正做间距规范的那一轮。 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
   --radius-sm: 8px;
   --radius: 14px;
   --radius-lg: 20px;
@@ -45,7 +155,23 @@
 
   --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.28);
   --shadow-2: 0 10px 32px rgba(0, 0, 0, 0.42);
-  --glow: 0 0 24px rgba(129, 140, 248, 0.25);
+  --glow: 0 0 24px var(--accent-2-tint-25);
+
+  /* 全屏弹层的层级只在这里定义一次。**toast 必须高于 gate**：未登录时 `<Toasts/>` 与
+     `<AuthPage/>` 是兄弟节点（App.tsx 的门禁分支），谁写在后面都不算——只由 z-index 决定。
+     两者原先各写各的 200 / 300，toast 被门禁整层盖住，登录/注册的成功与失败提示**全部看不见**。 */
+  --z-gate: 300;
+  --z-toast: 400;
+
+  /* 其余分层档也收在这里（原来散在 Layout.css 的 1 / 55 / 60 与 ChatPage.css 的 40，
+     「谁压着谁」要开三个文件对）。数值一律照原样搬，不做重新设计：
+     背景层 0 < 内容 1 << 折叠态自绘提示 40 < 移动端遮罩 55 < 移动端抽屉 60 << 门禁 300 < toast 400。
+     ⚠️ 遮罩必须严格小于抽屉，否则侧栏滑出来会被自己那层黑纱盖住。 */
+  --z-bg: 0;
+  --z-content: 1;
+  --z-tooltip: 40;
+  --z-mask: 55;
+  --z-drawer: 60;
 
   --font-ui: 'Inter', 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
@@ -80,14 +206,45 @@
 
   --text-primary: #1c2340;
   --text-secondary: #4c5878;
-  --text-muted: #8a93ad;
+  /* 弱化文字（时间戳 / 提示 / 空状态）也要过 WCAG AA 4.5:1，且**逐个底色**核，不能只看白底：
+     上一版 #69738c 在 --bg-elevated(#ffffff) 上是 4.74:1 看着合格，
+     但在 --bg-deep(#eceff8) 只有 4.12:1、--bg-base(#f4f6fc) 只有 4.39:1 —— 而这两块底色
+     正是 `.kb-search` 输入框、`.avatar-prev-empty` 空态、入库进度点走的路径（浅色主题下全部不达标）。
+     #5f6a83 实测 5.42 / 4.71 / 5.01 三处都过，与 --text-secondary 的 7.06 / 6.14 / 6.53
+     仍差一档，层级关系不变。
+     ⚠️ 但「五块平底」不是全部：`.kb-count` 的芯片底是 `--grad-soft`（两层 0.16 alpha 的
+     品牌渐变叠在白底上 → 实测 rgb(211,232,248)），半透明芯片比平底**更深**。
+     teal 若取 #0f766e，在这种芯片上只有 4.34:1（平底 4.76 看着合格）——
+     所以 --accent-text 取 #0d655c：平底 6.02~6.92、渐变芯片 5.50，两处都留得住。
+     这类「只核平底、漏核半透明芯片」的坑由 tokens.test.ts 的芯片断言兜住。 */
+  --text-muted: #5f6a83;
+
+  /* 语义色的浅底可读档（成因见 :root 里 `--accent-text` 那一段）。
+     取值口径：色相不动，只加深，且在**三块浅底**上都过 AA 4.5:1
+     （--bg-elevated #ffffff / --bg-deep #eceff8 / --bg-base #f4f6fc）：
+       teal  #0d655c 6.92 / 6.02 / 6.41（芯片底 5.50，见上一段那段 ⚠️）
+       indigo #5a4bd6 6.15 / 5.35 / 5.70
+       pink  #a21caf 6.32 / 5.50 / 5.85
+       green #047857 5.48 / 4.77 / 5.08
+       amber #92400e 7.09 / 6.17 / 6.56
+       red   #b91c1c 6.47 / 5.63 / 5.99
+     常见的 #0d9488 / #dc2626 / #b45309 在纯白上是 3.74 / 4.83 / 5.02，
+     看着像过了，落到 --bg-deep 就只有 3.26 / 4.20 / 4.37 —— 又是「只核了一块底」的老坑。
+     ⚠️ 饱和色本体（--accent / --ok / --warn / --err / --accent-2）这里**不覆盖**：
+     状态圆点、边框、滑块在浅底上仍然要显眼，加深反而像脏了。 */
+  --accent-text: #0d655c;
+  --accent-2-text: #5a4bd6;
+  --accent-3-text: #a21caf;
+  --ok-text: #047857;
+  --warn-text: #92400e;
+  --err-text: #b91c1c;
 
   --user-bubble: linear-gradient(135deg, #dfe7ff 0%, #e6e2ff 100%);
   --bot-bubble: rgba(255, 255, 255, 0.86);
 
   --shadow-1: 0 2px 8px rgba(30, 41, 82, 0.08);
   --shadow-2: 0 10px 32px rgba(30, 41, 82, 0.12);
-  --glow: 0 0 24px rgba(129, 140, 248, 0.16);
+  --glow: 0 0 24px var(--accent-2-tint-16);
 
   color-scheme: light;
 }
@@ -106,7 +263,7 @@ body,
 
 body {
   font-family: var(--font-ui);
-  font-size: 14px;
+  font-size: var(--fs-base);
   line-height: 1.6;
   color: var(--text-primary);
   background: var(--bg-base);
@@ -121,16 +278,16 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 0;
+  z-index: var(--z-bg);
   background:
-    radial-gradient(640px 420px at 82% -8%, rgba(129, 140, 248, 0.14), transparent 62%),
+    radial-gradient(640px 420px at 82% -8%, var(--accent-2-tint-14), transparent 62%),
     radial-gradient(520px 380px at -6% 104%, rgba(94, 234, 212, 0.1), transparent 60%),
     radial-gradient(420px 300px at 50% 120%, rgba(240, 171, 252, 0.07), transparent 60%);
 }
 
 [data-theme='light'] body::before {
   background:
-    radial-gradient(640px 420px at 82% -8%, rgba(129, 140, 248, 0.12), transparent 62%),
+    radial-gradient(640px 420px at 82% -8%, var(--accent-2-tint-12), transparent 62%),
     radial-gradient(520px 380px at -6% 104%, rgba(94, 234, 212, 0.1), transparent 60%);
 }
 
@@ -139,7 +296,7 @@ body::before {
 .app-bg {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-bg);
   pointer-events: none;
   background-size: cover;
   background-position: center;
@@ -176,7 +333,7 @@ body::before {
 .app-bg-veil {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--z-bg);
   pointer-events: none;
   background: #05080f;
 }
@@ -186,8 +343,16 @@ body::before {
 }
 
 ::selection {
-  background: rgba(129, 140, 248, 0.38);
+  background: var(--accent-2-tint-38);
   color: #fff;
+}
+
+/* 浅色主题的选中字不能是白字：选中芯片是 `--accent-2-tint-38`（浅靛 rgb(207,211,252)），
+   白字压上去实测只有 1.46:1 —— 划选一段文字时整段直接看不见。
+   深色主题同一组合是 9.90:1，所以问题只在浅色的这一侧。换成渐变芯片上的墨色档。 */
+[data-theme='light'] ::selection,
+[data-theme='light'] *::selection {
+  color: var(--grad-ink);
 }
 
 /* ---------- 滚动条 ---------- */
@@ -227,7 +392,7 @@ body::before {
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   padding: 8px 14px;
-  font-size: 13px;
+  font-size: var(--fs-md);
   font-weight: 500;
   font-family: inherit;
   color: var(--text-primary);
@@ -250,7 +415,7 @@ body::before {
 }
 .btn-primary {
   background: var(--grad);
-  color: #0b1020;
+  color: var(--grad-ink);
   font-weight: 600;
   border: none;
   box-shadow: 0 4px 16px rgba(94, 234, 212, 0.22);
@@ -265,9 +430,9 @@ body::before {
   border-color: var(--line);
 }
 .btn-danger:hover:not(:disabled) {
-  border-color: rgba(248, 113, 113, 0.5);
-  color: var(--err);
-  background: rgba(248, 113, 113, 0.08);
+  border-color: var(--err-tint-50);
+  color: var(--err-text);
+  background: var(--err-tint-8);
 }
 .btn-icon {
   padding: 7px;
@@ -275,7 +440,7 @@ body::before {
 }
 .btn-sm {
   padding: 5px 10px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   gap: 5px;
 }
 
@@ -288,15 +453,15 @@ select.input {
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 13.5px;
+  font-size: var(--fs-md-plus);
   padding: 9px 12px;
   outline: none;
   transition: border-color 0.18s, box-shadow 0.18s;
 }
 .input:focus,
 .textarea:focus {
-  border-color: rgba(129, 140, 248, 0.55);
-  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.14);
+  border-color: var(--accent-2-tint-55);
+  box-shadow: 0 0 0 3px var(--accent-2-tint-14);
 }
 .input::placeholder,
 .textarea::placeholder {
@@ -306,10 +471,10 @@ select.input {
 .tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   padding: 2px 9px;
   border-radius: var(--radius-pill);
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   font-weight: 500;
   border: 1px solid var(--line);
   background: var(--bg-elevated);
@@ -318,32 +483,32 @@ select.input {
 }
 .tag-accent {
   border-color: rgba(94, 234, 212, 0.35);
-  color: var(--accent);
+  color: var(--accent-text);
   background: rgba(94, 234, 212, 0.08);
 }
 .tag-violet {
-  border-color: rgba(129, 140, 248, 0.4);
-  color: #a5b0ff;
-  background: rgba(129, 140, 248, 0.1);
+  border-color: var(--accent-2-tint-40);
+  color: var(--accent-2-text);
+  background: var(--accent-2-tint-10);
 }
 .tag-pink {
   border-color: rgba(240, 171, 252, 0.35);
-  color: var(--accent-3);
+  color: var(--accent-3-text);
   background: rgba(240, 171, 252, 0.08);
 }
 .tag-warn {
   border-color: rgba(251, 191, 36, 0.4);
-  color: var(--warn);
+  color: var(--warn-text);
   background: rgba(251, 191, 36, 0.08);
 }
 .tag-err {
-  border-color: rgba(248, 113, 113, 0.4);
-  color: var(--err);
-  background: rgba(248, 113, 113, 0.08);
+  border-color: var(--err-tint-40);
+  color: var(--err-text);
+  background: var(--err-tint-8);
 }
 .tag-ok {
   border-color: rgba(52, 211, 153, 0.4);
-  color: var(--ok);
+  color: var(--ok-text);
   background: rgba(52, 211, 153, 0.08);
 }
 
@@ -373,7 +538,7 @@ select.input {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  padding: 56px 24px;
+  padding: 56px var(--space-6);
   color: var(--text-muted);
   text-align: center;
 }
@@ -381,10 +546,28 @@ select.input {
   opacity: 0.5;
 }
 
+/* 警示条（全局原语）：知识库的取消/失败提示、云端模型与语音合成的「缺依赖」提示
+   共用同一种琥珀色框。以前只有 `.kb-warn` 有样式、`.set-warn` 这个名字被写了三处
+   却**没有任何规则**，于是「服务器没装 cryptography，云模型不可用」这种关键提示
+   渲染成一坨无边界裸文本，跟正文分不出来。样式只在这里写一次。 */
+.kb-warn,
+.set-warn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 15px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--warn-text);
+  font-size: var(--fs-md);
+  margin-bottom: var(--space-4);
+}
+
 /* 加载点 */
 .dots {
   display: inline-flex;
-  gap: 4px;
+  gap: var(--space-1);
   align-items: center;
 }
 .dots i {
@@ -435,15 +618,33 @@ select.input {
   animation: spin 0.9s linear infinite;
 }
 
+/* 尊重系统的「减少动态效果」（前庭障碍用户的显式偏好）。
+   原先只有 ConfirmButton.css 自己处理，`blink`（在线状态点）、`dot-bounce`（阶段进度点）、
+   `fade-up`（气泡入场）、`spin`（加载圈）照旧无限转 —— 散在五个文件里各写一遍
+   `animation: none` 迟早漏掉新加的那个，所以在这里收成一条全局规则。
+   ⚠️ 不能写成 `animation: none`：那会把 `.spin` 之类「正在进行」的反馈彻底抹掉
+   （转圈停了用户以为卡死）。把时长压到近零 + 只跑一轮，既不动也不消失。
+   `transition` 一起收掉：hover 位移同样属于会触发不适的“移动”。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* toast */
 .toast-wrap {
   position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 200;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .toast {
   display: flex;
@@ -451,7 +652,7 @@ select.input {
   gap: 8px;
   padding: 10px 16px;
   border-radius: var(--radius);
-  font-size: 13px;
+  font-size: var(--fs-md);
   box-shadow: var(--shadow-2);
   animation: fade-up 0.24s ease both;
   border: 1px solid var(--line-strong);
@@ -544,8 +745,8 @@ select.input {
 .page-head {
   display: flex;
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 20px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
   /* 与下方的 `.usage-card` / `.set-card` 共用 --card-pad：内边距随内容宽度等比缩放，
      三页的标题块与主卡片永远是同一档留白（原来三处各写 18px 20px，改宽度时对不齐）。 */
   padding: var(--card-pad);
@@ -561,29 +762,159 @@ select.input {
   display: flex;
   align-items: center;
   gap: 9px;
-  font-size: 19px;
+  font-size: var(--fs-xl);
   font-weight: 700;
   letter-spacing: 0.4px;
 }
 .page-desc {
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: var(--fs-md);
   margin-top: 6px;
   max-width: 680px;
   line-height: 1.65;
 }
 
 .section-title {
-  font-size: 14.5px;
+  font-size: var(--fs-base-plus);
   font-weight: 650;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 @media (max-width: 720px) {
   .page {
     padding: 18px 14px 32px;
+  }
+}
+
+/* ============================================================
+   跨页共享原语（唯一定义处）
+   这四组以前住在**某个页面**的样式表里，却被别的页面/组件借用 —— 只是因为所有页面
+   最终被打进同一个 CSS 包才碰巧能用（`.kb-table` 由 UsagePanel 用、`.set-row*` 由
+   UsagePanel 与 FeedbackPage 用、`.seg*` 由 AuthPage 用、`.usage-who` 由 FeedbackPage 用），
+   页面一旦改成按需加载就会立刻失效。选择器与声明一字未改。
+   ⚠️ **打包顺序**：global.css 在产物里排在所有页面样式**之后**（Vite 按模块执行顺序拼 CSS，
+   main.tsx 里它写在 `import App` 后面）。同特异性「后写的赢」，所以凡是原先靠**源码顺序**
+   压过这些基础规则的页面样式，都必须改成靠特异性取胜 —— 已核对并处理的一处是
+   SettingsPage 的 `.bg-row`（现在写成 `.set-row.bg-row`，与 `.set-row` 的 align-items 不再抢顺序）。
+   ============================================================ */
+
+/* 记录表骨架：知识库的三张表 + 用量面板的明细表共用。
+   面板侧的密度覆盖走 `.usage-panel .kb-table …`（特异性更高），与这里的顺序无关。 */
+.kb-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-md);
+}
+.kb-table th {
+  text-align: left;
+  padding: 9px 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--line-strong);
+}
+.kb-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.kb-table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+/* 分段按钮（主题切换 / 登录注册 / 本地-云端都用它） */
+.seg {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-deep);
+}
+.seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm-plus);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+/* 选中态排在 .seg-btn 之后：两者会挂在同一个按钮上（`seg-btn seg-on`），
+   顺序反过来选中底色就会被 transparent 顶掉。 */
+.seg-on {
+  background: var(--grad-soft);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* 设置行骨架：设置页各分区 + 用量面板/反馈页的控件排布共用同一行高与分隔线。 */
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.set-row:last-child {
+  border-bottom: none;
+  padding-bottom: 4px;
+}
+
+.set-row-main {
+  flex: 1;
+  min-width: 0;
+}
+.set-row-main label {
+  display: block;
+  font-size: var(--fs-md-plus);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.set-row-main p {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  margin-top: 3px;
+  line-height: 1.55;
+}
+
+.set-row-ctl {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 页面标题右侧的账号标记（用量页与反馈页的标题都挂它）。 */
+.usage-who {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+/* 窄屏档：`.set-row` 堆叠、`.kb-table` 收次要列。
+   ⚠️ 这几条与上面的基础规则**同特异性**，靠的就是「写在后面」，所以必须跟着基础规则
+   一起搬进来 —— 留在页面样式里会让基础规则（后打包）反过来赢掉移动端那条分支。 */
+@media (max-width: 720px) {
+  .kb-table th:nth-child(2),
+  .kb-table td:nth-child(2) {
+    display: none;
+  }
+  .set-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .set-row-ctl {
+    justify-content: space-between;
   }
 }

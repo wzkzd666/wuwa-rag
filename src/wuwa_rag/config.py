@@ -37,27 +37,33 @@ class Settings(BaseSettings):
     # 时区并在日志里告警，问答不中断。中国不实行夏令时，UTC+8 全年恒定。
     TZ_NAME: str = "Asia/Shanghai"
 
+    # 端口只在根 .env 的 *_PORT 里定义一次；下面这些默认值是「没有 .env 时的回落」，
+    # 必须与 .env / docker-compose.yml / scripts/ports.ps1 / front/vite.config.ts 保持一致，
+    # 否则就是同一语义两处判据（由 tests/test_config_and_prompt.py 的端口对账用例钉住）。
+    # 口径：宿主机端口 = 2 + 标准端口（25432⇄5432）；Redis 例外取 26380，因为 26379
+    # 是 Redis Sentinel 的默认端口，占它会有歧义。整段避开 49152+（Windows 动态端口区）。
+
     # ---------- PostgreSQL（唯一真源） ----------
     PG_HOST: str = "localhost"
-    PG_PORT: int = 5432
+    PG_PORT: int = 25432
     PG_DB: str = "wuwa"
     PG_USER: str = "wuwa"
     PG_PASSWORD: str = ""
 
     # ---------- Neo4j（结构化事实 + 组队关系） ----------
-    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_URI: str = "bolt://localhost:27687"
     NEO4J_USER: str = "neo4j"
     NEO4J_PASSWORD: str = ""
 
     # ---------- Redis（缓存 + Celery broker） ----------
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str = "redis://localhost:26380/0"
 
     # ---------- RustFS / S3（原文 + 立绘） ----------
     # ⚠️ 默认凭据留空（2026-10-09 安全收紧）：原来默认 rustfsadmin/rustfsadmin，
     # 忘记配 .env 时会**静默**用这对公开默认弱凭据连上 RustFS——看起来一切正常，
     # 实际桶是拿部署默认口令开的。现在留空 = 连不上就响亮报错，逼部署者显式配置。
     # docker-compose.yml 里 RustFS 的 RUSTFS_ACCESS_KEY/SECRET_KEY 与本节必须成对设置。
-    S3_ENDPOINT: str = "http://localhost:9000"
+    S3_ENDPOINT: str = "http://localhost:29000"
     S3_ACCESS_KEY: str = ""
     S3_SECRET_KEY: str = ""
     S3_BUCKET_RAW: str = "wuwa-raw"
@@ -90,9 +96,10 @@ class Settings(BaseSettings):
     # 约束：tool 模型（抽取 / 工具 / 摘要）始终走本地 qwen3:8b，不跟随用户 provider：
     #    结构化任务要稳定 JSON，且不该把用户的 key 花在内部任务上（省钱也防泄漏面扩大）。
     CHAT_PROVIDER_DEFAULT: str = "ollama"     # ollama=本地 aemeath | openai=云端兼容 API
-    # 云端兜底默认值（用户没填时用它；base_url 留空则视为未配置）
-    CHAT_CLOUD_BASE_URL: str = ""
-    CHAT_CLOUD_MODEL: str = ""
+    # 云端作答的参数默认值（用户没填时用它）。云端**地址与模型名不在这里**：
+    # 那两个值只属于用户自己填的配置（`core/llmstore`），部署者不替所有人垫 key，
+    # 也就不存在「部署级云端兜底」这回事 —— 原来那两个字段无人读取，注释还承诺着
+    # 「用户没填时用它」，属于会误导人的死配置，已删。
     CHAT_CLOUD_TEMPERATURE: float = 0.7   # 云端通用模型不需要压低温，人设靠 system 注入
     CHAT_CLOUD_MAX_TOKENS: int = 2048
     # 防复读：云端模型同样可能复读（尤其长表格），沿用实测档位。
@@ -166,11 +173,12 @@ class Settings(BaseSettings):
 
     # ---------- 知识验证 / 重新检索（qwen3:8b verifier agent）----------
     # generate 前用 tool 模型判「检索到的资料是否真能回答问题」；判不匹配则
-    # 重检索→按角色刷新重爬→仍不足走千帆联网搜索兜底（见 rag/websearch.py）。
-    # verifier 每次问答多一次 8b 调用（实测 0.3~0.9s）；EMPTY_SKIP=True 时
-    # 材料全空直接判不足、省这次调用（空材料无需模型也该刷新）。
+    # 重检索→按角色刷新重爬→仍不足走千帆联网搜索兜底（见 services/websearch.py）。
+    # verifier 每次问答多一次 8b 调用（实测 0.3~0.9s）。材料全空时不调模型、
+    # 直接判不匹配——那是 `verify_knowledge` 里**无条件**的行为。原先这里有个
+    # VERIFY_EMPTY_SKIP 开关声称控制它，但全仓零消费者（改 True 也没任何效果），
+    # 属于会误导人的死配置，已删（2026-10-23）。
     VERIFY_ENABLED: bool = True
-    VERIFY_EMPTY_SKIP: bool = False
     VERIFY_MAX_RETRY: int = 1         # 验证不通过→重检索的最多次数（防图内死循环）
     REFRESH_WAIT_TIMEOUT: int = 180   # 刷新链（清库+重爬5步）同步等待上限，同自动爬取
     # 百度千帆联网搜索（v2 chat/completions + web_search，API 直连不走本地 SDK）。
@@ -275,7 +283,7 @@ class Settings(BaseSettings):
 
     # ---------- API（Step 9） ----------
     API_HOST: str = "127.0.0.1"
-    API_PORT: int = 8000
+    API_PORT: int = 28000
     MAX_HISTORY_TURNS: int = 3      # 带进 prompt 的历史轮数
     # 管理员种子口令（见 core/authdb.ensure_schema）。留空 = 首启随机生成一次性口令，
     # 打在 API 启动日志里（只出现一次）；显式设置 = 用它做初始口令，并把 admin 标记
@@ -286,10 +294,14 @@ class Settings(BaseSettings):
     # 反向代理（nginx/Caddy）时才设 True。直连部署保持 False——否则客户端自报一个
     # 头就能伪造来源 IP，把按 IP 的登录限速整档作废。
     TRUST_PROXY_HEADERS: bool = False
+    # 前端 dev server 端口（Vite 读 .env 的 WEB_PORT，见 front/vite.config.ts）。
+    # 单独留一个字段是因为 CORS 兜底源要跟着它走，不能再各写一份 5173 式的字面量。
+    WEB_PORT: int = 25173
     # 跨域白名单（逗号分隔，见 api/app.py）。默认**只放行 Vite 开发端口**
     # （2026-10-09 安全收紧：原来代码默认 `*`，不配环境变量就等于全网可跨域调用）。
+    # .env 里这一行写成 `http://localhost:${WEB_PORT},...`，改端口不用再动它。
     # 生产改成自己的源；确实要全放开时显式写 `CORS_ORIGINS=*`（明确决策，不再默认给）。
-    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    CORS_ORIGINS: str = "http://localhost:25173,http://127.0.0.1:25173"
 
     # ---------- 限流（slowapi，见 api/ratelimit.py）----------
     # 为什么必须有：/ask 一轮要跑检索+重排+生成（实测 20s 量级），且与 Ollama 抢同一块
@@ -309,6 +321,14 @@ class Settings(BaseSettings):
     RATE_LIMIT_TTS: str = "10/minute"
     # 会发起**出站请求**的配置类接口（/llm/models、/llm/config/test）：SSRF 面要收窄。
     RATE_LIMIT_OUTBOUND: str = "20/hour"
+    # 入库（/ingest 提交 + /knowledge/refresh 重爬）：按**登录用户**，一小时档。
+    # 为什么必须单列一档：一次提交会跑「爬外部 wiki → 分块 → 写 PG/S3 → 全量重建 BM25
+    # → 写 Neo4j」五步链，还会往**全体用户共享的语料**里写数据；而这两条端点此前
+    # 只吃 200/minute 的兜底档（等于没限），一个脚本循环提交就能把 worker 队列与
+    # 上游 wiki 打满，并把别人的检索结果换掉。
+    # 5/hour 对正常用法（补几个漏收角色）足够；`/ingest/control`（暂停/取消）不占额度，
+    # 否则用户在排队时连止损都做不了。
+    RATE_LIMIT_INGEST: str = "5/hour"
     # 兜底：未显式加限额的端点统一适用（/health 已单独豁免）。
     RATE_LIMIT_DEFAULT: str = "200/minute"
 

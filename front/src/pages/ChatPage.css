@@ -37,7 +37,7 @@
 .session-empty {
   text-align: center;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   padding: 24px 0;
 }
 
@@ -59,7 +59,7 @@
 }
 .session-active {
   background: var(--grad-soft);
-  border-color: rgba(129, 140, 248, 0.3);
+  border-color: var(--accent-2-tint-30);
   color: var(--text-primary);
 }
 .session-icon {
@@ -69,7 +69,7 @@
 .session-title {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-size: var(--fs-md);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -79,8 +79,21 @@
   gap: 2px;
   flex-shrink: 0;
 }
-.session-item:hover .session-ops {
+/* 原来只有 `:hover` 一支 —— 那是两个真实够不到的人群：
+   ① 键盘用户：`display:none` 把按钮整个移出 tab 序，重命名/删除**永远点不到**
+      （行本身 tabIndex=0 可聚焦，所以靠 `:focus-within`/`:focus-visible` 把操作显出来，
+      顺序是「聚焦行 → 出现按钮 → Tab 进入按钮」）；
+   ② 触屏用户：没有 hover 事件，同样一辈子看不见这两个按钮。
+   ⚠️ 不要退回「常显」：会话栏只有 248px，两个图标常驻会把标题挤成三五个字。 */
+.session-item:hover .session-ops,
+.session-item:focus-within .session-ops,
+.session-item:focus-visible .session-ops {
   display: flex;
+}
+@media (hover: none) {
+  .session-ops {
+    display: flex;
+  }
 }
 .session-ops button {
   background: none;
@@ -88,6 +101,10 @@
   color: var(--text-muted);
   cursor: pointer;
   padding: 3px;
+  /* 图标 12px + padding 6px ≈ 18px，低于 WCAG 2.5.8 的最小可点区 24px。
+     用 min-size 而不是加 padding：行高由标题决定，加 padding 会把整行撑高。 */
+  min-width: 24px;
+  min-height: 24px;
   border-radius: 5px;
   display: grid;
   place-items: center;
@@ -96,17 +113,17 @@
   color: var(--text-primary);
   background: var(--bg-elevated);
 }
-.session-ops .danger-confirm {
-  color: var(--err) !important;
-  background: rgba(248, 113, 113, 0.14);
-}
-
 .session-edit {
   flex: 1;
   display: flex;
   align-items: center;
   gap: 3px;
   min-width: 0;
+}
+/* 同 .kb-search：输入框自己 outline:none，聚焦态画在框上（重命名框只有键盘用户会走到） */
+.session-edit input:focus-visible {
+  outline: 2px solid var(--accent-2-text);
+  outline-offset: 1px;
 }
 .session-edit input {
   flex: 1;
@@ -115,7 +132,7 @@
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   padding: 3px 6px;
   outline: none;
   font-family: inherit;
@@ -130,12 +147,12 @@
   place-items: center;
 }
 .session-edit button:hover {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .goto-knowledge {
   width: 100%;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
 }
 
 /* ---------- 主聊天区 ---------- */
@@ -178,7 +195,7 @@
   display: grid;
   place-items: center;
   background: var(--grad);
-  color: #0b1020;
+  color: var(--grad-ink);
   box-shadow: var(--glow);
   margin-bottom: 18px;
   overflow: hidden;
@@ -208,13 +225,13 @@
   border-radius: inherit;
 }
 .chat-welcome h1 {
-  font-size: 26px;
+  font-size: var(--fs-display-lg);
   font-weight: 700;
   letter-spacing: 0.5px;
 }
 .welcome-sub {
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--fs-base);
   margin-top: 8px;
   max-width: 460px;
 }
@@ -224,8 +241,8 @@
   border-radius: var(--radius);
   border: 1px solid rgba(251, 191, 36, 0.35);
   background: rgba(251, 191, 36, 0.08);
-  color: var(--warn);
-  font-size: 12.5px;
+  color: var(--warn-text);
+  font-size: var(--fs-sm-plus);
   max-width: 520px;
 }
 
@@ -255,7 +272,7 @@
 }
 .example-card:hover {
   transform: translateY(-3px);
-  border-color: rgba(129, 140, 248, 0.45);
+  border-color: var(--accent-2-tint-45);
   box-shadow: var(--shadow-2);
   background: var(--bg-elevated);
 }
@@ -266,10 +283,10 @@
   display: grid;
   place-items: center;
   background: var(--grad-soft);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .example-text {
-  font-size: 13.5px;
+  font-size: var(--fs-md-plus);
   line-height: 1.5;
   flex: 1;
 }
@@ -291,7 +308,7 @@
     padding-top: calc(5vh / var(--ui-zoom, 1));
   }
   .chat-welcome h1 {
-    font-size: 22px;
+    font-size: var(--fs-display);
   }
 }
 
@@ -321,7 +338,7 @@
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   text-align: left;
   cursor: pointer;
   flex-shrink: 0;
@@ -407,14 +424,14 @@
   border-radius: 7px;
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.4;
   white-space: nowrap;
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.12s;
-  z-index: 40;
+  z-index: var(--z-tooltip);
 }
 .session-list.rail [data-tip]:hover::after {
   opacity: 1;

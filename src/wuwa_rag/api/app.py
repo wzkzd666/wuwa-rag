@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import uuid
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -35,7 +34,7 @@ from wuwa_rag.core import llmstore, usage
 from wuwa_rag.core.authdb import close_pool, ensure_schema
 from wuwa_rag.core.db import get_cursor
 from wuwa_rag.core.llmstore import PROVIDER_PRESETS
-from wuwa_rag.dialog.graph import ask, ask_stream, doc_sources
+from wuwa_rag.dialog.graph import all_sources, ask, ask_stream
 from wuwa_rag.dialog.memory import close_checkpointer, get_checkpointer
 from wuwa_rag.dialog.nlu import detect_slots, extract_characters, music_action
 from wuwa_rag.knowledge import domain_terms
@@ -114,8 +113,9 @@ rl.install(app)
 # 允许任意站点带凭据跨域调用本 API（浏览器规范也拒绝这种组合，Starlette 会退化成回显
 # 请求 Origin，效果同样是全放行）。本项目鉴权走 `Authorization: Bearer <token>`
 # 请求头，不依赖 Cookie，通配符场景下根本不需要 credentials。
-_cors_origins = [o.strip() for o in get_settings().CORS_ORIGINS.split(",") if o.strip()] \
-    or ["http://localhost:5173", "http://127.0.0.1:5173"]
+_st = get_settings()
+_cors_origins = [o.strip() for o in _st.CORS_ORIGINS.split(",") if o.strip()] \
+    or [f"http://localhost:{_st.WEB_PORT}", f"http://127.0.0.1:{_st.WEB_PORT}"]
 _wildcard = "*" in _cors_origins
 app.add_middleware(
     CORSMiddleware,
@@ -143,7 +143,11 @@ async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
 
 
 class AskIn(BaseModel):
-    question: str = Field(..., description="问题")
+    # 长度帽：问题会进 embedding、进 prompt、进 PG 与 checkpointer 三处存储。
+    # 不设上限时一句 5MB 的「问题」就是一张免费的提示词注入 + 存储放大票
+    # （限流只数请求数，不看体积）。512 与 llmstore.MAX_TEXT_LEN 同档：
+    # 再长的内容属于「资料」，该走 /ingest 而不是塞进问句。
+    question: str = Field(..., max_length=512, description="问题")
     thread_id: str | None = Field(None, description="会话 id；不传则新建")
 
 
@@ -154,18 +158,28 @@ class AskOut(BaseModel):
     slots: list[str] = []
     characters: list[str] = []
     docs: int = 0
-    sources: list[str] = []   # 引用来源面包屑（角色 › 模块 › 组件），去重保序
+    sources: list[str] = []   # 引用来源：文档面包屑 + 联网溯源（见 prompt.all_sources）
     truncated: bool = False   # 复读兜底触发、答案被截断过
     emotion: str = ""         # 情绪标签（TTS 用；语音服务不可用时为空串）
+    web_reason: str = ""      # 联网兜底**失败**时的一句话原因（成功为空串）
+    # 这条回答落库后的 messages.id；没落库（空答案）时为 None。
+    # 与 SSE `done.message_id` 同一个意思：调用方要靠它把本地临时 id 换成服务端真 id，
+    # 否则满意度反馈会挂在一个永远不会再出现的 id 上。
+    message_id: int | None = None
 
 
 class IngestIn(BaseModel):
-    character: str = Field(..., description="角色中文名，如 忌炎")
+    # 角色名会拼进文件路径（`RAW_DIR / f"{character}.md"`）与 S3 key、Redis 进度键。
+    # 不加约束时 `"..\..\x"` 或绝对路径可以越过 data/raw，覆盖别人正在读的语料
+    # （覆盖后还会被重新索引进 PG/Chroma/Neo4j，等于污染全体用户的知识库）。
+    character: str = Field(..., pattern=kb.CHARACTER_NAME_PATTERN,
+                         description="角色中文名，如 忌炎")
 
 
 class IngestControlIn(BaseModel):
     """暂停/继续/取消的请求体。`action` 三选一，语义见 worker.set_control。"""
-    character: str = Field(..., description="角色中文名；控制按角色生效，不按 chain_id")
+    character: str = Field(..., pattern=kb.CHARACTER_NAME_PATTERN,
+                         description="角色中文名；控制按角色生效，不按 chain_id")
     action: str = Field(..., pattern="^(pause|resume|cancel)$",
                         description="pause 暂停（worker 原地等待）｜resume 继续｜cancel 取消并掐断整条链")
 
@@ -214,10 +228,6 @@ class LlmConfigIn(BaseModel):
         False, description="是否用该模型兼任情绪判定；false 则走本地 qwen3:8b")
     password: str = Field("", description="登录密码；已解锁时可留空，传了则补建自动解锁通道")
     passphrase: str = Field("", description="加密口令；已解锁时可留空")
-
-
-class PassphraseIn(BaseModel):
-    passphrase: str = Field(..., description="用户自持的加密口令；服务端不保存")
 
 
 class UnlockIn(BaseModel):
@@ -289,7 +299,8 @@ async def api_logout(user: authn.AuthUser = Depends(authn.get_current_user)) -> 
 
 
 @app.post("/auth/password")
-async def api_change_password(body: ChangePasswordIn,
+@rl.limit_creds()
+async def api_change_password(request: Request, body: ChangePasswordIn,
                               user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """改登录密码。后端会**先用旧密码重绑**云端密钥，再更新密码哈希，
     否则改完密码就再也解不开已存的 API Key（只能删配置重填）。"""
@@ -362,12 +373,11 @@ def _spawn_profile_task(username: str, session_id: str, question: str) -> None:
     task.add_done_callback(_PROFILE_TASKS.discard)
 
 
-# ── 会话隔离 + 转录落库（本轮新增）─────────────────────────────
+# ── 会话隔离 + 转录落库 ─────────────────────────────
 
-# thread_id 是**客户端传来的字符串**，会进 PG 主键、进日志、进 checkpointer 的键，
-# 必须在入口收口。前端生成的是 8 位 base36（Math.random().toString(36).slice(2,10)），
-# 天然满足；限长是为了防「超长随机串把索引撑爆」。
-_THREAD_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# thread_id 的格式判据只有**一处**定义：`core/conversations.py` 的 `THREAD_ID_RE`
+# （入口校验与反馈落库共用，见那里的注释）。这里只是给本地调用起个短名。
+_THREAD_RE = conv.THREAD_ID_RE
 
 
 def _client_thread_id(raw: str | None) -> str:
@@ -391,6 +401,7 @@ def _meta_of(evt: dict) -> dict:
         "sources": evt.get("sources") or [],
         "truncated": bool(evt.get("truncated")),
         "emotion": evt.get("emotion", ""),
+        "web_reason": evt.get("web_reason", ""),
     }
 
 
@@ -490,7 +501,13 @@ async def _stream_answer_inner(user: authn.AuthUser, tid: str, question: str, ke
                 # 列表，晚一步就是「刚聊完一刷新答案没了」的竞态。
                 answer = evt.get("answer") or ""
                 if answer:
-                    await conv.append_message(user.id, tid, "assistant", answer, _meta_of(evt))
+                    # append_message 返回的是 DB 行号，必须回填进 done 事件：
+                    # 这条气泡在前端此刻还是本地随机 uid，而反馈（👍/👎）按 msg.id 提交。
+                    # 不给它服务端真 id，就会出现「刷新之后刚点的评价找不回来」和
+                    # 「同一条回答被评两次（一次 uid、一次数字 id）」——评价记录没丢，
+                    # 丢的是**归属**（target_id 指向一个永远不会再出现的 id）。
+                    mid = await conv.append_message(user.id, tid, "assistant", answer, _meta_of(evt))
+                    evt["message_id"] = mid
                 # 回给前端的必须是**短 id**（它只认自己的 id，不认 u<id>: 前缀）
                 evt["thread_id"] = tid
             yield evt
@@ -524,16 +541,17 @@ async def api_ask(request: Request, body: AskIn,
                       user_id=user.id)
     log.info("ask thread=%s 意图=%s 角色=%s", key, r.get("intent"), r.get("characters"))
     answer = r.get("answer") or ""
+    mid: int | None = None
     if answer:
-        await conv.append_message(user.id, tid, "assistant", answer, {
-            "intent": r.get("intent", ""),
-            "slots": r.get("slots") or [],
-            "characters": r.get("characters") or [],
+        # meta 的键名只有 `_meta_of` 一份写法。这里先把 `/ask` 的返回**归一成 done 事件的
+        # 形态**（`ask()` 给的是文档对象列表，而 meta 要的是「条数 + 来源」），
+        # 而不是再手拼一遍七个键 —— 两条入口各写一遍落库逻辑迟早走偏。
+        # 与流式路径同一件事：把落库行号回给调用方（见 `_stream_answer_inner` 的注释）。
+        mid = await conv.append_message(user.id, tid, "assistant", answer, _meta_of({
+            **r,
             "docs": len(r.get("docs") or []),
-            "sources": doc_sources(r.get("docs") or []),
-            "truncated": bool(r.get("truncated")),
-            "emotion": r.get("emotion", ""),
-        })
+            "sources": all_sources(r.get("docs") or [], r.get("web_sources") or []),
+        }))
     _spawn_profile_task(user.username, key, body.question)
     return AskOut(
         answer=answer,
@@ -542,9 +560,11 @@ async def api_ask(request: Request, body: AskIn,
         slots=r.get("slots") or [],
         characters=r.get("characters") or [],
         docs=len(r.get("docs") or []),
-        sources=doc_sources(r.get("docs") or []),
+        sources=all_sources(r.get("docs") or [], r.get("web_sources") or []),
         truncated=bool(r.get("truncated")),
         emotion=r.get("emotion", ""),
+        web_reason=r.get("web_reason", ""),
+        message_id=mid,
     )
 
 
@@ -643,7 +663,8 @@ async def api_conversations_clear(user: authn.AuthUser = Depends(authn.get_curre
 
 
 @app.post("/conversations/{thread_id}/regenerate")
-async def api_conversation_regenerate(thread_id: str,
+@rl.limit_ask()   # 重新生成跑的是**整条问答链**（检索+重排+GPU+画像抽取），必须与 /ask 同档同计数；
+async def api_conversation_regenerate(request: Request, thread_id: str,
                                       user: authn.AuthUser = Depends(authn.get_current_user)):
     """重新生成最后一条回答。
 
@@ -745,7 +766,8 @@ async def api_tts_config_get(user: authn.AuthUser = Depends(authn.get_current_us
 
 
 @app.put("/tts/config")
-async def api_tts_config_put(body: TtsConfigIn,
+@rl.limit_creds()
+async def api_tts_config_put(request: Request, body: TtsConfigIn,
                              user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """保存语音凭据（api_key 加密落库）。留空 api_key = 保留原 key。
 
@@ -796,7 +818,8 @@ async def api_llm_config_get(user: authn.AuthUser = Depends(authn.get_current_us
 
 
 @app.post("/llm/unlock")
-async def api_llm_unlock(body: UnlockIn,
+@rl.limit_creds()
+async def api_llm_unlock(request: Request, body: UnlockIn,
                          user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """解锁自己的云端密钥：登录密码（自动通道）或加密口令（兜底）任选其一。
 
@@ -818,7 +841,8 @@ async def api_llm_lock(user: authn.AuthUser = Depends(authn.get_current_user)) -
 
 
 @app.post("/llm/passphrase")
-async def api_llm_passphrase(body: ChangePassphraseIn,
+@rl.limit_creds()
+async def api_llm_passphrase(request: Request, body: ChangePassphraseIn,
                              user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """更换加密口令：必须提供**原口令**，服务端用它解出 key 再用新口令重新加密。"""
     try:
@@ -854,7 +878,8 @@ async def api_llm_enabled(body: LlmEnabledIn,
 
 
 @app.put("/llm/config")
-async def api_llm_config_put(body: LlmConfigIn,
+@rl.limit_creds()
+async def api_llm_config_put(request: Request, body: LlmConfigIn,
                              user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """保存云端模型配置（api_key 加密落库）。留空 api_key = 保留原 key。
 
@@ -926,10 +951,11 @@ async def api_llm_config_delete(user: authn.AuthUser = Depends(authn.get_current
     return {"ok": ok, "deleted": ok}
 
 
-# ── 知识库入库（管理员专属） ─────────────────────────────
+# ── 知识库入库（提交/查进度对全体登录用户开放；重爬与删角色才 admin）─────
 
 @app.post("/ingest")
-async def api_ingest(body: IngestIn,
+@rl.limit_ingest()
+async def api_ingest(request: Request, body: IngestIn,
                      user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """把一个角色塞进异步流水线，立即返回 chain_id。
 
@@ -1017,8 +1043,18 @@ async def api_ingest_records(limit: int = 20,
         *(asyncio.to_thread(get_progress, r["character"]) for r in rows)
     )
     items = []
+    masked: list[int] = []
     for r, snap in zip(rows, snaps):
         live = _live_status(snap)
+        # crawl_runs.error 是 worker 写的异常原文（可能带 URL/内部路径），
+        # 对非管理员换成「哪一步失败了」——判定用五步快照里第一个 failed 的步骤，
+        # 与 /ingest/status 用的是同一份快照；措辞也只有一处（`_public_step_error`）。
+        err = r["error"]
+        if err and user.role != "admin" and err != CANCEL_ERROR:
+            step = next((k for k in PIPELINE_STEPS
+                         if snap and snap["steps"].get(k) == "failed"), "")
+            err = _public_step_error(step, err, is_admin=False)
+            masked.append(r["id"])
         items.append({
             "id": r["id"],
             "character": r["character"],
@@ -1026,14 +1062,31 @@ async def api_ingest_records(limit: int = 20,
             "submitted_by_name": r["submitted_by_name"] or "自动",
             "chain_id": r["chain_id"],
             "state": r["status"],
-            "error": r["error"],
+            "error": err,
             "created_at": r["started_at"].isoformat() if r["started_at"] else None,
             "finished_at": r["finished_at"].isoformat() if r["finished_at"] else None,
             "status": live,
             # 前端不自己判身份（它拿不到 user.id），一律照服务端给的 can_control 显示按钮
             "can_control": _may_control(user, r["submitted_by"]),
         })
+    # 一条汇总而不是每条一行：这个端点被前端 3s 轮询，按条写会把日志刷满。
+    if masked:
+        log.info("入库记录 %s 的失败原因对非管理员隐藏了原文（共 %d 条）",
+                 ",".join(str(i) for i in masked[:10]), len(masked))
     return {"items": items, "total": len(items)}
+
+
+def _delete_crawl_run(record_id: int, user: authn.AuthUser) -> str:
+    """查授权并删一行账本（同步驱动，跑在线程里）。返回角色名。"""
+    with psycopg.connect(get_settings().PG_DSN) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT character, submitted_by FROM crawl_runs WHERE id = %s", (record_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="记录不存在")
+            _require_may_control(user, row[1])
+            cur.execute("DELETE FROM crawl_runs WHERE id = %s", (record_id,))
+    return row[0]
 
 
 @app.delete("/ingest/records/{record_id}")
@@ -1043,15 +1096,29 @@ async def api_ingest_record_delete(record_id: int,
 
     权限：admin 随便删；普通用户只能删**自己提交的**那几条。
     """
-    with psycopg.connect(get_settings().PG_DSN) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT character, submitted_by FROM crawl_runs WHERE id = %s", (record_id,))
-            row = cur.fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="记录不存在")
-            _require_may_control(user, row[1])
-            cur.execute("DELETE FROM crawl_runs WHERE id = %s", (record_id,))
-    return {"id": record_id, "character": row[0]}
+    # ⚠️ 必须丢线程池：直连 PG 是**同步阻塞**调用，留在 async 处理函数里
+    # 就是把整个事件循环钉在这次网络往返上（同文件其余 PG 触点都是 to_thread 口径，
+    # 这里曾是唯一漏掉的一处 —— 判据只能有一份）。
+    character = await asyncio.to_thread(_delete_crawl_run, record_id, user)
+    return {"id": record_id, "character": character}
+
+
+def _public_step_error(step: str, raw: str | None, is_admin: bool) -> str | None:
+    """入库某一步的失败原因，是否把**原文**发给调用方。
+
+    这些字符串是 worker 写的 `f"fetch: {exc}"` 之类异常原文，可能带 URL、内部路径、
+    上游响应片段。本项目的既有口径是「客户端只给编号/中文一句话，原文进日志」
+    （`on_unhandled` 与 SSE 的 error 事件都这样），而入库账本这两个出口
+    （`/ingest/records`、`/ingest/status`）原先把原文发给了**任意登录用户**——补齐。
+    非管理员拿到的仍是**有用的**信息：哪一步失败了；`step` 取不到时只说「入库失败」。
+    ⚠️ `CANCEL_ERROR` 是本项目自己写的哨兵字符串、不是异常原文，
+    且下游靠它判「已取消」（见调用处的 `== CANCEL_ERROR`），必须原样透出。
+    本函数**不打日志**：它在一个被前端 3s 轮询的循环里，日志由调用方按次汇总一条。
+    """
+    if not raw or is_admin or raw == CANCEL_ERROR:
+        return raw
+    label = STEP_LABELS.get(step, "")
+    return f"「{label}」这一步失败了，详情请联系管理员" if label else "入库失败，详情请联系管理员"
 
 
 def _live_status(snap: dict | None) -> str:
@@ -1071,7 +1138,7 @@ def _live_status(snap: dict | None) -> str:
 
 
 @app.get("/ingest/status")
-async def api_ingest_status(character: str,
+async def api_ingest_status(character: str = Query(..., pattern=kb.CHARACTER_NAME_PATTERN),
                             user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
     """按角色查入库进度（worker 侧 _progress_mark 写 Redis 聚合键）。
 
@@ -1099,7 +1166,8 @@ async def api_ingest_status(character: str,
     for k in PIPELINE_STEPS:
         steps.append({"key": k, "label": STEP_LABELS[k],
                       "status": snap["steps"].get(k, "pending"),
-                      "error": snap.get("errors", {}).get(k)})
+                      "error": _public_step_error(k, snap.get("errors", {}).get(k),
+                                                  user.role == "admin")})
     # 被取消时把整体状态也标成 cancelled：失败原因落在 error 里，前端据此显示「已取消」
     cancelled = ctl == "cancel" or any(s["error"] == CANCEL_ERROR for s in steps)
     return {"character": character,
@@ -1183,7 +1251,8 @@ async def api_knowledge_characters(
 
 
 @app.post("/knowledge/refresh")
-async def api_knowledge_refresh(body: IngestIn,
+@rl.limit_ingest()   # 与 /ingest 同一个能力（跑整条五步链），共用一份计数
+async def api_knowledge_refresh(request: Request, body: IngestIn,
                                 user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
     """重爬更新：**先清该角色的旧知识**，再重跑五步链。
 
@@ -1197,7 +1266,7 @@ async def api_knowledge_refresh(body: IngestIn,
 
 @app.delete("/knowledge/characters/{character}")
 async def api_knowledge_delete(
-        character: str,
+        character: str = Path(..., pattern=kb.CHARACTER_NAME_PATTERN),
         user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
     """删除该角色的知识库：PG（级联 chunks）+ Chroma + Neo4j + BM25 全清。
 

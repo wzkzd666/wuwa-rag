@@ -1,3 +1,4 @@
+import { fmtTime } from '../lib/format'
 import { useCallback, useEffect, useState } from 'react'
 import { ChevronDown, Loader2, RefreshCw, ThumbsDown, ThumbsUp, Trash2 } from 'lucide-react'
 
@@ -80,7 +81,7 @@ export default function FeedbackPanel({ days }: { days: number }) {
                 <div className="fb-item-head">
                   <b>{it.username}</b>
                   <span className="fb-item-time">
-                    {new Date(it.created_at || '').toLocaleString('zh-CN')}
+                    {fmtTime(it.created_at)}
                   </span>
                   {it.rating === -1
                     ? <span className="tag tag-err">不满意</span>

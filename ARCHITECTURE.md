@@ -68,7 +68,7 @@ uv run python scripts/check_layers.py --dot    # 额外输出 Graphviz DOT
 ```
 
 它按上面的分层表扫描全部内部导入，报告**分层方向违规**与**循环依赖**。
-改完结构跑一次；接 CI 后可以作为提交门禁。当前状态：**56 个模块，165 条依赖边（2026-10-10 起：音乐修复新增 dialog.graph→services.profile 一条边），0 违规，0 环**。
+改完结构跑一次；接 CI 后可以作为提交门禁。当前状态：**56 个模块，168 条依赖边，0 违规，0 环**（边数沿革：2026-10-10 音乐修复 +1 → 165；2026-10-23 `/music/status` 失败路径补日志，新增 api.music→ww_logger 一条 → 166；同日把 `thread_id` 判据收进 `core/conversations`，`core.feedback` 与 `api.usage` 各引一次 → 168。数字由 `test_architecture_layers.py` 钉住，变了必须读懂为什么变再更新）。
 
 > 📌 2026-10-06：清掉了 2026-09-30 重构遗留的 5 个空壳包（`rag/` `graph/` `ingest/`
 > `retrieval/` `storage/`，均只含 `__init__.py`、贡献 0 条依赖边，无任何代码引用），
@@ -166,7 +166,7 @@ LangGraph 编排层，也是全项目最厚的一层。
 |---|---|
 | `app.py` | 全部路由：`/ask` `/ask/stream`(SSE) `/ingest` `/ingest/status` `/llm/*` `/tts` `/profile` `/admin/users` … |
 | `auth.py` | 注册/登录/token 校验、`get_current_user` / `require_admin` 依赖 |
-| `ratelimit.py` | 限流（slowapi）：`limit_auth` / `limit_ask` / `limit_tts` / `limit_outbound` 四档 + `install(app)` |
+| `ratelimit.py` | 限流（slowapi）：`limit_auth` / `limit_ask` / `limit_tts` / `limit_outbound` / `limit_ingest` / `limit_creds` 六档（后两档必须 `shared_limit`：同一能力的多个入口共用一个计数器） + `install(app)` |
 | `usage.py` | token 用量汇总（`/usage/summary`）：管理员看全员、普通用户强制只看自己（越权在后端拦） |
 | `music.py` | 播放状态与控制（`/music/status` `/music/control` `/music/setting`）—— 前端顶栏播放条的数据来源 |
 | `server.py` | uvicorn 启动入口（**唯一**需要 `SelectorEventLoop` 的 async 入口之一） |

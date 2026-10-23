@@ -7,12 +7,16 @@
       2) 等待基础设施就绪               —— PG 健康检查 + Redis PING + 端口探测
       3) 幂等应用建表 SQL               —— pgsql/001_init.sql（全 IF NOT EXISTS）
       4) Celery worker                  —— 独立窗口，--pool=solo（Windows 必须）
-      5) FastAPI                        —— 独立窗口，:8000
+      5) FastAPI                        —— 独立窗口（端口 = .env 的 API_PORT）
       6) 等待 /health 200 后再起前端      —— 顺序反了会刷一片 ECONNREFUSED
-      7) 前端 Vite                      —— 独立窗口，:5173
+      7) 前端 Vite                      —— 独立窗口（端口 = .env 的 WEB_PORT）
       7) 轮询 /health 就绪 + 检查 Ollama aemeath 模型
     各后台窗口 PID 记录到 .runtime/dev.pids.json，供 stop.ps1 精准关闭。
-    生成模型由 Ollama 承载（LLM_URL=:11434，模型名 aemeath），无需另起本地推理服务。
+    ⚠️ 本脚本**不写死任何端口**：一律从根 .env 读（见 scripts/ports.ps1）。
+       写死的下场是「改了 .env 忘了改脚本」——探测的是旧端口，表现成启动超时，
+       而真实服务其实好着，排查方向会被整个带偏。
+    生成模型由 Ollama 承载（.env 的 LLM_URL，默认 11434，模型名 aemeath），
+    无需另起本地推理服务。Ollama 是外部依赖，端口不由本项目发布，故不改它。
 .PARAMETER NoDocker
     跳过 docker compose（容器已在运行时用）
 .PARAMETER NoMigrate
@@ -20,7 +24,7 @@
 .PARAMETER NoFront
     不启动前端
 .PARAMETER Open
-    全部就绪后自动打开浏览器 http://localhost:5173
+    全部就绪后自动打开浏览器（前端地址，端口 = 根 .env 的 WEB_PORT）
 .EXAMPLE
     .\scripts\start.ps1
     .\scripts\start.ps1 -NoDocker -Open
@@ -42,6 +46,10 @@ $RunDir   = Join-Path $Root '.runtime'
 $PidFile  = Join-Path $RunDir 'dev.pids.json'   # 运行时状态放 .runtime/，与日志分离
 $SqlFile  = Join-Path $Root 'pgsql\001_init.sql'
 $FrontDir = Join-Path $Root 'front'
+
+# 端口从根 .env 现取，脚本里一个数字都不写（口径与 dotenv/Compose 一致，见 ports.ps1）
+. (Join-Path $PSScriptRoot 'ports.ps1')
+$Ports = Get-WuwaPorts $Root
 
 foreach ($d in $LogDir, $RunDir) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
@@ -65,6 +73,8 @@ function Test-TcpPort([string]$ComputerName, [int]$Port, [int]$TimeoutMs = 1500)
     } catch { return $false }
     finally { $client.Close() }
 }
+
+# ---------- 端口占用预检：Get-PortOwner / Get-WuwaPortClashes 见 scripts/ports.ps1 ----------
 
 # ---------- 轮询等待条件 ----------
 function Wait-Until {
@@ -138,6 +148,22 @@ try {
             Write-Err2 'Docker 守护进程未运行，请先启动 Docker Desktop（或加 -NoDocker 跳过）'
             exit 1
         }
+        # ---- 端口占用预检：只检本项目要**发布**到宿主机的那几个端口 ----
+        # 容器内部端口（冒号右侧）不参与，撞不到宿主机。
+        # 豁免名单 = 本项目**正在跑的容器实际发布的端口号**（见 ports.ps1 的说明：
+        # 按进程豁免会连别家容器的占用一起放过，等于预检失明）。
+        $ownPublished = @(Get-WuwaOwnPublishedPorts)
+        $clashes = @(Get-WuwaPortClashes $Ports -OwnPublished $ownPublished)
+        if ($clashes.Count -gt 0) {
+            Write-Err2 '端口已被占用，docker compose 起不来。关掉占用者，或改根 .env 里对应的 *_PORT：'
+            foreach ($c in $clashes) {
+                Write-Info ("  {0,-14} :{1}  <= PID {2} {3}" -f $c.Service, $c.Port, $c.Owner.Pid, $c.Owner.Name)
+                if ($c.Owner.Cmd) { Write-Info ("      {0}" -f $c.Owner.Cmd) }
+            }
+            exit 1
+        }
+        Write-Ok "端口占用预检通过（本项目已发布端口 $($ownPublished -join ', ')）"
+
         Push-Location $Root
         try {
             # 必须**裸调用**（stderr 不重定向）：compose 的彩色进度渲染靠检测真终端，
@@ -166,9 +192,13 @@ try {
         }
         if ($redisReady) { Write-Ok 'Redis PONG' } else { Write-Warn2 'Redis 未就绪' }
 
-        # Neo4j bolt / RustFS 端口
-        if (Wait-Until -TimeoutSec 60 -Test { Test-TcpPort 'localhost' 7687 }) { Write-Ok 'Neo4j :7687 可达' } else { Write-Warn2 'Neo4j 端口未就绪' }
-        if (Wait-Until -TimeoutSec 40 -Test { Test-TcpPort 'localhost' 9000 }) { Write-Ok 'RustFS :9000 可达' } else { Write-Warn2 'RustFS 端口未就绪' }
+        # Neo4j bolt / RustFS S3 API 端口探测。
+        # Redis 不在这里探：上面已经 `docker exec ... redis-cli ping` 走容器内部验过，
+        # 宿主机发布端口只服务外部客户端，再探一次只是多等一轮没意义的超时。
+        $bolt = $Ports.Neo4jBolt
+        $s3Api = $Ports.S3Api
+        if (Wait-Until -TimeoutSec 60 -Test { Test-TcpPort 'localhost' $bolt }) { Write-Ok "Neo4j :$bolt 可达" } else { Write-Warn2 "Neo4j 端口 :$bolt 未就绪" }
+        if (Wait-Until -TimeoutSec 40 -Test { Test-TcpPort 'localhost' $s3Api }) { Write-Ok "RustFS :$s3Api 可达" } else { Write-Warn2 "RustFS 端口 :$s3Api 未就绪" }
     } else {
         Write-Step '跳过 Docker（-NoDocker）'
     }
@@ -200,8 +230,10 @@ try {
         -Command '$env:WUWA_LOG_ROLE=''worker''; uv run celery -A wuwa_rag.tasks.worker:celery_app worker --pool=solo --loglevel=info' | Out-Null
 
     # ========== 4. FastAPI ==========
-    Write-Step '启动 FastAPI（:8000）'
-    Start-ServiceWindow -Name 'api' -Title '潮声智库 · FastAPI :8000' -WorkDir $Root `
+    $apiPort = $Ports.Api
+    $webPort = $Ports.Web
+    Write-Step "启动 FastAPI（:$apiPort）"
+    Start-ServiceWindow -Name 'api' -Title "潮声智库 · FastAPI :$apiPort" -WorkDir $Root `
         -Command '$env:WUWA_LOG_ROLE=''api''; uv run python -m wuwa_rag.api.server' | Out-Null
 
     # ========== 5. 等后端就绪，再开前端 ==========
@@ -210,24 +242,41 @@ try {
     # /health、/auth/me、/conversations…，而后端还在启动 —— 那 2~3 秒的空窗里
     # 代理会刷出一片 ECONNREFUSED（用户实测「问题依旧存在」的根因）。
     Write-Step '等待后端 /health 就绪'
+    $healthUrl = "http://127.0.0.1:$apiPort/health"
     $apiReady = Wait-Until -TimeoutSec 120 -IntervalMs 1500 -What 'API' -Test {
         try {
-            $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/health' -UseBasicParsing -TimeoutSec 3
+            $r = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 3
             return ($r.StatusCode -eq 200)
         } catch { return $false }
     }
     if ($apiReady) { Write-Ok 'FastAPI /health 返回 200' }
-    else { Write-Warn2 'API 未在 120s 内就绪，请看「FastAPI :8000」窗口日志（首次加载模型较慢）' }
+    else {
+        Write-Warn2 "API 未在 120s 内就绪，请看「FastAPI :$apiPort」窗口日志（首次加载模型较慢）"
+        # uvicorn 抢不到端口时是**静默**起不来的（只在它自己窗口里抛一句 bind error），
+        # 这里顺手把端口当前的占用者打出来，省得对着超时日志猜。
+        $apiOwner = Get-PortOwner $apiPort
+        if ($apiOwner) {
+            Write-Info ("  :$apiPort 现由 PID {0} {1} 占用{2}" -f $apiOwner.Pid, $apiOwner.Name, `
+                $(if ($apiOwner.Cmd) { "  <- $($apiOwner.Cmd)" } else { '' }))
+        }
+    }
 
     # ========== 6. 前端 Vite ==========
     if (-not $NoFront) {
-        Write-Step '启动前端 Vite（:5173）'
+        Write-Step "启动前端 Vite（:$webPort）"
+        # 前端开了 strictPort（见 front/vite.config.ts）：端口被占时直接失败而不是
+        # 悄悄漂到别的端口——origin 一变，浏览器 localStorage 就是另一套，已登录用户
+        # 会莫名其妙被要求重新登录。所以这里预先点出占用者。
+        $webOwner = Get-PortOwner $webPort
+        if ($webOwner) {
+            Write-Warn2 ("端口 :$webPort 已被 PID {0} {1} 占用，Vite 会直接拒绝启动" -f $webOwner.Pid, $webOwner.Name)
+        }
         if (Test-Path (Join-Path $FrontDir 'node_modules')) {
-            Start-ServiceWindow -Name 'front' -Title '潮声智库 · 前端 :5173' -WorkDir $FrontDir `
+            Start-ServiceWindow -Name 'front' -Title "潮声智库 · 前端 :$webPort" -WorkDir $FrontDir `
                 -Command 'npm run dev' | Out-Null
         } else {
             Write-Warn2 '前端依赖未安装，先跑 npm install（在新窗口）'
-            Start-ServiceWindow -Name 'front' -Title '潮声智库 · 前端 :5173' -WorkDir $FrontDir `
+            Start-ServiceWindow -Name 'front' -Title "潮声智库 · 前端 :$webPort" -WorkDir $FrontDir `
                 -Command 'npm install; npm run dev' | Out-Null
         }
     } else {
@@ -258,18 +307,21 @@ try {
     Write-Host @"
 
   ── 全部启动完成 ──────────────────────────────
-    前端     http://localhost:5173
-    后端 API http://127.0.0.1:8000  (/docs 看接口)
-    Ollama   http://localhost:11434
-    RustFS   http://localhost:9001  (控制台)
-    Neo4j    http://localhost:7474
+    前端        http://localhost:$webPort
+    后端 API    http://127.0.0.1:$apiPort  (/docs 看接口)
+    Neo4j       http://localhost:$($Ports.Neo4jHttp)   （Bolt 端口 $($Ports.Neo4jBolt)）
+    RustFS      http://localhost:$($Ports.S3Console)   （S3 API 端口 $($Ports.S3Api)）
+    PostgreSQL  localhost:$($Ports.Pg)      Redis  localhost:$($Ports.Redis)
+    Ollama      http://localhost:$($Ports.Llm)  （外部依赖，端口不由本项目发布）
+
+  端口一律来自根目录 .env 顶部的 *_PORT，改端口只改那一个文件。
 
   停止全部： .\scripts\stop.ps1   （或 .\dev.bat stop）
   PID 记录： $PidFile
 "@ -ForegroundColor Green
 
     if ($Open) {
-        Start-Process 'http://localhost:5173'
+        Start-Process "http://localhost:$webPort"
     }
 }
 catch {

@@ -76,12 +76,16 @@ class BM25Index:
         """保存，对应的专业术语一并存进去，确保使用时环境稳定"""
         path = path or (s.VECTOR_DIR / "bm25.pkl")
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("wb") as f:
-            pickle.dump(
-                {"chunk_ids": self.chunk_ids, "bm25": self.bm25, "terms": self.terms},
-                f,
-                protocol=pickle.HIGHEST_PROTOCOL,
-            )
+        payload = {"chunk_ids": self.chunk_ids, "bm25": self.bm25, "terms": self.terms}
+        # ⚠️ 必须「先写临时文件再 replace」而不是就地截断：BM25 是全量重建、
+        # 而 API 进程每轮问答都在 `load()` 同一个文件（还是另一个进程在写）。
+        # 就地 `open("wb")` 会先清空再写，中间那一刻读到的就是半截 pickle ——
+        # 表现为 `vector_search` 直接抛异常（EOFError/UnpicklingError），
+        # 而不是「这次重建还没生效」这种可接受的降级。`replace` 在同目录内是原子的。
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        tmp.replace(path)
         return path
 
     @classmethod

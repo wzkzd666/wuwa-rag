@@ -1,21 +1,14 @@
+/* ⚠️ 这里原来写 `max-width: 960px; margin: 0 auto` —— 但限宽统一由 global.css 的
+   `.page > *` 负责（`--content-max`，设置页滑块实时写入），所以这条**根本没生效**：
+   直接子元素全被压在 --content-max 里，960 只是把根盒子撑宽了一圈看不见的空白。
+   它真正的害处是「读起来像知识库自带一套宽度」——与 settings/history 两页刚清掉的
+   是同一个坑（见那两个文件开头）。口径统一：页面根只做 `min-width: 0`。 */
 .knowledge-page {
-  max-width: 960px;
-  margin: 0 auto;
-  width: 100%;
+  min-width: 0;
 }
 
-.kb-warn {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 11px 15px;
-  border-radius: var(--radius);
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  background: rgba(251, 191, 36, 0.08);
-  color: var(--warn);
-  font-size: 13px;
-  margin-bottom: 16px;
-}
+/* `.kb-warn` 已收进 global.css 与 `.set-warn` 共用一份样式（警示框是全局原语，
+   不该住在某个页面的 CSS 里被别的页面「借用」）。 */
 
 .kb-owned,
 .kb-form,
@@ -26,7 +19,7 @@
 
 .kb-label {
   display: block;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   color: var(--text-secondary);
   margin-bottom: 9px;
   font-weight: 500;
@@ -65,16 +58,16 @@
   display: grid;
   place-items: center;
   background: var(--grad-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   flex-shrink: 0;
 }
 .pipeline-step b {
   display: block;
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   font-weight: 600;
 }
 .pipeline-step span {
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
   line-height: 1.45;
 }
@@ -92,7 +85,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 14.5px;
+  font-size: var(--fs-base-plus);
   font-weight: 650;
 }
 /* 角色计数气泡 —— 数字要一眼看到，但别抢标题的视觉重量 */
@@ -104,9 +97,9 @@
   padding: 0 7px;
   border-radius: var(--radius-pill);
   background: var(--grad-soft);
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: var(--font-mono);
-  font-size: 11.5px;
+  font-size: var(--fs-xs-plus);
   font-weight: 600;
 }
 .kb-owned-tools {
@@ -126,12 +119,17 @@
   border: 1px solid var(--line);
   color: var(--text-muted);
 }
+/* `input` 自己写的是 `outline:none`（内部无边框的观感需要它），所以聚焦态必须画在**外壳**上，
+   与 .hist-search:focus-within 同一口径 —— 否则键盘用户完全看不出光标在哪个框里。 */
+.kb-search:focus-within {
+  border-color: var(--accent-2-tint-50);
+}
 .kb-search input {
   border: none;
   outline: none;
   background: transparent;
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   font-family: inherit;
   width: 140px;
 }
@@ -164,7 +162,7 @@
 }
 .kb-pager-info {
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
 }
 .kb-pager-btns {
   display: flex;
@@ -186,7 +184,7 @@
   background: none;
   border-radius: 0;
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 400;
   white-space: nowrap;
   vertical-align: middle;
@@ -210,7 +208,7 @@
 .kb-src-sub {
   display: block;
   margin-top: 1px;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   color: var(--text-muted);
 }
 
@@ -223,7 +221,7 @@
 .kb-candidates-title {
   display: block;
   margin-bottom: 9px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-muted);
 }
 
@@ -238,63 +236,38 @@
   border: 1px solid var(--line);
   background: var(--bg-deep);
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   font-family: inherit;
   cursor: pointer;
   transition: all 0.15s;
 }
 .roster-chip:hover {
   border-color: rgba(94, 234, 212, 0.5);
-  color: var(--accent);
+  color: var(--accent-text);
   background: rgba(94, 234, 212, 0.08);
   transform: translateY(-1px);
 }
 
 /* 记录表 */
 .kb-records h3 {
-  font-size: 14.5px;
+  font-size: var(--fs-base-plus);
   font-weight: 650;
   margin-bottom: 12px;
 }
-.kb-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.kb-table th {
-  text-align: left;
-  padding: 9px 12px;
-  color: var(--text-muted);
-  font-weight: 500;
-  font-size: 12px;
-  border-bottom: 1px solid var(--line-strong);
-}
-.kb-table td {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--line);
-}
-.kb-table tbody tr:hover td {
-  background: var(--bg-hover);
-}
+/* `.kb-table` / `.kb-table th` / `td` / hover 与它的窄屏收列规则已搬到 global.css
+   的「跨页共享原语」段（用量面板的明细表也在用同一副骨架）。 */
 .kb-char {
   font-weight: 600;
   color: var(--text-primary);
 }
 .kb-mono {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--text-secondary);
 }
 .kb-time {
   color: var(--text-muted);
-  font-size: 12px;
-}
-
-@media (max-width: 720px) {
-  .kb-table th:nth-child(2),
-  .kb-table td:nth-child(2) {
-    display: none;
-  }
+  font-size: var(--fs-sm);
 }
 
 /* 五步入库进度条 */
@@ -310,7 +283,7 @@
   gap: 3px;
   padding: 2px 7px;
   border-radius: var(--radius-pill);
-  font-size: 11px;
+  font-size: var(--fs-xs);
   border: 1px solid var(--line);
   background: var(--bg-deep);
   color: var(--text-muted);
@@ -319,19 +292,19 @@
   font-style: normal;
 }
 .step-running {
-  border-color: rgba(129, 140, 248, 0.5);
-  color: #a5b0ff;
-  background: rgba(129, 140, 248, 0.1);
+  border-color: var(--accent-2-tint-50);
+  color: var(--accent-2-text);
+  background: var(--accent-2-tint-10);
 }
 .step-success {
   border-color: rgba(52, 211, 153, 0.45);
-  color: var(--ok);
+  color: var(--ok-text);
   background: rgba(52, 211, 153, 0.08);
 }
 .step-failed {
-  border-color: rgba(248, 113, 113, 0.5);
-  color: var(--err);
-  background: rgba(248, 113, 113, 0.09);
+  border-color: var(--err-tint-50);
+  color: var(--err-text);
+  background: var(--err-tint-9);
 }
 .step-bar .tag {
   margin-left: 4px;
@@ -366,12 +339,12 @@
   min-width: 0;
 }
 .kb-pin-name {
-  font-size: 13.5px;
+  font-size: var(--fs-md-plus);
   font-weight: 650;
 }
 .kb-pin-why {
-  color: var(--err);
-  font-size: 12px;
+  color: var(--err-text);
+  font-size: var(--fs-sm);
   line-height: 1.5;
 }
 /* 失败原因可能很长（抓取异常原文），限两行并允许悬停看全文 */
@@ -388,7 +361,7 @@
   flex-shrink: 0;
 }
 .kb-btn-danger {
-  color: var(--err);
+  color: var(--err-text);
   border-color: var(--line-strong);
 }
 .kb-btn-danger:hover:not(:disabled) {
@@ -398,13 +371,13 @@
 /* 提交记录里的「提交人」：账本是服务端的，这一列回答「这条是谁提的」 */
 .kb-who {
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: var(--fs-sm-plus);
   white-space: nowrap;
 }
 
 /* 别人的提交：只读标记（中性色，别用失败红） */
 .kb-pin-ro {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--fs-sm);
   white-space: nowrap;
 }
