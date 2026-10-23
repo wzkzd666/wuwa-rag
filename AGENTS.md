@@ -1081,6 +1081,11 @@ DEK     ──KEK_pp──> dek_by_pp       KEK_pp  = 加密口令 + key_salt �
     前者可能正在 worker 里跑，正是最容易撞的一对）。
     验证三层：三条离线用例（假 `VECTOR_DIR`，不碰真语料）+ 变异（把 `_lock_exclusive` 换成空函数
     → 第二次获取不再被拒）+ **端到端**（重嵌持锁期间真跑一次 `wuwa-index`，exit=1 带可读原因）。
+    ⚠️ 还验了 **worker 那条按角色的路**（命令行之外唯一的写入口）：选块数最少的角色
+    （`漂泊者-男-湮灭`，78 块）先 `delete_dense_by_character` 再 `build_dense(该角色行)`，
+    删 78 → 重嵌 78 → 六方对账仍 `PG=6741 chunks.jsonl=6741 Chroma=6741 BM25=6741 图谱角色=58 raw 文件=58`
+    全一致，且**锁能再拿到**（同进程结束后 `dense_writer_lock()` 立刻获取成功，没留死锁）。
+    只验命令行等于没验 —— 上一轮那个「把 58 个角色的向量删光」的事故就出在按角色这条路上。
     另记一条操作纪律：**判断后台进程是否还活着，看 `logs/vec.log` 的进度行，别看管道里有没有输出**。
 - `knowledge/knowledge/graph/extract.py` 的抽取规则依赖 `knowledge/crawl/chunker.py` 产出的 module/component/breadcrumb 结构；wiki 改版先坏的是抽取。⚠️ **不要因为字段覆盖率低就接 LLM 补抽**——57 角色实测：skills/chains/materials 均 100%，weapons 96.5%，其余缺口经逐项辨明**全部源于 wiki 数据源本身缺失**，LLM 抽不出原文没有的信息：① `echoes` 29.8% 是设计使然（38 个角色的声骸被并入 `echo_builds`，总覆盖 55/57）；② 丽贝卡/露西缺 weapons/teammates 因其原文「声骸」0 次、「配队」0 次；③ `attrs` 84.2% 缺的 9 个角色原文**没有「基础资料」段**（对比卡卡罗有 `- 属性：导电`），其中 4 个漂泊者是刻意设计。
 - 检索/切块/重排所有参数集中在 `config.py` Settings（.env 可覆盖，`get_settings()` lru_cache 单例）。
