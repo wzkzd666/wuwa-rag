@@ -549,7 +549,12 @@ uv run pytest                            # 单元测试（454 条，**全量离�
 cd front && npm test                     # 前端测试（vitest 37 条：store 行为 / 配色令牌 AA / 评价回填合帧 / 时间字节格式化，纯 node、不碰后端）
 uv run python -m wuwa_rag.dialog.graph   # RAG 冒烟：跑 3 个内置问题
 uv run ruff check src                    # lint（line-length=100）
+uv run python scripts/check_layers.py    # 架构分层守卫（方向违规 / 循环依赖 / 模块计数基线）
 ```
+
+上面这三件事（外加前端 `tsc --noEmit && vite build`）已经由 `.github/workflows/ci.yml` 在每次
+push / PR 上跑：runner **不起 docker、不要 GPU**——正因为测试是全量离线的才敢这么配。
+本地复核口径见 `AGENTS.md`「测试套件」一节（含「把五个外部服务指向不可达端口仍 453 通过」那条实测）。
 
 `tests/` 是回归基线，**不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络**——
 容器没起也能跑，所以它可以当提交门禁用（不会因为环境没起来而「假失败」）。

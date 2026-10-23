@@ -1118,6 +1118,22 @@ MRO: ['InvalidToken', 'Exception', 'BaseException', 'object']
 
 **全量离线是硬约定**：不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络。已实证——把五个外部服务全部指向不可达端口，全部用例仍全绿（2026-10-06 首轮实测：139 条 / 0.99s；2026-10-09 复核：392 条 / 4.6s；2026-10-10 复核：**394 条 / 4.4s**；同日第二轮端到端重跑后再补 19 条 → **413 条 / 4.3s**（同一轮复跑 5.3s，差异是 jieba/reranker 预热）；2026-10-22 端口迁移补 5 条端口对账 → **418 条 / 4.68s**；2026-10-23 质量审计修复补 3 条守卫 + 13 条材料判据用例 → **434 条 / 3.3s**；同日联网溯源与失败原因收口再补 2 条 → **436 条 / 3.2s**；第二轮审查（假阳性回归 + 安全加固）再补 3 条 → **439 条 / 3.3s**；第三轮（done 事件与落库 meta 同键、日志大类名单、云端重定向二跳）再补 3 条 → **442 条 / 4.67s**；第四轮（分块零结果守卫、BM25 跨进程缓存失效、反馈帽同源、ILIKE 转义）再补 6 条 → 448 条 / 4.74s；第五轮（复核自己今天的 diff，抓到诊断函数的元组行 bug + 掩码措辞收口）再补 2 条 → **450 条 / 4.9s**；第八轮（GitHub 同类项目调研后落地：`build_index.plan_reconcile` 索引口径对账，见「text.py 写入端/读取端共用同一份清洗」那条）再补 4 条 → **454 条 / 5.09s**）。2026-10-09 起这条约定由 `conftest._block_external_network` **强制执行**（autouse：非回环 `socket.connect` / `getaddrinfo` 直接 RuntimeError）；回环必须放行——Windows 的 asyncio 把 `socketpair` 模拟成 127.0.0.1 回连，全禁会让所有异步用例假失败。⚠️ 偷偷连本机容器的行为仍拦不住，那类依赖靠「容器没起也必须全绿」的人工抽查兜底。这条约定让它能当**提交门禁**：不会因为 `dev.bat` 没起而「假失败」，久了没人信等于没有。
 
+✅ **2026-10-24 这条约定真的变成机器门禁了**（`.github/workflows/ci.yml`，学自 uv/vite 项目的通行写法）：
+`backend`（`uv sync --frozen --extra dev` → ruff → `scripts/check_layers.py` → pytest）+
+`frontend`（`npm ci` → vitest → `tsc --noEmit && vite build`）。runner **不起 docker**，
+所以「离线」必须是可证的，本地核了四件事：
+① `uv lock --check` 同步（`--frozen` 才不会悄悄改锁）；
+② `torch` 主依赖走 `pytorch-cu130` 索引，lock 里**确有** `manylinux_2_28_x86_64` 的 cp313 wheel（Linux 装得起来，代价是几个 GB）；
+③ Windows-only 的 `pycaw`/`winrt-*` 只在 `music` extra 里，CI 不装 → 主依赖没有平台坑；
+④ 把 PG/Neo4j/Redis/S3/Ollama **全部指向不可达端口**跑一遍 → **453 通过**，
+   唯一红的 `test_端口_env_是唯一真源且与各消费方一致` 断言的正是「这些变量没被改过」，
+   是配置一致性不是连库依赖，CI 里不设这些变量所以也绿。
+⚠️ `requires-python = ">=3.13,<3.14"` **上界也锁死**，workflow 里 Python 版本只写一处（setup-uv 的 input）。
+⚠️ **诚实说明**：workflow 文件本身没法在本地验证（Actions 只在 push 后真跑）。
+上面四条是本地能核的全部；首推之后要看一眼 Actions 是否真绿。
+`eval_retrieval.py` 刻意不进 CI：它要真实 Chroma/BM25 与 reranker 权重，且文件名不以 `test_` 开头，
+pytest 收不到（缺索引时不会假失败）。
+
 三条写用例时必须遵守的经验（都是实际踩过的）：
 
 - ⚠️ **断言要验 `characters`，不能只验 `intent`**。单字名 bug 期间 `intent_node('心的声骸怎么配')` 返回 `intent='hybrid'`、`chars=[]`——只看 intent 全绿，功能其实已废（空 chars 反而**更容易**满足「未指名」判据，intent 照样合理）。所以每条路由用例都双断言。

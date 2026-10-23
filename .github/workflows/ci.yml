@@ -1,0 +1,93 @@
+# 提交门禁：把仓库里已有的**离线**测试从「本地自觉」变成「机器拦人」。
+#
+# 为什么敢在 CI 里跑全量测试（AGENTS.md 的硬约定是「全量离线」）：
+#   · `tests/` 全部用例不碰 PG / Neo4j / Redis / Chroma / Ollama / 网络，
+#     conftest 还会主动拦截非回环连接（`_block_external_network`）；
+#   · 逐条核过：454 条里对 `get_cursor` / `authdb` / `neo4j_client` 的引用**要么被
+#     monkeypatch 掉，要么只是读源码文本做对账**，没有一条真的连库。
+#   · 实测口径（2026-10-24）：把 PG/Neo4j/Redis/S3/Ollama 全部指向不可达端口
+#     （`PG_PORT=1 NEO4J_URI=bolt://127.0.0.1:1 …`）跑一遍 → **453 通过**，
+#     唯一红的是 `test_端口_env_是唯一真源且与各消费方一致`：它断言的正是「这些环境变量
+#     没被改过」，所以改端口必然让它红 —— 那是**配置一致性**断言，不是连库依赖。
+#     CI 不设这些变量，因此这条也是绿的。
+#   · `front/` 的 vitest 是纯 node，不起浏览器、不碰后端。
+#   所以 runner 不需要起 docker compose，也不需要 GPU。
+#
+# 为什么还是得装 torch：离线用例里有 `import wuwa_rag.dialog.graph`，而
+#   `dialog.tools → knowledge.index.rerank → sentence_transformers → torch` 是**模块级**导入，
+#   实测收集阶段就把 torch / transformers / chromadb 全拉起来了。
+#   主依赖里 torch 走的是 `pytorch-cu130` 索引，lock 中**确有** `manylinux_2_28_x86_64` 的
+#   cp313 wheel，所以 Linux 装得起来 —— 代价是每次冷缓存要拉几个 GB，别误以为配错了。
+#
+# 不跑的东西（刻意）：`tests/eval_retrieval.py`（要真实向量索引 + reranker 权重，不是 pytest 收集的
+#   用例，缺索引会假失败）、`--extra music`（`pycaw`/`winrt-*` 是 Windows-only，装上必挂）、
+#   `--extra train`（ms-swift 训练依赖，与门禁无关）。
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新的提交来了就取消上一次：本地跑 5s 的测试，CI 却在排队没有意义
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # requires-python = ">=3.13,<3.14" 是**上界也锁死**的：3.12 直接装不上。
+      # 版本只写在这一处，别在下面的步骤里再写一遍数字（两处口径迟早漂移）。
+      - name: 安装 uv 与 Python
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # --frozen：只认 uv.lock，lock 与 pyproject 不一致就直接失败，而不是悄悄改锁。
+      - name: 安装依赖
+        run: uv sync --frozen --extra dev
+
+      - name: Lint（line-length=100，见 pyproject）
+        run: uv run ruff check src tests
+
+      - name: 架构分层守卫（单独跑一次，失败信息比 pytest 里那条直观）
+        run: uv run python scripts/check_layers.py
+
+      - name: 离线单元测试
+        run: uv run pytest
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      # ci 而不是 install：lock 文件与 package.json 不一致时必须失败，
+      # 静默改依赖版本会让「CI 绿」失去意义。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 前端测试（store 行为 / 配色令牌 AA / 评价回填合帧 / 格式化）
+        run: npm test
+
+      # build 脚本是 `tsc --noEmit && vite build`：类型错误与产物都在这里挡
+      - name: 类型检查与构建
+        run: npm run build
