@@ -250,16 +250,24 @@ def _fact_category(fact: str) -> str | None:
 # 实测这类误判会静默删掉用户的真实事实 —— 撤销比不撤销危险）。
 _RE_NEGATION = re.compile(
     r"(?:不|别|没|无)(?:再|太|怎么|那么|在|想|愿意)?(?:喜欢|爱|主玩|玩|用|练|抽|做|打)")
-# 对象词后面常挂的语气/时态字，剥掉才能拿去 LIKE 匹配（「今汐了」匹配不到「今汐」吗？
-# 能——但反过来会把「了」带进别句；剥干净更稳，也方便日志读出「撤的是什么」）。
+# 对象词后面常挂语气/时态字（「不喜欢今汐**了**」），要剥掉才能拿去 LIKE。
+# 顺序是**先按句读切开、再剥尾巴**：带着「了」去匹配，档案里那条「用户主玩今汐」
+# 根本对不上（实测撤不掉）；而先剥尾巴会把句读后面别的句子也吞进来当对象。
 _OBJ_TAIL_CHARS = "了呀呢吧啊的过啦哦噢嗯.。,，、!！~～ \t"
 
 
 def negated_objects(text: str) -> list[str]:
-    """一句话里**所有**被否定掉的对象词（「不喜欢今汐，也不想练散华」→ 两个）。"""
+    """一句话里**所有**被否定掉的对象词（「不喜欢今汐，也不想练散华」→ 两个）。
+
+    对象词过一遍 `CHARACTER_ALIASES` 归一（卡提 → 卡提希娅）：档案里存的是全名，
+    拿简称去 LIKE 会命中「卡提希娅」这条**更长的名册名**，下面的前缀判据会把该撤的
+    判成「认不出是谁」而整批不撤。归一放在这一处，两个消费方（撤销与拦截正面事实）
+    拿到的都是同一个口径。
+    """
     out: list[str] = []
     for m in _RE_NEGATION.finditer(text or ""):
         obj = _object_after(m.end(), text)
+        obj = CHARACTER_ALIASES.get(obj, obj)
         if obj and obj not in out:
             out.append(obj)
     return out
@@ -290,18 +298,44 @@ def negated_object(fact: str) -> str:
     return got[0] if got else ""
 
 
+def _prefix_collides(fact: str, obj: str) -> bool:
+    """`obj` 在这条事实里**每一次**出现都只是某个更长名册名的前缀 → 判不出用户说的是谁。
+
+    名册里 `秧秧` 与 `秧秧·玄翎` 是**两个角色**。用户说「不喜欢秧秧」，而档案里那条写的是
+    「用户主玩秧秧·玄翎」——裸 `fact LIKE '%秧秧%'` 会把它一起软删，撤错的是另一个角色。
+    本模块的口径是「宁可不撤（多留一条旧事实，无害），不可误撤（静默丢用户真实信息）」，
+    所以这种一律不动。「用户主玩秧秧」里秧秧独立出现，照撤。
+    同理兜住「不喜欢漂泊者」对「主玩漂泊者-男-衍射」（四个属性版本都在名册里，指代不明）。
+    """
+    longer = [n for n in _known_names() if n != obj and n.startswith(obj)]
+    if not longer:
+        return False
+    pos = fact.find(obj)
+    if pos < 0:
+        return False
+    while pos >= 0:
+        if not any(fact.startswith(n, pos) for n in longer):
+            return False        # 这一处是 obj 自己，不是长名的前缀
+        pos = fact.find(obj, pos + 1)
+    return True
+
+
 async def _retract_matching(conn, user_id: str, obj: str, fact: str) -> int:
     """软删该用户「提到 `obj` 且不是否定式」的活跃事实，返回条数。
 
     读出来在 Python 里判否定式，而不是在 SQL 里写 `NOT LIKE '%不%'`：
     后者是第二套否定判据，与 `_RE_NEGATION` 迟早漂移（会把「不谋而合」这类误判）。
+    同理，「obj 是不是真的指这个角色」也在这儿判（`_prefix_collides`）——LIKE 只管粗筛。
     """
     cur = await conn.execute(
         "SELECT id, fact FROM user_facts WHERE user_id = %s AND valid_to IS NULL AND fact LIKE %s",
         (user_id, conv_like(obj)),
     )
     rows = await cur.fetchall()
-    doomed = [r["id"] for r in rows if r["fact"] != fact and not _RE_NEGATION.search(r["fact"])]
+    doomed = [r["id"] for r in rows
+              if r["fact"] != fact
+              and not _RE_NEGATION.search(r["fact"])
+              and not _prefix_collides(r["fact"], obj)]
     if doomed:
         await conn.execute("UPDATE user_facts SET valid_to = now() WHERE id = ANY(%s)", (doomed,))
         log.info("画像否定撤销 user=%s 对象=%s 软删 %d 条", user_id, obj, len(doomed))
@@ -355,8 +389,11 @@ async def save_facts(user_id: str, session_id: str, facts: list[str],
             )
             if await cur.fetchone() is not None:
                 continue
-            if objs and not _RE_NEGATION.search(fact) and any(o in fact for o in objs):
+            if objs and not _RE_NEGATION.search(fact) \
+                    and any(o in fact and not _prefix_collides(fact, o) for o in objs):
                 # 这句已经把 X 撤掉了，抽取器却还回一条正面的「主玩 X」——正面那条不许入库
+                # （`_prefix_collides` 同一份判据：「不喜欢秧秧，主玩秧秧·玄翎」里
+                #   后半句讲的是**另一个角色**，它是新信息，不能被前一个对象词顺带拦掉）
                 skipped += 1
                 log.info("画像否定撤销 user=%s 丢弃正面事实 %r（对象 %s 已被否定）",
                          user_id, fact, "、".join(objs))

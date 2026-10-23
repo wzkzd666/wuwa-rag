@@ -28,6 +28,7 @@ import pytest
 from wuwa_rag.services.profile import (
     MAX_FACTS_IN_PROMPT,
     _fact_category,
+    _prefix_collides,
     _retract_matching,
     facts_to_context,
     negated_object,
@@ -276,3 +277,58 @@ def test_宾语提前式的否定撤不动但也不许乱撤() -> None:
     """
     assert negated_objects("之前不是说主玩今汐吗，现在不喜欢了") == []
     assert negated_object("现在不喜欢了") == ""
+
+
+# ---------- 前缀歧义：一个对象词不许连累另一个角色 ----------
+# 名册里 `秧秧` 与 `秧秧·玄翎` 是两个角色（`漂泊者` 与四个 `漂泊者-男-*` 同理）。
+# 裸 `fact LIKE '%秧秧%'` 会把「用户主玩秧秧·玄翎」一起软删 —— 撤错的是**别人**。
+# 2026-10-24 由评审子智能体报出、我执行真实函数复现（三条事实里两条被判定要撤）。
+@pytest.mark.parametrize("fact,obj,collides", [
+    ("用户主玩秧秧·玄翎", "秧秧", True),          # 秧秧 只作为长名的前缀出现 → 判不出是谁
+    ("用户主玩秧秧", "秧秧", False),               # 独立出现，照撤
+    ("用户常用配队是秧秧·玄翎+守岸人", "秧秧", True),
+    ("用户主玩漂泊者-男-衍射", "漂泊者", True),
+    ("用户主玩漂泊者", "漂泊者", False),
+    ("用户主玩今汐", "今汐", False),               # 名册里没有以「今汐」开头的更长名
+    ("用户主玩卡提希娅", "卡提希娅", False),        # 归一之后：自己不算自己的前缀
+    ("用户主玩今汐", "长离", False),               # obj 压根不在文本里
+])
+def test_前缀歧义判定(fact: str, obj: str, collides: bool) -> None:
+    assert _prefix_collides(fact, obj) is collides
+
+
+@pytest.mark.asyncio
+async def test_撤销遇前缀歧义时不许动另一个角色() -> None:
+    conn = _Conn([
+        {"id": 11, "fact": "用户主玩秧秧"},
+        {"id": 12, "fact": "用户主玩秧秧·玄翎"},      # **另一个角色**：LIKE 会连它一起捞进来
+    ])
+    n = await _retract_matching(conn, "7", "秧秧", "")
+    assert n == 1, f"只应撤掉秧秧自己那条，实撤 {n} 条"
+    upd = [c for c in conn.calls if c[0].upper().startswith("UPDATE")]
+    assert upd and upd[0][1][0] == [11], upd
+
+
+def test_简称要先归一再撤() -> None:
+    """「不喜欢卡提」里的 卡提 是 卡提希娅 的别名（名册里两个都在）。
+
+    不归一的话：拿 卡提 去匹配「用户主玩卡提希娅」，前缀判据会把它当成
+    「更长的另一个名字」而整批不撤 —— 为了保护数据反而把功能做废了。
+    """
+    assert negated_objects("我不喜欢卡提") == ["卡提希娅"]
+    assert _prefix_collides("用户主玩卡提希娅", "卡提希娅") is False
+
+
+def test_拦截正面事实与撤销共用同一份前缀判据() -> None:
+    """「我不喜欢秧秧，主玩秧秧·玄翎」后半句是**另一个角色**的新信息，不许被拦下不入库。
+
+    同一语义只准一处判据（本仓反复栽在两份实现漂移）：撤销与拦截都必须走 `_prefix_collides`。
+    """
+    import inspect
+
+    from wuwa_rag.services.profile import save_facts
+
+    body = inspect.getsource(save_facts)
+    assert "_prefix_collides(fact, o)" in body, "拦截正面事实没走前缀判据"
+    retract = inspect.getsource(_retract_matching)
+    assert "_prefix_collides(" in retract, "撤销没走前缀判据"
