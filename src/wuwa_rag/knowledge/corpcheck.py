@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 
 from wuwa_rag.config import get_settings
@@ -293,5 +294,9 @@ def _report(findings: list[Finding]) -> int:
 
 
 def main() -> None:
+    # Windows 默认控制台是 GBK：✓/✗ 打不出去会让整条命令在收尾崩溃退出 1，
+    # 而分析本身是对的（2026-10-24 实测）——比照人工解读时看到「崩了」更糟
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     findings = asyncio.run(collect(), loop_factory=asyncio.SelectorEventLoop)
     raise SystemExit(_report(findings))
