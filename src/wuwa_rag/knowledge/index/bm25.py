@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import pickle
 import re
 from dataclasses import dataclass
@@ -82,7 +83,10 @@ class BM25Index:
         # 就地 `open("wb")` 会先清空再写，中间那一刻读到的就是半截 pickle ——
         # 表现为 `vector_search` 直接抛异常（EOFError/UnpicklingError），
         # 而不是「这次重建还没生效」这种可接受的降级。`replace` 在同目录内是原子的。
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # ⚠️ 临时名必须带 pid：定死一个 `.tmp` 的话，**两个并发写者会往同一个文件里交替写**，
+        # 各自 replace 上去的就是半截内容（稠密索引那侧有 `dense_writer_lock` 挡着，
+        # 而 BM25 是在拿锁**之前**重建的，被拒的第二次运行也已经写过一次）。
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
         with tmp.open("wb") as f:
             pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
         tmp.replace(path)

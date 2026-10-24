@@ -446,6 +446,12 @@ async def _graph_character_async(character: str) -> None:
         raise RuntimeError("Neo4j 不可用")
     await init_schema()
     chunks = load_chunks()                        # 读 chunks.jsonl 全量
+    # 与 `wuwa-graph` 同一条规矩：**先清该角色的出边再写**。
+    # 队友关系是 `SET rel.teams = 去重累加`，只 upsert 不清的话上一版抽取的结果永远留在图里
+    # （实测：抽取侧修好「一格两支队伍」后重跑，拆开的两条与 5 段老串并存，读取侧同时给出
+    #  「一支 6 人队」和「两支 3 人队」）。这条在线链以前漏了，2026-10-24 评审抓到才补。
+    # 只删**出边**：入边属于别人的页面，不由本轮重建（三条铁律见 `_C_DELETE_CHAR`）。
+    await delete_character(character)
     await upsert_character(extract_character(chunks, character))
     await close_driver()
 

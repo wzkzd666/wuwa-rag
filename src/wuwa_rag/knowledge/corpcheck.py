@@ -176,6 +176,21 @@ def _bm25_ids() -> set[str]:
     return set(BM25Index.load().chunk_ids)
 
 
+def unreadable(check: str, what: str, exc: Exception, fix: str) -> Finding:
+    """某一路索引**读不出来**时的结论：FAIL，不是 warn。
+
+    判错过一次（2026-10-24 自己踩的）：稠密索引被并发写坏之后，`col.count()` 直接抛，
+    当时这里记的是 WARN「跳过这条对账」，于是整条命令 exit 0、定时任务也只写了一句 warn，
+    而真实状态是**这一路检索在生产里完全不能用**（hybrid/semantic 只能靠另一路或答「不知道」）。
+    「读不到」比「数对不上」更严重，不能比它更轻；
+    与「`chunks.jsonl` 整个不在」同级（那条早就是 FAIL），才对得上三次事故的严重性排序。
+
+    仍然**不中断**对账：把这一路记成 FAIL 后继续比其余几路，一次看全。
+    """
+    return Finding(FAIL, check, f"{what}读不出来（这一路检索当前不可用）："
+                              f"{type(exc).__name__}: {exc}", fix)
+
+
 async def collect() -> list[Finding]:
     s = get_settings()
     out: list[Finding] = []
@@ -216,8 +231,8 @@ async def collect() -> list[Finding]:
     try:
         chroma = _chroma_docs()
         sizes["Chroma"] = str(len(chroma))
-    except Exception as exc:  # noqa: BLE001 —— 对账工具不该因为一路索引读不了就整个哑掉
-        out.append(Finding(WARN, "稠密索引可读", f"读 Chroma 失败（跳过这条对账）：{type(exc).__name__}: {exc}"))
+    except Exception as exc:  # noqa: BLE001 —— 读不出来要出声（判据见 unreadable）
+        out.append(unreadable("稠密索引可读", "Chroma", exc, "uv run wuwa-index"))
         chroma = {}
         sizes["Chroma"] = "读不到"
     if chroma:
@@ -230,7 +245,7 @@ async def collect() -> list[Finding]:
         out += compare_id_sets(pg_ids, bm25_ids, "BM25 chunk_id", "uv run wuwa-index")
     except Exception as exc:  # noqa: BLE001
         sizes["BM25"] = "读不到"
-        out.append(Finding(WARN, "BM25 可读", f"读 bm25.pkl 失败（跳过这条对账）：{type(exc).__name__}: {exc}"))
+        out.append(unreadable("BM25 可读", "bm25.pkl", exc, "uv run wuwa-index"))
     # ④ 图谱覆盖
     try:
         async with neo4j_client.get_session() as sess:
@@ -240,7 +255,7 @@ async def collect() -> list[Finding]:
         out += compare_graph_coverage(pg_chars, graph_chars)
     except Exception as exc:  # noqa: BLE001
         sizes["图谱角色"] = "读不到"
-        out.append(Finding(WARN, "图谱可读", f"读 Neo4j 失败（跳过这条对账）：{type(exc).__name__}: {exc}"))
+        out.append(unreadable("图谱可读", "Neo4j 的角色名册", exc, "uv run wuwa-graph"))
     finally:
         await neo4j_client.close_driver()
     # ⑤ raw 与库里同源

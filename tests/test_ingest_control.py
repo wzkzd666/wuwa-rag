@@ -171,6 +171,29 @@ def test_bm25缓存必须随磁盘指纹失效(tmp_path, monkeypatch) -> None:
     assert retrieve._bm25().tag == 2, "worker 重写了 pkl，API 还在用旧快照"
     assert len(loads) == 2
 
+
+def test_bm25落盘的临时名必须带pid(tmp_path) -> None:
+    """`save()` 是「写 tmp → replace」，但 tmp 名字**定死一个 `.tmp`** 就还剩一半问题：
+
+    两个进程同时重建 BM25 会往**同一个 tmp 文件**里交替写，各自 `replace` 上去的就是
+    半截 pickle —— 而 BM25 是在 `dense_writer_lock` **之前**重建的，被拒的第二次
+    `wuwa-index` 也已经写过一次。所以 tmp 必须按进程分开。
+    """
+    import inspect
+
+    from wuwa_rag.knowledge.index.bm25 import BM25Index
+
+    body = inspect.getsource(BM25Index.save)
+    assert "os.getpid()" in body, "临时名没带 pid：两个并发写者会互相踩"
+
+    target = tmp_path / "bm25.pkl"
+    BM25Index(["a::1"], [["甲"]], terms=["甲"]).save(target)
+    assert target.exists(), "replace 没落到目标文件"
+    assert list(tmp_path.glob("*.tmp")) == [], f"留下了半成品：{list(tmp_path.iterdir())}"
+    back = BM25Index.load(target)
+    assert back.chunk_ids == ["a::1"] and list(back.terms) == ["甲"]
+
+
 def test_覆盖不全时真的写出warning(tmp_path, monkeypatch) -> None:
     """上一条只验了「不拦路」，这条验「能 warn」—— 缺了它，`r["character"]` 那种
     取列写法错误会被诊断自己的宽 except 吞掉，函数变成永远不会出声的死代码（真实踩过：

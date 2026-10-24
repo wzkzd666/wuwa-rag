@@ -17,12 +17,29 @@ from wuwa_rag.knowledge.corpcheck import (
     compare_graph_coverage,
     compare_id_sets,
     find_raw_drift,
+    unreadable,
 )
 from wuwa_rag.text import embed_input
 
 
 def _levels(findings: list[Finding]) -> list[str]:
     return [f.level for f in findings]
+
+
+def test_读不出来的那一路必须算_fail() -> None:
+    """2026-10-24 自己踩的判据倒置：稠密索引被并发写坏、`count()` 直接抛，
+    当时这里给的是 WARN「跳过这条对账」→ 整条命令 exit 0、定时任务只写一句 warn，
+    而真实状态是这一路检索在生产里**完全不可用**。
+    「读不到」比「数对不上」严重，必须 FAIL 并带补救命令；但仍然不中断其余几路的比对。
+    """
+    for check, what, fix in (("稠密索引可读", "Chroma", "uv run wuwa-index"),
+                             ("BM25 可读", "bm25.pkl", "uv run wuwa-index"),
+                             ("图谱可读", "Neo4j 的角色名册", "uv run wuwa-graph")):
+        f = unreadable(check, what, RuntimeError("boom"), fix)
+        assert f.level == FAIL, (check, f.level)
+        assert f.fix == fix, (check, f.fix)
+        assert "RuntimeError" in f.detail and "不可用" in f.detail, f.detail
+    assert _report([unreadable("稠密索引可读", "Chroma", RuntimeError("boom"), "uv run wuwa-index")]) == 1
 
 
 def test_总数相同但逐角色不同也必须报() -> None:
