@@ -45,9 +45,17 @@ READS = [
     ("/debug/retrieval?question=%E5%AE%88%E5%B2%B8%E4%BA%BA%E9%85%8D%E9%98%9F",
      ("question", "dense", "sparse", "fused", "reranked", "gate")),
 ]
-# SSE `done` 事件必须带的键（少一个就是前端某个面板拿到 undefined）
-DONE_KEYS = ("answer", "intent", "docs", "sources", "truncated", "message_id",
-             "emotion", "web_reason", "thread_id", "characters", "slots")
+# SSE `done` 事件必须带的键（少一个就是前端某个面板拿到 undefined）。
+# **从 `_done_event` 的签名现推**，不在这里抄一份清单：抄过的地方都会漂
+# （AGENTS 为这事写过好几条），而 `_done_event` 是 done 的唯一形状来源，
+# 它的 keyword-only 参数名 + 它自己填的 `done` 就是键集合。
+# 以后给 done 加字段，这里自动开始断言那个字段，不需要有人记得来改脚本。
+def _done_keys() -> tuple[str, ...]:
+    import inspect
+
+    from wuwa_rag.dialog.graph import _done_event
+
+    return tuple(sorted(list(inspect.signature(_done_event).parameters) + ["done"]))
 
 
 def _admin_token() -> str:
@@ -102,7 +110,7 @@ def _stream_once(base: str, headers: dict) -> int:
                     keys = sorted(d)
         print(f"OK  200 /ask/stream{''.ljust(30)} token={ev['token']} stage={ev['stage']} "
               f"done={ev['done']} error={ev['error']}")
-        missing = [k for k in DONE_KEYS if k not in keys]
+        missing = [k for k in _done_keys() if k not in keys]
         if missing:
             print(f"    !! done 缺键: {missing}")
             bad += 1
