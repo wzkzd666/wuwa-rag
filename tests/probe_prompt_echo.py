@@ -25,6 +25,7 @@ import httpx
 import psycopg
 
 from wuwa_rag.config import get_settings
+from wuwa_rag.core.conversations import owner_prefix as conv_owner_prefix
 from wuwa_rag.dialog.prompt import build_prompt
 
 API = "http://127.0.0.1:28000"
@@ -97,7 +98,7 @@ def main() -> int:
         with _conn(autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("SELECT id FROM users WHERE username = %s", (PROBE_USER,))
             uid = cur.fetchone()[0]
-            like = f"u{uid}:%"
+            like = conv_owner_prefix(uid) + "%"    # 前缀只有一处定义（core/conversations）
             cur.execute("DELETE FROM messages WHERE session_id LIKE %s", (like,))
             cur.execute("DELETE FROM session_summaries WHERE session_id LIKE %s", (like,))
             for tbl in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):

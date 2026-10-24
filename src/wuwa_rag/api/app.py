@@ -145,12 +145,21 @@ async def on_unhandled(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+# 问句长度帽，**唯一定义处**：`/ask` 的模型层与 `/debug/retrieval` 的 Query 层都引用它。
+# 不设上限时一句 5MB 的「问题」就是一张免费的提示词注入 + 存储放大票（限流只数请求数、
+# 不看体积）。512 与 `llmstore.MAX_TEXT_LEN` 同档：再长的内容属于「资料」，该走 /ingest。
+# 前端 `Composer.tsx` 的 `QUESTION_MAX` 与它跨语言成对（前端先挡是手感，后端这条才是判据），
+# 由 `tests/test_config_and_prompt.py` 对账。
+QUESTION_MAX_CHARS = 512
+# 会话重命名的入口上限（比 `conversations.MAX_TITLE_CHARS` 的落库截断宽，
+# 关系由 `tests/test_config_and_prompt.py` 钉住：入口 < 截断就会无声砍短用户写的内容）。
+RENAME_MAX_CHARS = 60
+
+
 class AskIn(BaseModel):
-    # 长度帽：问题会进 embedding、进 prompt、进 PG 与 checkpointer 三处存储。
-    # 不设上限时一句 5MB 的「问题」就是一张免费的提示词注入 + 存储放大票
-    # （限流只数请求数，不看体积）。512 与 llmstore.MAX_TEXT_LEN 同档：
-    # 再长的内容属于「资料」，该走 /ingest 而不是塞进问句。
-    question: str = Field(..., max_length=512, description="问题")
+    # 长度帽见上面的 `QUESTION_MAX_CHARS`：问题会进 embedding、进 prompt、
+    # 进 PG 与 checkpointer 三处存储，所以两处入口必须同一个数。
+    question: str = Field(..., max_length=QUESTION_MAX_CHARS, description="问题")
     thread_id: str | None = Field(None, description="会话 id；不传则新建")
 
 
@@ -188,8 +197,13 @@ class IngestControlIn(BaseModel):
 
 
 class TitleIn(BaseModel):
-    """会话重命名。长度与 conversations.MAX_TITLE_CHARS 同量级，前端已截断。"""
-    title: str = Field(..., max_length=60, description="新标题")
+    """会话重命名的入参。
+
+    `RENAME_MAX_CHARS` 是**入口**的宽松上限（挡住把整段回答粘进标题栏），
+    落库时由 `conversations.MAX_TITLE_CHARS` 截到 22 字 —— 两个数各司其职，
+    所以入口必须 ≥ 存储截断，否则用户写了一半就被无声砍短。
+    """
+    title: str = Field(..., max_length=RENAME_MAX_CHARS, description="新标题")
 
 
 class TtsIn(BaseModel):
@@ -734,9 +748,18 @@ async def api_conversation_delete(thread_id: str,
 
 @app.delete("/conversations")
 async def api_conversations_clear(user: authn.AuthUser = Depends(authn.get_current_user)) -> dict:
-    """清空当前用户全部会话（连带各自的 LangGraph 记忆）。"""
+    """清空当前用户全部会话（连带各自的 LangGraph 记忆）。
+
+    记忆键必须与 `DELETE /admin/users/{id}` 一样取**两路并集**：`sessions` 里还在的
+    ∪ `lg.checkpoints` 里按 `u{id}:` 前缀实际存在的。只取前一路的话，
+    「会话行被手写 SQL 删过、模型侧记忆还在」那批孤儿就删不掉 ——
+    表现为「清空了全部会话，模型却还记得」，正是这条链刻意要防的形态（同一个 bug 的
+    两个消费方，不能只修一个）。
+    """
     keys = [conv.thread_key(user.id, conv.client_thread_id(r["session_id"]))
             for r in await conv.list_conversations(user.id, limit=1000)]
+    keys += await conv.memory_keys(user.id)
+    keys = list(dict.fromkeys(keys))
     n = await conv.clear_conversations(user.id)
     for k in keys:
         await _drop_memory(k)
@@ -1367,7 +1390,7 @@ async def api_knowledge_delete(
 @app.get("/debug/retrieval")
 @rl.limit_debug()   # 单列一档：一次要跑 embedding + 20 条精排，抢的是与 /ask 同一份资源
 async def api_debug_retrieval(request: Request,
-                              question: str = Query(..., min_length=1, max_length=512),
+                              question: str = Query(..., min_length=1, max_length=QUESTION_MAX_CHARS),
                               user: authn.AuthUser = Depends(authn.require_admin)) -> dict:
     """召回调试出口（管理员）：dense / sparse / RRF / 精排四步的中间量一次摊开。
 

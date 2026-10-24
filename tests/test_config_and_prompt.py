@@ -484,3 +484,38 @@ def test_日志大类名单与调用点一致() -> None:
     stale = sorted(set(_MODULE_LOGS) - used)
     assert not missing, f"这些 logger 名没有独立文件，会静默落进 app.log：{missing}"
     assert not stale, f"名单里有从未被 get_logger 引用的名字：{stale}"
+
+
+def test_问句长度帽后端只有一处且与前端成对() -> None:
+    """`/ask` 与 `/debug/retrieval` 各自都有一个问句长度上限；两处字面量迟早会漂
+    （漂了的后果不是报错，而是**同一个问题在两个入口一边能发一边被拒**）。
+
+    前端 `Composer.tsx` 的 `QUESTION_MAX` 是**跨语言**的第二道：它先挡是手感
+    （超限输入不了，比发出去收 422 好），后端才是判据 —— 所以两边数值必须相等。
+    与端口四处对账同一类做法：读源码文本比常量，不起服务、不碰网络。
+    """
+    import re
+
+    import wuwa_rag.api.app as app_mod
+    from wuwa_rag.api.app import AskIn
+
+    backend = app_mod.QUESTION_MAX_CHARS
+    assert AskIn.model_fields["question"].metadata, "问句字段没有约束了"
+    caps = [m.max_length for m in AskIn.model_fields["question"].metadata if hasattr(m, "max_length")]
+    assert caps == [backend], f"AskIn 的帽没引用常量：{caps}"
+
+    src = (_RE_ROOT / "src/wuwa_rag/api/app.py").read_text(encoding="utf-8")
+    lit = re.findall(r"max_length=\d+", src)
+    assert not lit, f"app.py 里还有写死的 max_length 字面量（应引用常量）：{lit}"
+    dbg = src[src.index('@app.get("/debug/retrieval")'):][:600]
+    assert "max_length=QUESTION_MAX_CHARS" in dbg, "调试出口没走同一份帽"
+
+    front = (_RE_ROOT / "front/src/components/Composer.tsx").read_text(encoding="utf-8")
+    m = re.search(r"const QUESTION_MAX = (\d+)", front)
+    assert m, "前端那道 QUESTION_MAX 没了？两头都得有（前端管手感、后端管判据）"
+    assert int(m.group(1)) == backend, f"前后端帽不一致：前端 {m.group(1)} vs 后端 {backend}"
+
+    # 重命名那条：入口必须 ≥ 落库截断，否则用户写了一半会被无声砍短
+    from wuwa_rag.core.conversations import MAX_TITLE_CHARS
+    assert app_mod.RENAME_MAX_CHARS >= MAX_TITLE_CHARS, (
+        f"入口 {app_mod.RENAME_MAX_CHARS} 比落库截断 {MAX_TITLE_CHARS} 还窄")

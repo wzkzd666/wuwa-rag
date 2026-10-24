@@ -80,6 +80,21 @@ def thread_key(user_id: int, thread_id: str) -> str:
     return f"u{user_id}:{thread_id}"
 
 
+def owner_prefix(user_id: int) -> str:
+    """归属前缀 `u{users.id}:` —— **唯一构造处**，且直接从 `thread_key` 导出。
+
+    为什么不能有第二份字面量：`clear_conversations` 与 `memory_keys` 都拿它做 LIKE 反查
+    （回收「sessions 行已被手写 SQL 删掉」的孤儿转录与记忆）。早先这两处各写了一遍
+    `f"u{int(user_id)}:%"`，而正解在 `thread_key` 里 —— 哪天 key 的分隔符变了，
+    LIKE 会**一条都匹不到**而 `DELETE /admin/users/{id}` 照样返回 200，
+    回收条数变成 0 却没人报错（本仓最忌讳的「读不到 ≠ 没有」形态）。
+    现在让它等于 `thread_key(user_id, "")`，格式只定义一次，两边不可能再漂。
+
+    直接当 LIKE 模式用是安全的：`user_id` 是 int，前缀里只有 `u数字:`，不含 `%`/`_`/`\\`。
+    """
+    return thread_key(int(user_id), "")
+
+
 def client_thread_id(session_id: str) -> str:
     """从规范 key 反解出前端用的短 id（`u3:abc123` → `abc123`）。"""
     head, sep, tail = session_id.partition(":")
@@ -243,7 +258,7 @@ async def clear_conversations(user_id: int) -> int:
     但「删账号要回收名下全部数据」这条口径不能等有了数据再补。
     """
     pool = await get_pool()
-    like = f"u{int(user_id)}:%"
+    like = owner_prefix(user_id) + "%"
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT session_id FROM sessions WHERE user_id = %s", (user_id,)
@@ -270,7 +285,7 @@ async def memory_keys(user_id: int) -> list[str]:
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT DISTINCT thread_id FROM lg.checkpoints WHERE thread_id LIKE %s",
-            (f"u{int(user_id)}:%",),
+            (owner_prefix(user_id) + "%",),
         )
         return [r["thread_id"] for r in await cur.fetchall()]
 

@@ -431,7 +431,7 @@ def test_删账号的转录回收也要按前缀补孤儿() -> None:
     body = inspect.getsource(clear_conversations)
     assert "session_id LIKE" in body, "没按 u{id}: 前缀补删孤儿转录"
     assert "session_summaries" in body, "衍生表没跟着会话回收"
-    assert 'f"u{int(user_id)}:%"' in body, "前缀没锚住冒号（u1:% 会匹到 u10: 就删错人了）"
+    assert "owner_prefix(" in body, "前缀不再是唯一构造处（写回字面量就会与 thread_key 漂）"
 
 
 def test_回收条数只报真的删成的() -> None:
@@ -446,6 +446,25 @@ def test_回收条数只报真的删成的() -> None:
     assert "return True" in drop and "return False" in drop, "_drop_memory 没出声失败"
     assert "dict.fromkeys" in body, "两路 key 必须并集去重（同一条记忆重复 drop 会白跑一次）"
 
-    # 前缀本身也要钉住：LIKE 写成 `%{id}%` 会把 u10 的记忆错删到 u1 名下
-    csrc = (_ROOT / "src/wuwa_rag/core/conversations.py").read_text(encoding="utf-8")
-    assert 'f"u{int(user_id)}:%"' in csrc, "memory_keys 的 LIKE 前缀口径变了"
+
+def test_归属前缀由thread_key导出且锚住分隔符() -> None:
+    """`u{id}:` 这个前缀被 `clear_conversations` / `memory_keys` 拿去 LIKE 反查孤儿数据。
+
+    早先它是**四处手写的字面量**（两处生产 + 两个脚本），正解其实只有一份：`thread_key`。
+    用源码字面量当判据守不住真正的危险 —— 哪天 key 的分隔符变了，LIKE 会**一条都匹不到**，
+    而 `DELETE /admin/users/{id}` 仍返回 200、回收条数变成 0，静默留下别人的转录与记忆
+    （本仓反复栽过的「读不到 ≠ 没有」）。现在前缀 = `thread_key(user_id, "")`，
+    这两条断言把关系钉成**行为**而不是字符串：
+
+    ① key 一定以前缀开头（改了 `thread_key` 的形态，前缀自动跟着走，两边不可能漂）；
+    ② 前缀必须锚住分隔符：`u1` 的前缀不许匹到 `u10` 的 key（少写一个冒号就会删错人）。
+    """
+    from wuwa_rag.core.conversations import client_thread_id, owner_prefix, thread_key
+
+    for uid in (1, 7, 40, 96):
+        key = thread_key(uid, "abc123")
+        pref = owner_prefix(uid)
+        assert key.startswith(pref), (key, pref)
+        assert client_thread_id(key) == "abc123"
+        assert not thread_key(10, "abc123").startswith(pref) or uid == 10, \
+            f"前缀 {pref!r} 锚不住：u1 会匹到 u10 的数据"
