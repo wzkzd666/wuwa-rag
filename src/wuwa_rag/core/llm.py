@@ -146,7 +146,7 @@ def get_chat_llm(strict: bool = False, cloud_cfg: dict | None = None) -> Runnabl
     cloud_cfg 由调用方（chain）从 `llmstore.get_runtime(user_id)` 取，含明文 key。
     本函数不读库、不碰 state——明文 key 的生命周期止于返回的客户端实例。
 
-    strict=True：本轮要照抄「满级数值表 / 突破材料表」这种成片高相似度行，用更低重复惩罚。
+    strict=True：本轮要照抄「技能数值表 / 突破材料表」这种成片高相似度行，用更低重复惩罚。
     """
     if cloud_cfg:
         return _cloud_chat_llm(cloud_cfg, strict)

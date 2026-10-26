@@ -64,7 +64,7 @@ async function request<T>(path: string, init?: RequestInit, base?: string): Prom
 
 // ---------- 鉴权 ----------
 
-export interface AuthOut {
+interface AuthOut {
   token: string
   username: string
   role: 'admin' | 'guest'
@@ -195,7 +195,7 @@ export function knowledgeDelete(
 
 /** PUT /llm/config 返回：保存后的概要。⚠️ 不含 unlocked 等完整状态字段，
  *  需要完整状态请重新 GET /llm/config（保存后界面就是这么刷新的）。 */
-export interface LlmSaveOut {
+interface LlmSaveOut {
   configured: boolean
   enabled: boolean
   provider: string

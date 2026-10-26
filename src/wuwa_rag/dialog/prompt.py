@@ -1,15 +1,17 @@
 """Prompt 构建：提示词常量、上下文拼接、最终 prompt 组装。
 
 从 dialog/graph.py 拆出，职责边界：
-  - _SYSTEM：本地 aemeath 的 HumanMessage 前缀（术语对照 + 作答要求）
-  - _build_context：把 state 里的图谱事实 / 文档 / 联网结果拼成上下文
-  - _build_prompt：在上下文基础上组装最终 prompt（含输出格式约束）
-  - doc_sources：从召回文档提取引用来源面包屑
+  - SYSTEM_PROMPT：本地 aemeath 的 HumanMessage 前缀（术语对照 + 作答要求）
+  - build_context：把 state 里的图谱事实 / 文档 / 联网结果拼成上下文
+  - build_prompt：在上下文基础上组装最终 prompt（含输出格式约束）
+  - doc_sources / web_source_lines / all_sources：引用来源口径（文档面包屑 + 联网溯源）
   - _lock_focus：文档侧的「问谁锁谁」收窄
 
 graph.py 只负责图编排与节点调度，不再直接处理 prompt 字符串。
 """
 from __future__ import annotations
+
+from dataclasses import dataclass, field
 
 from wuwa_rag.config import get_settings
 from wuwa_rag.dialog.state import RagState
@@ -128,38 +130,100 @@ def _lock_focus(text: str, characters: list[str]) -> str:
     return out
 
 
-def build_context(state: RagState, extra: list[str] | None = None) -> str:
+@dataclass
+class _Part:
+    """上下文的一段。裁剪以 `items` 为单位（整条消息 / 整份文档 / 整段事实）。"""
+    key: str
+    label: str
+    header: str
+    items: list[str] = field(default_factory=list)
+    drop: str = "back"            # front=先丢最老的（历史），back=先丢尾部的（文档按重排名次）
+    sep: str = "\n"
+    droppable: bool = True
+    dropped: int = 0
+
+
+# 裁剪顺序（越靠前越先丢）。历史是重复信息，先丢最老的；参考文档已按重排名次排列，
+# 从尾部丢；图谱事实与联网结果体型有界，作为最后手段整段丢弃。
+# 技能数值表 / 突破材料表 / 本问解析**不参与裁剪**：它们是确定性补料，丢掉等于把
+# 「必中」退化成「靠召回」——而这个预算存在的意义恰恰是保住它们。
+_TRIM_ORDER = ("history", "docs", "graph", "web")
+
+
+def _render(parts: list[_Part]) -> str:
+    return "\n\n".join(p.header + p.sep.join(p.items) for p in parts if p.items)
+
+
+def _fit(parts: list[_Part], budget: int) -> str:
+    """超预算时按 `_TRIM_ORDER` 裁剪；裁了什么写日志，裁不下去也写日志。"""
+    text = _render(parts)
+    if len(text) <= budget:
+        return text
+    for key in _TRIM_ORDER:
+        part = next((p for p in parts if p.key == key and p.droppable), None)
+        while part is not None and part.items and len(_render(parts)) > budget:
+            part.items.pop(0 if part.drop == "front" else -1)
+            part.dropped += 1
+        if len(_render(parts)) <= budget:
+            break
+    text = _render(parts)
+    dropped = [f"{p.label}×{p.dropped}" for p in parts if p.dropped]
+    if dropped:
+        log.info("上下文裁剪（预算 %d 字符）：%s → %d 字符",
+                 budget, "、".join(dropped), len(text))
+    if len(text) > budget:
+        # 剩下的是不可裁的补料块与「本问解析」；如实报出来，别让截断发生在模型侧无声无息。
+        log.warning("上下文裁剪后仍超预算：%d > %d 字符（剩余为不可裁的补料）",
+                    len(text), budget)
+    return text
+
+
+def build_context(state: RagState, extra: list[str] | None = None,
+                  budget: int | None = None) -> str:
     """把 state 里的图谱事实 / 文档 / 联网结果拼成上下文。
 
-    extra 是确定性补料（满级数值表 / 突破材料表），排在最后紧贴 ## 问题。
+    extra 是确定性补料（技能数值表 / 突破材料表 / 声骸武器表），排在最后紧贴 ## 问题。
+    budget 是「## 资料」段的字符上限，默认取 `PROMPT_CONTEXT_CHARS`；超出时按
+    `_TRIM_ORDER` 裁剪。为什么要有上限见 config 里该参数的注释（Ollama 超 ctx
+    会从头部静默截断，调用侧没有信号）。
     """
     setting = get_settings()
-    parts: list[str] = []
+    limit = setting.PROMPT_CONTEXT_CHARS if budget is None else budget
+    parts: list[_Part] = []
     # 注意：不要把 context_summary 塞进生成上下文——实测 aemeath 会把摘要句
     # 原样复述进答案（「…讨论声骸选择及毕业配装…」这种第三人称腔调穿帮）。
     # 摘要只喂给 rewrite_query 消解指代；生成侧靠窗口内 history + 改写后的检索结果。
     history = (state.get("history", []))[-setting.MAX_HISTORY_TURNS * 2:]
     if history:
-        parts.append("## 对话历史\n" + "\n".join(
-            f"{'用户' if m['role'] == 'user' else '助手'}: {m['content']}" for m in history
+        parts.append(_Part(
+            "history", "对话历史", "## 对话历史\n",
+            [f"{'用户' if m['role'] == 'user' else '助手'}: {m['content']}" for m in history],
+            drop="front",
         ))
     if state.get("graph_facts"):
-        parts.append("## 图谱事实\n" + state["graph_facts"])
+        parts.append(_Part("graph", "图谱事实", "## 图谱事实\n", [state["graph_facts"]]))
     docs = state.get("docs") or []
     if docs:
         # 变更说明：早期给每份资料加 [1] [2] 前缀以引导溯源，实测模型会把
         # 把它当引用标记**抄进正文**——「- 守岸人 + 尤诺 [1][4]」「- 莫宁 + 琳奈 [1][5]」，
         # 答案尾部因此混入纯数字噪声（三轮复现稳定出现）。前端引用面板走的是 SSE
-        # `done.sources`（`doc_sources`），**不依赖模型在正文写 `[n]`**，去掉零损失：
+        # `done.sources`（`all_sources`），**不依赖模型在正文写 `[n]`**，去掉零损失：
         # 每块自带 breadcrumb 开头，来源照样可辨。
         # 若将来真要做「正文引用徽章」，请改用 `（资料1）` 这类非方括号标记，别退回 `[n]`。
         # 同时在这里做「问谁锁谁」的文档侧收窄（见 _lock_focus）：图谱与文档必须同形。
         focus = [c for c in (state.get("characters") or []) if c]
-        parts.append("## 参考文档\n" + "\n\n".join(
-            _lock_focus(chunk_text(d), focus) for d in docs))
+        parts.append(_Part(
+            "docs", "参考文档", "## 参考文档\n",
+            [_lock_focus(chunk_text(d), focus) for d in docs],
+            sep="\n\n",
+        ))
     web_facts = state.get("web_facts") or ""
     if web_facts:
-        parts.append("## 联网搜索资料\n（实时搜索结果，本地资料不足时以本段为准）\n" + web_facts)
+        parts.append(_Part(
+            "web", "联网资料",
+            "## 联网搜索资料\n（实时搜索结果，本地资料不足时以本段为准）\n",
+            [web_facts],
+        ))
     # 本问解析：把**已经确定**的角色与话题显式告诉模型。
     #
     # 为什么必须显式写：用户问「心声骸推荐」时，模型会把「心声骸」当成一个完整词
@@ -189,14 +253,19 @@ def build_context(state: RagState, extra: list[str] | None = None) -> str:
         rows.append("- 召回资料所属板块：" + "、".join(comps[:4])
                     + ("…" if len(comps) > 4 else ""))
     if rows:
-        parts.append("## 本问解析\n（下面这些已由检索侧确定，直接照它作答）\n" + "\n".join(rows))
-    # 确定性补料排在最后（紧贴 ## 问题）。真凶其实不在位置：实测把这张满级数值表
+        parts.append(_Part(
+            "analysis", "本问解析",
+            "## 本问解析\n（下面这些已由检索侧确定，直接照它作答）\n",
+            ["\n".join(rows)],
+            droppable=False,
+        ))
+    # 确定性补料排在最后（紧贴 ## 问题）。真凶其实不在位置：实测把这张技能数值表
     # 放在 ## 资料 第一节时，aemeath 会「只抄前几行就收尾」并补一句「其他参数未在该
     # 列表中」，换表格/纯文本/编号/中文数值都无效——根因是 repeat_penalty=1.3 把彼此
     # 高度相似的表行罚到写不下去（降到 1.15 即 7 行全出，见 config.LLM_REPEAT_PENALTY）。
     # 位置只是第二道保险：同样的坏参数下，块放末尾确实能抄全，放开头会截断。
     for b in extra or ():
-        parts.append(b)
+        parts.append(_Part("extra", "补料", "", [b], droppable=False))
     # 「有没有资料」必须看图谱事实/文档/联网结果/确定性补料，不能用 join 结果是否为空
     # 来判断：多轮对话时 history 非空，join 永远有内容，原先的 or 兜底就永远不触发，
     # 零资料信号被吞掉 → 模型收不到约束 → 退化成自由发挥（人设独白 + 复读）。
@@ -205,12 +274,14 @@ def build_context(state: RagState, extra: list[str] | None = None) -> str:
         # 约束：只要求「说明你不清楚」会得到公文式干瘪回答，因此这里明确要求用自己的口吻，
         # 「不知道」这条分支会整体丢失角色口吻。明确要求**用自己的口吻**说，并给一个
         # 口径示例，人设才在「答不出来」这条路上也保住。
-        parts.append(
-            "（本次没有检索到任何资料。请用你自己的口吻、一句话说明你手里没有这份记录——"
-            "可以俏皮一点、带点小遗憾（就像「这个我记不太清了呀……」），然后立刻停住；"
-            "不要解释检索过程，不要重复这句话，不要补充任何其他内容。）"
-        )
-    return "\n\n".join(parts)
+        parts.append(_Part(
+            "hint", "零资料提示", "",
+            ["（本次没有检索到任何资料。请用你自己的口吻、一句话说明你手里没有这份记录——"
+             "可以俏皮一点、带点小遗憾（就像「这个我记不太清了呀……」），然后立刻停住；"
+             "不要解释检索过程，不要重复这句话，不要补充任何其他内容。）"],
+            droppable=False,
+        ))
+    return _fit(parts, limit)
 
 
 def build_prompt(context: str, question: str, blocks: list[str] | None = None,
@@ -289,19 +360,19 @@ def build_prompt(context: str, question: str, blocks: list[str] | None = None,
     # **无补料场景（共鸣链、剧情、机制问答）拿不到任何格式约束** —— 六链答出
     # 「暴击伤害80万」那次正是这个场景（blocks 为空，输出格式块整块没进 prompt）。
     # 现在无论有没有补料都要注入：表格条目按需增减，正文那条（%）是**无条件**的。
-    has_value = any("满级数值表" in b for b in blocks)
+    has_value = any("技能数值表" in b for b in blocks)
     has_mat = any("突破材料表" in b for b in blocks)
     lines = ["\n\n## 输出格式（硬要求）"]
     lines.append("1) 先用你自己的口吻把内容讲清楚（这是什么、怎么打、什么手感），正常说话，"
                  "不要只丢数字，也不要写成机械报表；")
     step = 2
     if has_value:
-        lines.append(f"{step}) 然后把「满级数值表」里每一行都列出来，写成「- 名称：数值」，"
-                     "一行都不许省；")
+        lines.append(f"{step}) 然后把「技能数值表」里每一行都列出来，写成「- 名称：数值」，"
+                     "一行都不许省（有多张就逐张列完）；")
         step += 1
     if has_mat:
         lines.append(f"{step}) 再把「突破材料表」里每一条都列出来，写成「- 材料名×数量」，"
-                     "一条都不许省；")
+                     "一条都不许省（有多张就逐张列完）；")
         step += 1
     # 非表格内容（共鸣链、技能描述、声骸词条都属这块）单独点名：原文是「暴击固定为
     # 80%，暴击伤害固定为275%」这种带百分号的散文，缺了这条约束就会被复述成
@@ -318,10 +389,20 @@ def build_prompt(context: str, question: str, blocks: list[str] | None = None,
                      "且不要主动列出没被问到的内容。")
     elif has_value:
         lines.append("「## 参考文档」里分等级展开的长表（尤其是各种材料表）一律不要照抄，"
-                     "更不要主动列出没被问到的内容——数值只以「满级数值表」为准。")
+                     "更不要主动列出没被问到的内容——数值只以「技能数值表」为准。")
     else:
-        # 无补料（共鸣链 / 剧情 / 机制问答）：**绝不能**在这里点名「满级数值表」，
+        # 无补料（共鸣链 / 剧情 / 机制问答）：**绝不能**在这里点名「技能数值表」，
         # 否则模型会以为该有那张表，跑去「## 参考文档」里翻找并凭空扩列（实测过同类）。
         # 只保留「按资料原文讲、不扩列」这一条通用约束。
         lines.append("只讲资料里已有的内容，不要主动扩列没被问到的部分。")
-    return prompt + "\n".join(lines) + tail
+    final = prompt + "\n".join(lines) + tail
+    # 整条 prompt 的体积没有硬裁剪手段（SYSTEM_PROMPT / 问句 / 输出格式 / tail 都是
+    # 固定块，补料是必中数据），所以这里只负责**让超限可见**：Ollama 超出 num_ctx
+    # 是从头部静默截断，调用侧拿不到任何信号，不记这一行就只能靠用户反馈「漏看资料开头」。
+    limit = get_settings().PROMPT_MAX_CHARS
+    if len(final) > limit:
+        log.warning("prompt 超预算：%d > %d 字符（固定块与补料不可裁，模型侧可能从头部静默截断）",
+                    len(final), limit)
+    else:
+        log.info("prompt 尺寸：%d 字符（上限 %d）", len(final), limit)
+    return final

@@ -6,7 +6,7 @@
  * 所以统一走 canvas 缩放 + webp 编码（保留透明通道，体积远小于 png）。
  */
 
-export interface EncodeOptions {
+interface EncodeOptions {
   /** 长边上限（square=true 时是边长），单位 px */
   max: number
   /** 编码质量 0~1 */

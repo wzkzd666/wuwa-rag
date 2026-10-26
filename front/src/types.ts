@@ -156,7 +156,7 @@ export interface IngestRecord {
 }
 
 /** GET /knowledge/characters 的单条：知识库里**实际拥有**的一个角色 */
-export interface KnowledgeCharacter {
+interface KnowledgeCharacter {
   character: string
   /** 来源标识（当前恒为 kurobbs，即鸣潮 WIKI） */
   source: string
@@ -224,7 +224,7 @@ export interface AdminUsersOut {
 }
 
 /** GET /ingest/status 返回：五步流水线实时进度 */
-export interface IngestStep {
+interface IngestStep {
   key: string
   label: string
   status: 'pending' | 'running' | 'success' | 'failed'
@@ -369,7 +369,7 @@ export interface LlmTestOut {
 // ---------- TTS 语音合成（2026-09-30：密钥改为用户自持）----------
 
 /** 生效来源：user=用户自持凭据 / global=部署者 .env 兜底 / none=都没配 */
-export type TtsSource = "user" | "global" | "none"
+type TtsSource = "user" | "global" | "none"
 
 /** GET /tts/status */
 export interface TtsStatus {
@@ -447,7 +447,7 @@ export interface TtsOut {
 }
 
 /** GET /usage/summary 的一行：某个用户近 N 天的用量（local / cloud 分开） */
-export interface UsageRow {
+interface UsageRow {
   user_id: string | null
   username: string | null
   local_prompt: number | null
@@ -459,7 +459,7 @@ export interface UsageRow {
 }
 
 /** GET /usage/summary 里的按天序列（画图用；缺失的日期后端已补零） */
-export interface DailyUsage {
+interface DailyUsage {
   d: string
   local_prompt: number | null
   local_completion: number | null
@@ -478,7 +478,7 @@ export interface UsageSummary {
 }
 
 /** GET /feedback 的一条 */
-export interface FeedbackItem {
+interface FeedbackItem {
   id: number
   user_id: string
   username: string

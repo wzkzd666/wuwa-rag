@@ -20,7 +20,7 @@ import './ConfirmButton.css'
 /** 待确认态自动解除的毫秒数：再长就开始考验耐心，再短等于没给反悔窗口 */
 const AUTO_DISARM_MS = 4000
 
-export interface ConfirmButtonProps {
+interface ConfirmButtonProps {
   /** 常态文案；纯图标按钮可以不传（此时 `title` 就是它的无障碍名称） */
   label?: ReactNode
   /** 待确认文案：这套交互唯一的提示，必须写清「再点一次」会失去什么 */

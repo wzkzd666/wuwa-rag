@@ -23,7 +23,7 @@ import { feedbackMine } from './api'
  * - 单批有上限：一屏几百条时不把 URL 撑爆，超出的留下一窗口继续发。
  */
 
-export type Rating = 0 | 1 | -1
+type Rating = 0 | 1 | -1
 
 /** 合并窗口：够长到覆盖一次 React 提交，又短到用户感觉不出延迟 */
 const BATCH_WINDOW_MS = 60

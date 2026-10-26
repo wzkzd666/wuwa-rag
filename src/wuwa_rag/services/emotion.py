@@ -56,7 +56,7 @@ EMOTION_TAGS: dict[str, str] = {
 }
 DEFAULT_EMOTION = "cheerful"
 
-# 判定输入的答案长度帽：情绪看开头语气就够了，长答案（满级数值表）整篇喂进去
+# 判定输入的答案长度帽：情绪看开头语气就够了，长答案（技能数值表）整篇喂进去
 # 既慢又容易被大段数字带偏成 serious。
 _JUDGE_MAX_CHARS = 600
 

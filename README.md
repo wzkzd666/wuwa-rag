@@ -564,7 +564,7 @@ uv run python scripts/check_layers.py    # 架构分层守卫（方向违规 / �
 
 上面这三件事（外加前端 `tsc --noEmit && vite build`）已经由 `.github/workflows/ci.yml` 在每次
 push / PR 上跑：runner **不起 docker、不要 GPU**——正因为测试是全量离线的才敢这么配。
-本地复核口径见 `AGENTS.md`「测试套件」一节（含「把五个外部服务指向不可达端口仍 453 通过」那条实测）。
+本地复核口径见 `AGENTS.md`「测试套件」一节（全量离线，不依赖任何外部服务）。
 
 `tests/` 是回归基线，**不依赖 PG / Neo4j / Redis / Chroma / Ollama / 网络**——
 容器没起也能跑，所以它可以当提交门禁用（不会因为环境没起来而「假失败」）。

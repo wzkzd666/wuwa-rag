@@ -568,7 +568,7 @@ async def verify_node(state: RagState) -> dict:
             updates["search_query"] = refined
             updates |= await _rescan(refined, state.get("characters"))
         ok = await _refresh_and_wait(chars, setting.REFRESH_WAIT_TIMEOUT)
-        updates["verify_stage"] = "refreshed" if ok else _retry_or_web(state, refined)
+        updates["verify_stage"] = "refreshed" if ok else _retry_or_web(state)
         if updates["verify_stage"] != "refreshed":
             updates["retry_count"] = setting.VERIFY_MAX_RETRY  # 刷新失败不再耗额度
         return updates
@@ -591,7 +591,7 @@ def _web_available() -> bool:
     return bool(get_settings().QIANFAN_API_KEY.strip())
 
 
-def _retry_or_web(state: RagState, refined: str) -> str:
+def _retry_or_web(state: RagState) -> str:
     """重检索后仍不匹配（或刷新失败）的下一级：还有 web 额度走 web，否则收口。"""
     if state.get("retry_count", 0) + 1 < setting.VERIFY_MAX_RETRY:
         return "retrieval"
@@ -644,7 +644,7 @@ def _after_verify(state: RagState) -> str:
     return "generate"
 
 
-# ───────────── 满级数值表 / 突破材料表：确定性补料 ─────────────
+# ───────────── 技能数值表 / 突破材料表：确定性补料 ─────────────
 # 为什么不靠向量召回拿这两类材料：
 #   技能数值表是 11 列宽表（等级 | Lv 1 … Lv 10），突破材料每块只有 70~90 字，
 #   在 bge-reranker 眼里都赢不过大段机制描述——实测问「共鸣解放伤害倍率」时
@@ -653,20 +653,60 @@ def _after_verify(state: RagState) -> str:
 #   取到之后**在 Python 里替模型读表**：把「满级列」和材料格解析成成对条目再喂进去。
 #   8B 模型读 11 列宽表会串列（实测把 Lv7 读数读成中文数字），替它读比让它读可靠。
 _SKILL_TABS = ("常态攻击", "共鸣技能", "共鸣回路", "共鸣解放", "变奏技能", "延奏技能", "谐度破坏")
+# 用户口语 -> wiki 页签名。只收**明确指向某一个页签**的说法（「大招」指共鸣解放），
+# 「技能」这类泛称不在表里：它由 `slots` 含「技能」触发，页签靠检索命中兜底
+# （见 `_skill_value_block`），泛称映射到某个页签反而会改变原有选择。
+# 别名一律小写，匹配时问句先 `lower()`（「E技能」与「e技能」都要命中）。
+_SKILL_TAB_ALIASES = {
+    "常态攻击": ("普攻", "普通攻击", "平a"),
+    "共鸣技能": ("小技能", "战技", "e技能"),
+    "共鸣解放": ("大招", "r技能"),
+    "共鸣回路": ("回路",),
+    "变奏技能": ("变奏",),
+    "延奏技能": ("延奏",),
+    "谐度破坏": ("谐度",),
+}
+# 技能等级：技能本身 1~10 级。`角色80级` 这类数字属于角色等级，取到范围外一律忽略
+# （不夹到 10，否则「80级需要什么」会被当成点名满级技能）。
+_RE_LV_TAG = re.compile(r"lv\s*(\d{1,2})", re.IGNORECASE)
+_RE_LEVEL_CN = re.compile(r"(\d{1,2})\s*级")
 # 材料表的触发判据收在 `nlu.is_material_question`（那里写明了为什么它比
 # `SLOT_PATTERNS["突破材料"]` 窄）。以前这里另有一份正则，实测与槽位口径 8 条里错 5 条。
 # 声骸/武器走确定性补料时，认领这两个槽位（组件名本身不写死，由 `chunks.component` 决定）
 _ECHO_SLOTS = ("声骸", "武器")
 _MATERIAL_ITEM_RE = re.compile(r"([\u4e00-\u9fa5A-Za-z·]+?)\s*[x×](\d+)")
 _SEP_CELL_RE = re.compile(r"^[-:\s]*$")
-_LEVEL_CELL_RE = re.compile(r"^L?V?\.?\d+$")          # 表头的 LV.2 / Lv 3 之类
+# 材料表里的等级标签（`LV.2` / `Lv 3`）：整格就是等级，按它跳过而不是当材料名。
+_LEVEL_CELL_RE = re.compile(r"^l?v?\.?\s*\d+$", re.IGNORECASE)
+# 带级号的等级表头（`Lv 10` / `LV.10` / `lv10`）：取级号用于定位列。
+_RE_LV_CELL = re.compile(r"^lv\.?\s*(\d+)$", re.IGNORECASE)
 _STAGE_ORDER = ("一阶突破", "二阶突破", "三阶突破", "四阶突破", "五阶突破", "六阶突破")
+# 技能数值表的表头首格是行名列，材料表的首格本身就是等级（LV.2），据此区分两张表。
+_LEVEL_HEADER_LABELS = ("等级", "技能等级")
+_PLACEHOLDER_VALUES = frozenset({"[图]"})             # 图标占位，不是数值
+
+
+def _table_line(line: str) -> str | None:
+    """markdown 表格行 -> 以 `|` 开头的那一段；非表格行返回 None。
+
+    wiki 会把前置说明与表头挤在同一行（`**技能数据**| 等级 | Lv 1 | … |`），
+    所以「不以 `|` 开头」不等于「不是表格」：只要从某个 `|` 起到行尾是完整表格，
+    就从那里切出来。纯文字行（不含 `|`，或不以 `|` 收尾）仍然返回 None。
+    """
+    s = line.strip()
+    if "|" not in s:
+        return None
+    if not s.startswith("|"):
+        if not s.endswith("|"):
+            return None
+        s = s[s.find("|"):]
+    return s
 
 
 def _split_cells(line: str) -> list[str] | None:
     """markdown 表格行 -> 单元格；分隔行/占位表头/非表格行返回 None。"""
-    s = line.strip()
-    if not s.startswith("|"):
+    s = _table_line(line)
+    if s is None:
         return None
     cells = [c.strip() for c in s.strip("|").split("|")]
     if all(_SEP_CELL_RE.match(c) for c in cells):       # | --- | --- |
@@ -676,28 +716,104 @@ def _split_cells(line: str) -> list[str] | None:
     return cells
 
 
-def _max_level_rows(text: str) -> list[tuple[str, str]]:
-    """从技能数值表里抽 (行名, 满级值)，原样照抄不做任何换算。
+def _level_header_pos(cells: list[str], level: int) -> tuple[int, int] | None:
+    """技能数值表表头 -> (指定等级所在列, 表宽)；不是等级表头返回 None。
 
-    只认表头里独立成格的「Lv 10」：技能突破材料表的表头是「LV.2…LV.10」（带点、
-    且没有 Lv 1），不会被误判成倍率表。非表格行会让表头失效，避免跨表串列。
+    两条判据：① 首格是行名列（`等级` / `技能等级` / `名称` 一类，且本身**不是**
+    等级标签）；② 行内有独立成格的 `Lv N`（允许 `Lv.N`，wiki 两种写法都有）。
+    技能突破材料表的首格就是 `LV.2`，没有行名列，因此不会被当成倍率表——这正是
+    旧判据「任一格等于 Lv N 即表头」会误吃的那张表。
+    """
+    if len(cells) < 3 or _LEVEL_CELL_RE.match(cells[0]):
+        return None
+    col = next((i for i, c in enumerate(cells)
+                if (m := _RE_LV_CELL.match(c)) and int(m.group(1)) == level), None)
+    return (col, len(cells)) if col is not None else None
+
+
+def _named_tabs(sq: str) -> list[str]:
+    """问句里点名的技能页签（含口语别名），按 `_SKILL_TABS` 顺序返回。"""
+    low = sq.lower()
+    out: list[str] = []
+    for tab in _SKILL_TABS:
+        if tab in sq or any(a in low for a in _SKILL_TAB_ALIASES.get(tab, ())):
+            out.append(tab)
+    return out
+
+
+def _requested_skill_level(sq: str) -> int:
+    """问句点名的技能等级（1~10）；没点名、或只提到角色等级时返回满级 10。"""
+    for pattern in (_RE_LV_TAG, _RE_LEVEL_CN):
+        for m in pattern.finditer(sq):
+            v = int(m.group(1))
+            if 1 <= v <= 10:
+                return v
+    return 10
+
+
+def _max_level_rows(text: str, level: int = 10) -> list[tuple[str, str]]:
+    """从技能数值表里抽 (行名, 指定等级的值)，原样照抄不做任何换算。
+
+    默认取满级列（level=10）。表头判据见 `_level_header_pos`：首格必须是行名列，
+    所以技能突破材料表（首格就是 LV.2）不会被误判成倍率表。非表格行会让表头失效，
+    避免跨表串列；`[图]` 是图标占位，不是数值，跳过。
     """
     rows: list[tuple[str, str]] = []
     col = -1
     for line in text.splitlines():
         cells = _split_cells(line)
         if cells is None:
-            if not line.strip().startswith("|"):
+            if _table_line(line) is None:
                 col = -1
             continue
-        if "Lv 10" in cells:                 # 表头（重复出现的表头也在此重定位）
-            col = cells.index("Lv 10")
+        pos = _level_header_pos(cells, level)
+        if pos is not None:                   # 表头（重复出现的表头也在此重定位）
+            col = pos[0]
             continue
         if col < 0 or len(cells) <= col:
             continue
         name, val = cells[0], cells[col]
-        if name and val:
+        if name and val and val not in _PLACEHOLDER_VALUES:
             rows.append((name, val))
+    return rows
+
+
+def _fragment_level_rows(texts: list[str], level: int = 10) -> list[tuple[str, str]]:
+    """把同一页签的多个分块拼回一张等级表，抽指定等级那一列。
+
+    分块会把 11 列的宽表切成几段，只有含表头的那一段能独立定位列号；后续碎片以
+    面包屑 + 占位表头（`| 列1 | 列2 |`）开头，同一个页签只按碎片逐块解析会丢掉这些行
+    （实测卡卡罗共鸣技能因此只剩 1 行）。这里先在全部碎片里找一次表头，再按**表宽**
+    从每块收集数据行，无表头的碎片也能拼回原表。
+
+    找不到表头时退回逐块解析（`_max_level_rows` 自己的判据）；表宽不一致的窄表
+    （属性表、强化小表）不会混进来。
+    """
+    pos = None
+    for text in texts:
+        for line in text.splitlines():
+            cells = _split_cells(line)
+            if cells is None:
+                continue
+            pos = _level_header_pos(cells, level)
+            if pos is not None:
+                break
+        if pos is not None:
+            break
+    if pos is None:
+        return [row for text in texts for row in _max_level_rows(text, level)]
+    col, width = pos
+    rows: list[tuple[str, str]] = []
+    for text in texts:
+        for line in text.splitlines():
+            cells = _split_cells(line)
+            if cells is None or len(cells) != width:
+                continue
+            if _level_header_pos(cells, level) is not None or cells[0] in _LEVEL_HEADER_LABELS:
+                continue
+            name, val = cells[0], cells[col]
+            if name and val and val not in _PLACEHOLDER_VALUES:
+                rows.append((name, val))
     return rows
 
 
@@ -727,7 +843,7 @@ def _max_level_material(text: str) -> list[str]:
     这张表把 9 个等级并排，模型直接照抄会把 9 档材料拼成一张混在一起的清单
     （实测「中频×3、低频×3、全频×4…贝币×100000」全糊成一团，语义失真），
     所以只取最后一格。两种块形都要吃：
-      · 带「LV.10」表头的 9 列表 —— 直接按表头定位满级列；
+      · 带等级表头（`LV.10` / `Lv 10`）的 9 列表 —— 直接按表头定位满级列；
       · 占位表头（| 列1 | 列2 |）下直接铺 9 格的那种（实测常态攻击就是这形状）——
         没有等级表头，只能按「最长的一行 = 分等级展开行」兜底，
         2 格的强化小表（高频隧花声核x3 | 贝币x50000）因此被排除。
@@ -738,11 +854,13 @@ def _max_level_material(text: str) -> list[str]:
     for line in text.splitlines():
         cells = _split_cells(line)
         if cells is None:
-            if not line.strip().startswith("|"):
+            if _table_line(line) is None:
                 col = -1
             continue
-        if "LV.10" in cells:
-            col = cells.index("LV.10")
+        lv_cols = [(i, int(m.group(1))) for i, c in enumerate(cells)
+                   if (m := _RE_LV_CELL.match(c))]
+        if lv_cols:
+            col = next((i for i, lv in lv_cols if lv == 10), -1)
             continue
         if col >= 0 and len(cells) > col and cells[col]:
             tail = cells[col]
@@ -755,8 +873,12 @@ def _max_level_material(text: str) -> list[str]:
     return [f"{n}×{q}" for n, q in found] if found else [cell]
 
 
-async def _skill_value_block(char: str, sq: str, docs: list[dict]) -> str:
-    """技能数值表 -> 满级(Lv 10)数值块；取不到返回空串。"""
+async def _skill_value_block(char: str, sq: str, docs: list[dict],
+                             level: int = 10, multi: bool = False) -> str:
+    """技能数值表 -> 指定等级（默认满级 Lv 10）的数值块；取不到返回空串。
+
+    `multi` 为真表示本轮补了多个角色：块标题带上角色名，避免两张表混成一张。
+    """
     chunks = await _run_io(fetch_chunks, char, "技能介绍")
     if not chunks:
         return ""
@@ -764,16 +886,18 @@ async def _skill_value_block(char: str, sq: str, docs: list[dict]) -> str:
         {(d.get("tab") or "").strip() for d in chunks if (d.get("tab") or "").strip()},
         key=lambda t: _SKILL_TABS.index(t) if t in _SKILL_TABS else len(_SKILL_TABS),
     )
-    # 优先按问句点名的技能页签；没点名（只问「技能」）就用本轮检索命中的页签，
-    # 命中顺序即重排得分顺序，天然是「最相关的那两个技能」；检索也没命中
-    # （问句只写了「技能」二字、召回的块不含技能介绍页）时兜底到两个主力页签——
-    # 既然问题已明确在问技能（slots 含「技能」），就给倍率，不放空。
-    picked = [t for t in tabs if t in sq]
+    # 优先按问句点名的技能页签（含「大招」「普攻」这类口语别名）；没点名（只问「技能」）
+    # 就用本轮检索命中的页签，命中顺序即重排得分顺序，天然是「最相关的那两个技能」；
+    # 检索也没命中（问句只写了「技能」二字、召回的块不含技能介绍页）时兜底到两个主力
+    # 页签——既然问题已明确在问技能（slots 含「技能」），就给倍率，不放空。
+    named = _named_tabs(sq)
+    picked = [t for t in tabs if t in named]
     if not picked:
         seen: set[str] = set()
         for d in docs:
             t = d.get("tab") or ""
-            if d.get("component") == "技能介绍" and t in tabs and t not in seen:
+            if (d.get("character") == char and d.get("component") == "技能介绍"
+                    and t in tabs and t not in seen):
                 seen.add(t)
                 picked.append(t)
     if not picked:
@@ -782,26 +906,34 @@ async def _skill_value_block(char: str, sq: str, docs: list[dict]) -> str:
     if not picked:
         return ""
 
-    parts: list[str] = []
-    for tab in picked:
-        rows: dict[str, str] = {}
-        for d in chunks:
-            if (d.get("tab") or "").strip() != tab:
-                continue
-            for name, val in _max_level_rows(chunk_text(d)):
+    def _collect(lv: int) -> list[str]:
+        out: list[str] = []
+        for tab in picked:
+            texts = [chunk_text(d) for d in chunks if (d.get("tab") or "").strip() == tab]
+            rows: dict[str, str] = {}
+            for name, val in _fragment_level_rows(texts, lv):
                 rows.setdefault(name, val)      # 同名同行去重：分块切开的表拼回来
-        if rows:
-            parts.append(f"### {tab}\n" + "\n".join(f"- {n}：{v}" for n, v in rows.items()))
+            if rows:
+                out.append(f"### {tab}\n" + "\n".join(f"- {n}：{v}" for n, v in rows.items()))
+        return out
+
+    parts = _collect(level)
+    if not parts and level != 10:
+        # 个别页签只有满级一列：退回满级，标题如实写 Lv 10，不拿满级值冒充点名的等级。
+        parts = _collect(10)
+        level = 10
     if not parts:
         return ""
+    lv_label = f"Lv {level}" + (" 满级" if level == 10 else "")
+    title = "## 技能数值表" + (f"·{char}" if multi else "") + f"（{lv_label}，原文照抄）\n"
     return (
-        "## 满级数值表（Lv 10，原文照抄）\n"
-        "（本问必须把下表逐行完整列出：数值与「+」「*」「%」原样保留，不得换算、"
+        title
+        + "（本问必须把下表逐行完整列出：数值与「+」「*」「%」原样保留，不得换算、"
         "不得合并、不得改成中文数字、不得说「记不清」。）\n" + "\n".join(parts)
     )
 
 
-async def _material_block(char: str) -> str:
+async def _material_block(char: str, multi: bool = False) -> str:
     """角色突破材料（一阶~六阶）+ 技能突破材料（满级一档）材料表；取不到返回空串。"""
     chunks = await _run_io(fetch_chunks, char, "角色突破材料")
     by_stage: dict[str, list[str]] = {}
@@ -829,14 +961,15 @@ async def _material_block(char: str) -> str:
     tabs = [t for t in _SKILL_TABS if t in by_tab] + [t for t in by_tab if t not in _SKILL_TABS]
     lines = [f"### {s}\n" + "、".join(by_stage[s]) for s in order]
     lines += [f"- {t}（满级 Lv10 一档）：" + "、".join(by_tab[t]) for t in tabs]
+    title = "## 突破材料表" + (f"·{char}" if multi else "") + "（原文照抄）\n"
     return (
-        "## 突破材料表（原文照抄）\n"
-        "（回答培养/突破问题时必须把下表逐条完整列出，材料名与数量原样保留。）\n"
+        title
+        + "（回答培养/突破问题时必须把下表逐条完整列出，材料名与数量原样保留。）\n"
         + "\n".join(lines)
     )
 
 
-async def _echo_block(char: str, slots: list[str]) -> str:
+async def _echo_block(char: str, slots: list[str], multi: bool = False) -> str:
     """声骸套装 / 武器推荐表（原文照抄）；取不到返回空串。
 
     ⚠️ 组件名**不写死**：wiki 的板块叫什么由数据决定（`chunks.component`），
@@ -865,39 +998,70 @@ async def _echo_block(char: str, slots: list[str]) -> str:
     body = "\n".join(chunk_text(d) for d in chunks if d.get("component") in picked).strip()
     if not body:
         return ""
-    return (
-        "## 声骸 / 武器推荐表（原文照抄）\n"
-        f"（本问只答「{char}」本人的推荐。下表逐行完整列出，套装名与武器名是专有名词、"
-        "逐字照抄（不改字、不换词、不用近义写法），COST 与词条里的数字和符号原样保留。）\n"
-        + body
-    )
+    if multi:
+        lead = (f"（下表是「{char}」本人的推荐。逐行完整列出，套装名与武器名是专有名词、"
+                "逐字照抄（不改字、不换词、不用近义写法），COST 与词条里的数字和符号原样保留。）\n")
+    else:
+        lead = (f"（本问只答「{char}」本人的推荐。下表逐行完整列出，套装名与武器名是专有名词、"
+                "逐字照抄（不改字、不换词、不用近义写法），COST 与词条里的数字和符号原样保留。）\n")
+    title = "## 声骸 / 武器推荐表" + (f"·{char}" if multi else "") + "（原文照抄）\n"
+    return title + lead + body
 
 
 async def _value_blocks(state: RagState) -> list[str]:
-    """按问题类型补「满级数值表 / 突破材料表 / 声骸武器推荐表」。取不到返回空，绝不影响主链路。"""
+    """按问题类型补「技能数值表 / 突破材料表 / 声骸武器推荐表」。取不到返回空，绝不影响主链路。
+
+    最多覆盖 `SUPPLEMENT_MAX_CHARACTERS` 个角色：对比类问句（「卡卡罗和长离的技能倍率」）
+    里第二个角色此前只能靠向量召回，而数值表恰恰是召不回来的那类（见本段开头注释）。
+    超出上限的角色仍走正常检索。
+
+    总长受 `SUPPLEMENT_MAX_CHARS` 约束，按**整块**准入（见内层 `_add`）。
+    """
     chars = state.get("characters") or []
     if not chars:
         return []
     sq = state.get("search_query") or state["question"]
     slots = state.get("slots") or []
+    targets = chars[: setting.SUPPLEMENT_MAX_CHARACTERS]
+    multi = len(targets) > 1
+    level = _requested_skill_level(sq)
     blocks: list[str] = []
+    total = 0
+
+    def _add(block: str, label: str) -> None:
+        """整块准入：放不下就整块跳过，绝不给模型半张表。
+
+        补料不参与 `prompt._fit` 的裁剪（它是确定性数据，裁掉等于退回「靠召回」），
+        所以体积上限只能在这里卡。半张表比没有表更糟：模型会把它当完整数据照抄。
+        """
+        nonlocal total
+        if not block:
+            return
+        if total + len(block) > setting.SUPPLEMENT_MAX_CHARS:
+            log.warning("补料超出 %d 字符上限，整块跳过 %s（本块 %d 字符，已收 %d）",
+                        setting.SUPPLEMENT_MAX_CHARS, label, len(block), total)
+            return
+        blocks.append(block)
+        total += len(block)
+
     try:
-        if "技能" in slots or any(t in sq for t in _SKILL_TABS):
-            b = await _skill_value_block(chars[0], sq, state.get("docs") or [])
-            if b:
-                blocks.append(b)
+        if "技能" in slots or _named_tabs(sq):
+            for char in targets:
+                b = await _skill_value_block(char, sq, state.get("docs") or [],
+                                             level=level, multi=multi)
+                _add(b, f"技能数值表·{char}")
         if is_material_question(sq):
-            b = await _material_block(chars[0])
-            if b:
-                blocks.append(b)
+            for char in targets:
+                b = await _material_block(char, multi=multi)
+                _add(b, f"突破材料表·{char}")
         # 声骸/武器放最后：prompt 里越靠后的块离问句越近（近因位），而问「X 声骸」
         # 时它才是主料；上面两块是次要补充
         if "声骸" in slots or "武器" in slots:
-            b = await _echo_block(chars[0], slots)
-            if b:
-                blocks.append(b)
+            for char in targets:
+                b = await _echo_block(char, slots, multi=multi)
+                _add(b, f"声骸 / 武器推荐表·{char}")
     except Exception as exc:  # noqa: BLE001 —— 补料是增益不是依赖，失败只记日志
-        # ⚠️ 这里刻意保持宽捕获：补料块（满级数值表 / 突破材料表）依赖 Chroma 元数据查询
+        # ⚠️ 这里刻意保持宽捕获：补料块（技能数值表 / 突破材料表）依赖 Chroma 元数据查询
         # + 正则读表，任一环节形态变化都可能抛新异常。它只是让答案更完整，
         # **绝不能**因为它失败就让整轮问答崩掉（用户至少还能拿到检索结果）。
         log.warning("补数值/材料表失败，跳过: %s", exc)
@@ -934,7 +1098,7 @@ async def generate_node(state: RagState):
 
     内部用 llm.astream() 逐 token 生成，同时做复读检测。
     """
-    # 确定性补料：技能问题补满级数值表、培养问题补突破材料表（见 _value_blocks）
+    # 确定性补料：技能问题补技能数值表、培养问题补突破材料表（见 _value_blocks）
     blocks = await _value_blocks(state)
     context = build_context(state, blocks)
     if blocks:

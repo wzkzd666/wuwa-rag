@@ -3,7 +3,7 @@ import './UsagePanel.css'
 
 
 
-export interface DailyPoint {
+interface DailyPoint {
   d: string
   local_prompt: number | null
   local_completion: number | null

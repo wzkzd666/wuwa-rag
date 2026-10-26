@@ -88,11 +88,6 @@ def put_bytes(
     return f"s3://{bucket}/{key}"
 
 
-def get_bytes(bucket: str, key: str) -> bytes:
-    """下载对象，返回 bytes"""
-    return _client().get_object(Bucket=bucket, Key=key)["Body"].read()
-
-
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
